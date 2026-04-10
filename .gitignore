@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Docker / local data
+pgdata/
+
+# Stockfish WASM binaries (copied from npm package at postinstall)
+frontend/public/stockfish/*.js
+frontend/public/stockfish/*.wasm
+!frontend/public/stockfish/README.txt
