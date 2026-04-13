@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+.ruff_cache/
 
 # Node
 node_modules/
@@ -13,13 +14,17 @@ coverage/
 
 # Environment
 .env
+.env.local
+.env.*.local
 
 # IDE
 .idea/
 .vscode/
+.cursor/
 
 # OS
 .DS_Store
+Thumbs.db
 
 # Docker / local data
 pgdata/
