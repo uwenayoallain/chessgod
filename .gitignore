@@ -28,6 +28,7 @@ Thumbs.db
 
 # Docker / local data
 pgdata/
+api.json
 
 # Stockfish WASM binaries (copied from npm package at postinstall)
 frontend/public/stockfish/*.js
