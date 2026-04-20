@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { AnnotationIcon, annotationTitle } from '@/components/ui/annotation-icon'
+import { useActiveReplayLine } from '@/hooks/use-active-replay-line'
 import { useMoveAnnotations } from '@/hooks/use-move-annotations'
 import { useAppStore, type MoveNode } from '@/store/app-store'
 
@@ -100,19 +101,20 @@ export function MoveList({ showHeader = true }: { showHeader?: boolean }) {
   const currentNodeId = useAppStore((state) => state.currentNodeId)
   const mainLine = useAppStore((state) => state.mainLine)
   const jumpToNode = useAppStore((state) => state.jumpToNode)
+  const { nodeIds: activeLineNodeIds } = useActiveReplayLine()
   const annotations = useMoveAnnotations()
 
   const annotationMap = useMemo(() => {
     const map = new Map<string, { label: string | null; cpLoss: number | null; bestMove: string | null }>()
     for (let i = 0; i < annotations.length; i++) {
-      const nodeId = mainLine[i]
+      const nodeId = activeLineNodeIds[i]
       const a = annotations[i]
       if (nodeId && a) {
         map.set(nodeId, { label: a.label, cpLoss: a.cpLoss, bestMove: a.bestMove })
       }
     }
     return map
-  }, [annotations, mainLine])
+  }, [activeLineNodeIds, annotations])
 
   const rootNode = nodes['root']
   const hasAnyMoves = rootNode && rootNode.children.length > 0

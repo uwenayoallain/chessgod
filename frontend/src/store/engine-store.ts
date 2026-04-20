@@ -19,13 +19,15 @@ type AnalyzeOptions = {
   multiPV?: number
 }
 
+type QueueSource = 'interactive' | 'replay'
+
 export type CachedEngineAnalysis = {
   bestMove: string | null
   depth: number
   lines: UCIInfo[]
 }
 
-type QueueItem = { fen: string; depth: number; multiPV: number }
+type QueueItem = { fen: string; depth: number; multiPV: number; source: QueueSource }
 
 type EngineState = {
   enabled: boolean
@@ -41,6 +43,9 @@ type EngineState = {
   analysisByFen: Record<string, CachedEngineAnalysis>
   analysisVersion: number
   engineDepth: number
+  replayQueueActive: boolean
+  replayQueueCompleted: number
+  replayQueueTotal: number
   init: () => Promise<void>
   toggle: () => Promise<void>
   analyzePosition: (fen: string, options?: AnalyzeOptions) => Promise<void>
@@ -52,6 +57,7 @@ type EngineState = {
 let engine: StockfishEngine | null = null
 let analyzeTimer: number | null = null
 let queuedAnalyses: QueueItem[] = []
+let activeQueueItem: QueueItem | null = null
 let activeFen: string | null = null
 let activeLines: UCIInfo[] = []
 let activeDepth = 0
@@ -99,22 +105,28 @@ function enqueueFen(fen: string, options: AnalyzeOptions = {}) {
   const multiPV = options.multiPV ?? BACKGROUND_MULTI_PV
 
   if (!needsEngineAnalysis(cachedAnalysis?.depth ?? null, requestedDepth, options.force)) {
-    return
+    return false
   }
 
   if (activeFen === fen && activeDepth >= requestedDepth) {
-    return
+    return false
   }
 
   queuedAnalyses = queuedAnalyses.filter((q) => q.fen !== fen)
-  const item: QueueItem = { fen, depth: requestedDepth, multiPV }
+  const item: QueueItem = {
+    fen,
+    depth: requestedDepth,
+    multiPV,
+    source: options.priority === 'normal' ? 'replay' : 'interactive',
+  }
 
   if (options.priority === 'high') {
     queuedAnalyses.unshift(item)
-    return
+    return true
   }
 
   queuedAnalyses.push(item)
+  return true
 }
 
 async function processQueue(interrupt = false) {
@@ -141,7 +153,14 @@ async function processQueue(interrupt = false) {
         analysisVersion: s.analysisVersion + 1,
       }))
     }
+    if (activeQueueItem?.source === 'replay') {
+      useEngineStore.setState((s) => ({
+        replayQueueCompleted: Math.min(s.replayQueueTotal, s.replayQueueCompleted + 1),
+        replayQueueActive: s.replayQueueCompleted + 1 < s.replayQueueTotal,
+      }))
+    }
     activeFen = null
+    activeQueueItem = null
     activeLines = []
     activeDepth = 0
     activeGeneration += 1
@@ -153,6 +172,7 @@ async function processQueue(interrupt = false) {
   if (!nextItem) return
 
   activeGeneration += 1
+  activeQueueItem = nextItem
   activeFen = nextItem.fen
   activeLines = []
   activeDepth = 0
@@ -186,7 +206,18 @@ function ensureEngine() {
         return
       }
       if (activeDepth === 0 && activeLines.length === 0) {
+        if (activeQueueItem?.source === 'replay') {
+          useEngineStore.setState((s) => {
+            const replayCompleted = Math.min(s.replayQueueTotal, s.replayQueueCompleted + 1)
+            return {
+              replayQueueCompleted: replayCompleted,
+              replayQueueActive: replayCompleted < s.replayQueueTotal,
+              ...(replayCompleted >= s.replayQueueTotal ? { isAnalyzing: false } : {}),
+            }
+          })
+        }
         activeFen = null
+        activeQueueItem = null
         void processQueue()
         return
       }
@@ -199,35 +230,62 @@ function ensureEngine() {
         lines: activeLines,
       }
 
-      useEngineStore.setState((s) => ({
-        analysisByFen: {
-          ...s.analysisByFen,
-          [completedFen]: completedAnalysis,
-        },
-        analysisVersion: s.analysisVersion + 1,
-        ...(useAppStore.getState().currentFen === completedFen
-          ? {
-              analyzedFen: completedFen,
-              bestMove: completedAnalysis.bestMove,
-              currentDepth: activeDepth,
-              isAnalyzing: false,
-              lines: activeLines,
-            }
-          : {}),
-      }))
+      const completedItem = activeQueueItem
+
+      useEngineStore.setState((s) => {
+        const replayCompleted = completedItem?.source === 'replay'
+          ? Math.min(s.replayQueueTotal, s.replayQueueCompleted + 1)
+          : s.replayQueueCompleted
+        const replayActive = completedItem?.source === 'replay'
+          ? replayCompleted < s.replayQueueTotal
+          : s.replayQueueActive
+
+        return {
+          analysisByFen: {
+            ...s.analysisByFen,
+            [completedFen]: completedAnalysis,
+          },
+          analysisVersion: s.analysisVersion + 1,
+          replayQueueCompleted: replayCompleted,
+          replayQueueActive: replayActive,
+          ...(useAppStore.getState().currentFen === completedFen
+            ? {
+                analyzedFen: completedFen,
+                bestMove: completedAnalysis.bestMove,
+                currentDepth: activeDepth,
+                isAnalyzing: replayActive,
+                lines: activeLines,
+              }
+            : !replayActive
+              ? { isAnalyzing: false }
+              : {}),
+        }
+      })
 
       activeFen = null
+      activeQueueItem = null
       activeLines = []
       activeDepth = 0
       void processQueue()
     },
     onError: (error) => {
+      const replayState = useEngineStore.getState()
+      const replayCompleted = activeQueueItem?.source === 'replay'
+        ? Math.min(replayState.replayQueueTotal, replayState.replayQueueCompleted + 1)
+        : replayState.replayQueueCompleted
+      const replayActive = activeQueueItem?.source === 'replay'
+        ? replayCompleted < replayState.replayQueueTotal
+        : replayState.replayQueueActive
+
       useEngineStore.setState({
         error,
         isLoadingNnue: false,
-        ...(useAppStore.getState().currentFen === activeFen ? { isAnalyzing: false } : {}),
+        replayQueueCompleted: replayCompleted,
+        replayQueueActive: replayActive,
+        ...(!replayActive ? { isAnalyzing: false } : {}),
       })
       activeFen = null
+      activeQueueItem = null
       activeLines = []
       activeDepth = 0
       void processQueue()
@@ -282,43 +340,85 @@ export const useEngineStore = create<EngineState>((set, get) => ({
   isLoadingNnue: false,
   isReady: false,
   lines: [],
+  replayQueueActive: false,
+  replayQueueCompleted: 0,
+  replayQueueTotal: 0,
   init: async () => {
     const currentEngine = ensureEngine()
     await currentEngine.init({ hash: DEFAULT_HASH, threads: getThreadCount() })
   },
   queueReplayAnalysis: async (fens) => {
     queuedAnalyses = []
+    activeQueueItem = null
     activeFen = null
     activeLines = []
     activeDepth = 0
     activeGeneration += 1
 
-    set({ lines: [], bestMove: null, currentDepth: 0, analyzedFen: null, isAnalyzing: true })
+    set({
+      lines: [],
+      bestMove: null,
+      currentDepth: 0,
+      analyzedFen: null,
+      isAnalyzing: true,
+      replayQueueActive: false,
+      replayQueueCompleted: 0,
+      replayQueueTotal: 0,
+    })
 
     const uniqueFens = Array.from(new Set(fens))
+    let enqueuedCount = 0
     for (const fen of uniqueFens) {
-      enqueueFen(fen, { depth: get().engineDepth, multiPV: BACKGROUND_MULTI_PV })
+      const enqueued = enqueueFen(fen, { depth: get().engineDepth, multiPV: BACKGROUND_MULTI_PV, priority: 'normal' })
+      if (enqueued) {
+        enqueuedCount += 1
+      }
     }
+
+    set({
+      replayQueueActive: enqueuedCount > 0,
+      replayQueueCompleted: 0,
+      replayQueueTotal: enqueuedCount,
+    })
+
+    if (enqueuedCount === 0) {
+      set({ isAnalyzing: false })
+      return
+    }
+
     await processQueue()
   },
   stop: () => {
     clearAnalyzeTimer()
     engine?.stop()
     queuedAnalyses = []
+    activeQueueItem = null
     activeFen = null
     activeLines = []
     activeDepth = 0
-    set({ isAnalyzing: false })
+    set({ isAnalyzing: false, replayQueueActive: false, replayQueueCompleted: 0, replayQueueTotal: 0 })
   },
   toggle: async () => {
     if (get().enabled) {
       clearAnalyzeTimer()
       engine?.stop()
       queuedAnalyses = []
+      activeQueueItem = null
       activeFen = null
       activeLines = []
       activeDepth = 0
-      set({ analyzedFen: null, bestMove: null, currentDepth: 0, enabled: false, error: null, isAnalyzing: false, lines: [] })
+      set({
+        analyzedFen: null,
+        bestMove: null,
+        currentDepth: 0,
+        enabled: false,
+        error: null,
+        isAnalyzing: false,
+        lines: [],
+        replayQueueActive: false,
+        replayQueueCompleted: 0,
+        replayQueueTotal: 0,
+      })
       return
     }
     set({ enabled: true, error: null })

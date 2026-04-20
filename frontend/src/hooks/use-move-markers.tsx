@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react'
 
 import { AnnotationIcon, annotationTitle } from '@/components/ui/annotation-icon'
+import { useActiveReplayLine } from '@/hooks/use-active-replay-line'
 import { useMoveAnnotations } from '@/hooks/use-move-annotations'
 import { buildGuidanceArrows, type BoardArrow } from '@/lib/analysis/board-guidance'
 import { buildReplayMoveAnnotations } from '@/lib/analysis/replay-annotations'
@@ -14,9 +15,9 @@ function uciToSquare(uci: string): string {
 
 function useCurrentMoveAnnotation(): ReplayMoveAnnotation | null {
   const mainLineAnnotations = useMoveAnnotations()
+  const { nodeIds: activeLineNodeIds } = useActiveReplayLine()
   const nodes = useAppStore((state) => state.nodes)
   const currentNodeId = useAppStore((state) => state.currentNodeId)
-  const mainLine = useAppStore((state) => state.mainLine)
   const bookPlies = useAppStore((state) => state.bookPlies)
   const hasLoadedLine = useAppStore((state) => state.hasLoadedLine)
   const analysisByFen = useEngineStore((state) => state.analysisByFen)
@@ -26,7 +27,7 @@ function useCurrentMoveAnnotation(): ReplayMoveAnnotation | null {
     const currentNode = nodes[currentNodeId]
     if (!currentNode?.uci || !currentNode?.san) return null
 
-    const mainLineIdx = mainLine.indexOf(currentNodeId)
+    const mainLineIdx = activeLineNodeIds.indexOf(currentNodeId)
     if (mainLineIdx >= 0 && mainLineAnnotations[mainLineIdx]?.label) {
       return mainLineAnnotations[mainLineIdx]
     }
@@ -46,7 +47,7 @@ function useCurrentMoveAnnotation(): ReplayMoveAnnotation | null {
     })
 
     return annotations[0] ?? null
-  }, [mainLineAnnotations, nodes, currentNodeId, mainLine, bookPlies, hasLoadedLine, analysisByFen, _version])
+  }, [mainLineAnnotations, activeLineNodeIds, nodes, currentNodeId, bookPlies, hasLoadedLine, analysisByFen, _version])
 }
 
 export function useMoveMarkers(showAnnotations: boolean = true) {

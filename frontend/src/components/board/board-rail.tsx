@@ -3,8 +3,11 @@ import { type ReactNode, useEffect } from 'react'
 
 import { MoveList } from '@/components/board/move-list'
 import { Button } from '@/components/ui/button'
+import { useActiveReplayLine } from '@/hooks/use-active-replay-line'
 import { useEngine } from '@/hooks/use-engine'
 import { useTrainingMode } from '@/hooks/use-training-mode'
+import { prefetchBookPlies } from '@/lib/analysis/book-moves'
+import { api } from '@/lib/api'
 import { useAppStore } from '@/store/app-store'
 
 export function BoardRail({
@@ -33,13 +36,15 @@ export function BoardRail({
     setTimeClassFilter,
     nodes,
     currentNodeId,
-    replayMoves,
+    replayMoves: loadedReplayMoves,
     analysisRequested,
     setAnalysisRequested,
   } = useAppStore()
+  const setBookPlies = useAppStore((state) => state.setBookPlies)
 
   const training = useTrainingMode()
-  const { analyze } = useEngine()
+  const { analyze, queueReplayAnalysis, enabled } = useEngine()
+  const { fenHistory, replayMoves: activeReplayMoves } = useActiveReplayLine()
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -93,8 +98,51 @@ export function BoardRail({
         <div className="workspace-rail__stack">
           <Button
             onClick={() => {
-              setAnalysisRequested(true)
-              void analyze()
+              const requestFenHistory = [...fenHistory]
+              const requestReplayMoves = [...activeReplayMoves]
+
+              void (async () => {
+                setAnalysisRequested(true)
+                let didWarmStartEngine = false
+
+                if (!enabled) {
+                  await analyze()
+                  didWarmStartEngine = true
+                }
+
+                if (requestFenHistory.length > 1) {
+                  await queueReplayAnalysis(requestFenHistory)
+                } else if (!didWarmStartEngine) {
+                  await analyze()
+                }
+
+                if (!requestReplayMoves.length) {
+                  setBookPlies([])
+                  return
+                }
+
+                void prefetchBookPlies({
+                  fenHistory: requestFenHistory,
+                  fetchTheoryCompare: async (fen) => {
+                    try {
+                      const response = await api.get<{ master_moves: Array<{ san: string; uci?: string | null }> }>('/api/theory/compare', {
+                        params: { fen },
+                      })
+                      return response.data
+                    } catch {
+                      return null
+                    }
+                  },
+                  replayMoves: requestReplayMoves,
+                }).then((result) => {
+                  setBookPlies(result.plies)
+                  if (result.hadErrors) {
+                    console.warn('[chessgod] Book moves partially loaded — theory API returned errors for some positions.')
+                  }
+                }).catch((err) => {
+                  console.warn('[chessgod] Failed to load book moves:', err)
+                })
+              })()
             }}
             type="button"
             variant={analysisRequested ? 'primary' : 'default'}
@@ -105,7 +153,7 @@ export function BoardRail({
         </div>
       </div>
 
-      {replayMoves.length > 0 ? (
+      {loadedReplayMoves.length > 0 ? (
         <div className="workspace-rail__section">
           <div className="workspace-rail__label">Training</div>
           <div className="workspace-rail__stack">
