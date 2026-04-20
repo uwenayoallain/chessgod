@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -15,12 +17,30 @@ from app.services.pgn_parser import ParsedGame
 class LichessExplorerClient:
     def __init__(self, http_client: httpx.AsyncClient):
         self.client = http_client
+        self.base_url = settings.lichess_explorer_url.rstrip("/")
+        self.api_token = settings.lichess_api_token
+        self.request_delay = settings.lichess_request_delay
+        self._request_lock = asyncio.Lock()
+        self._last_request_at: float | None = None
 
     async def get_master_stats(self, fen: str) -> dict:
-        response = await self.client.get(
-            "https://explorer.lichess.ovh/masters",
-            params={"fen": fen, "moves": 12, "topGames": 0, "recentGames": 0},
-        )
+        headers: dict[str, str] = {}
+        if self.api_token:
+            headers["Authorization"] = f"Bearer {self.api_token}"
+
+        async with self._request_lock:
+            if self.request_delay > 0 and self._last_request_at is not None:
+                elapsed = time.monotonic() - self._last_request_at
+                if elapsed < self.request_delay:
+                    await asyncio.sleep(self.request_delay - elapsed)
+
+            response = await self.client.get(
+                f"{self.base_url}/masters",
+                params={"fen": fen, "moves": 12, "topGames": 0, "recentGames": 0},
+                headers=headers or None,
+            )
+            self._last_request_at = time.monotonic()
+
         response.raise_for_status()
         return response.json()
 

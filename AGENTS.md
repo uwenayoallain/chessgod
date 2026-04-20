@@ -1,31 +1,28 @@
-# Repository Guidelines
+# AGENTS.md (OpenCode)
 
-## Project Structure & Module Organization
-`backend/` holds the FastAPI service, SQLAlchemy models, Alembic migrations, and pytest suites. Keep API entrypoints in `backend/app/routers/`, domain logic in `backend/app/services/`, schemas in `backend/app/schemas/`, and utilities in `backend/app/utils/`. Tests live in `backend/tests/` as `test_*.py`.
+## Commands (Source Of Truth)
+- Use the root `Makefile` as the command surface.
+- `make run`: `docker compose up --build` (starts Postgres + backend + frontend).
+- `make test`: runs both suites (`make backend-test` then `make frontend-test`).
+- `make backend-test`: `cd backend && .venv/bin/pytest` (expects local venv).
+- `make frontend-test`: `cd frontend && pnpm test` (Vitest).
+- `make frontend-build`: `cd frontend && pnpm build` (runs `tsc -b` first).
+- `make theory-sync`: seeds/syncs master opening data (`scripts/seed_eco.py --force-sync`).
 
-`frontend/` contains the React + Vite app. Put route pages in `frontend/src/pages/`, reusable UI in `frontend/src/components/`, state in `frontend/src/store/`, hooks in `frontend/src/hooks/`, and helpers in `frontend/src/lib/`. Tests live in `frontend/tests/` and `frontend/src/**` as `*.test.ts`. Stockfish assets are served from `frontend/public/stockfish/`. Use the root `Makefile` as the main command surface.
+## Runtime Wiring / Gotchas
+- Docker backend runs `alembic upgrade head` on container start (`docker-compose.yml`), so DB schema changes must include an Alembic migration.
+- Backend app entrypoint is `backend/app/main.py` (`uvicorn app.main:app`) and it starts a background task that periodically seeds/refreshes “master openings” data.
+- Frontend dev server requires cross-origin isolation for Stockfish (COOP/COEP headers are set in `frontend/vite.config.ts`).
+- Frontend container runs `node scripts/sync-stockfish-assets.mjs` before `pnpm dev`; `frontend/package.json` also runs it on `postinstall`.
+- Stockfish assets live in `frontend/public/stockfish/`.
+- `sf_18_smallnet.{js,wasm}` are copied from `node_modules/@lichess-org/stockfish-web` if missing.
+- `nn-4ca89e4b3abf.nnue` is downloaded at install/startup unless `SKIP_STOCKFISH_NNUE_DOWNLOAD=1`.
 
-## Build, Test, and Development Commands
-Run the full stack with `make run`. This builds and starts PostgreSQL, the backend on `http://localhost:8000`, and the frontend on `http://localhost:5173`.
+## Import Cache Behavior
+- Chess.com imports cache fetched monthly archives in the DB (see `backend/app/services/import_cache.py`).
+- Default behavior re-fetches only the current + previous month; use `POST /api/import/{username}?force=true` to bypass the cache.
 
-Use `make test` to run both suites, `make backend-test` for pytest, `make frontend-test` for Vitest, and `make frontend-build` to verify the bundle. Use `make down` to stop containers and `make logs` to inspect logs.
-
-For local setup, copy `.env.example` to `.env`, create `backend/.venv`, install `backend` with `.[dev]`, then run `pnpm install` in `frontend/`.
-
-## Coding Style & Naming Conventions
-Follow the existing style in each package. Python uses 4-space indentation, type hints, snake_case modules, and focused service/router modules. TypeScript and TSX use 2-space indentation, single quotes, PascalCase for React components, kebab-case file names, and `use-*` naming for hooks.
-
-No dedicated lint or formatter config is checked in, so keep imports tidy and match nearby files.
-
-## Testing Guidelines
-Backend tests use `pytest` and `fastapi.testclient`; frontend tests use `vitest` with `src/**/*.test.ts` and `tests/**/*.test.ts` from `frontend/vitest.config.ts`. Add tests with each change and prefer behavior-focused names such as `test_health_endpoint_returns_ok` or `returns ready when imported games exist`.
-
-Coverage thresholds are not configured, but new API routes, parsing logic, store behavior, and engine helpers should ship with tests.
-
-## Commit & Pull Request Guidelines
-This repository currently has no commit history, so there is no convention to copy yet. Use short imperative commit subjects such as `Add theory comparison caching` and keep each commit scoped to one change.
-
-PRs should include a concise summary, test evidence, linked issues when relevant, and screenshots or recordings for UI changes. Call out schema, env, or asset changes explicitly.
-
-## Security & Configuration Tips
-Do not commit secrets; keep values in `.env`. If you change Stockfish integration, verify the expected files remain under `frontend/public/stockfish/`. For backend data changes, include the Alembic migration and note any import-cache impact in the PR.
+## Where To Look First
+- Backend routers: `backend/app/routers/` (API surface is mounted under `/api` in `backend/app/main.py`).
+- Backend migrations: `backend/alembic/` + `backend/alembic.ini` (reads `DATABASE_URL` from `.env` via `app.config`).
+- Frontend app entry: `frontend/src/main.tsx`.

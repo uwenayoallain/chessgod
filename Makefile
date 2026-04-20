@@ -38,4 +38,4 @@ frontend-build:
 	cd frontend && pnpm build
 
 theory-sync:
-	cd backend && .venv/bin/python ../scripts/seed_eco.py --force-sync
+	cd backend && .venv/bin/alembic upgrade head && .venv/bin/python ../scripts/seed_eco.py --force-sync

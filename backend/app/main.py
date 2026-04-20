@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
+import time
 from contextlib import asynccontextmanager
 from contextlib import suppress
 
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.requests import Request
 
 from app.config import settings
 from app.database import async_session_factory
 from app.routers import analysis, games, health, import_games, theory, tree
 from app.services.master_openings import seed_opening_book, sync_stale_master_data
+from app.services.observability import get_observability_store
 from app.services.theory import LichessExplorerClient
 
 
@@ -28,6 +32,8 @@ async def maintain_master_openings(http_client: httpx.AsyncClient, stop_event: a
                 refreshed = await sync_stale_master_data(
                     session,
                     LichessExplorerClient(http_client),
+                    min_position_games=settings.lichess_sync_min_position_games,
+                    max_positions=settings.lichess_sync_max_positions_per_run,
                 )
                 await session.commit()
                 if seeded or refreshed:
@@ -74,6 +80,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def track_request_metrics(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        get_observability_store().record_backend_request(
+            method=request.method,
+            path=request.url.path,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            request_id=request_id,
+        )
 
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(import_games.router, prefix="/api/import", tags=["import"])

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.config import settings
 from app.models import base
-from app.models import analysis, game, game_position, import_archive, position, position_move  # noqa: F401
+from app.models import analysis, external_sync_state, game, game_position, import_archive, observability_event, position, position_move  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

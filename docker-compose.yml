@@ -21,6 +21,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://chessgod:chessgod@postgres:5432/chessgod}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
+      OBSERVABILITY_RETENTION_DAYS: ${OBSERVABILITY_RETENTION_DAYS:-14}
+      OBSERVABILITY_ADMIN_PASSPHRASE_SHA256: ${OBSERVABILITY_ADMIN_PASSPHRASE_SHA256:-3f665a20748df42949e495a1b363194e5c5ab24b12080232a8ec3263fcb2145e}
     depends_on:
       postgres:
         condition: service_healthy
