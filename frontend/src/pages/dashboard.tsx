@@ -5,6 +5,7 @@ import { ChessBoard } from '@/components/board/chess-board'
 import { WorkspaceTabs } from '@/components/board/workspace-tabs'
 import { DeviationList } from '@/components/analysis/deviation-list'
 import { EngineLines } from '@/components/analysis/engine-lines'
+import { EvaluationProgress } from '@/components/analysis/evaluation-progress'
 import { ColorBreakdown } from '@/components/dashboard/color-breakdown'
 import { StatsOverview } from '@/components/dashboard/stats-overview'
 import { TimeClassChart } from '@/components/dashboard/time-class-chart'
@@ -309,6 +310,7 @@ function Workspace({ username }: { username: string }) {
           ]}
         />
       </div>
+      <EvaluationProgress />
       {status === 'running' ? <ImportProgress /> : null}
     </div>
   )
