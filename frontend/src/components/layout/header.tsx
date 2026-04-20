@@ -69,7 +69,7 @@ export function Header() {
   return (
     <header className="header">
       <div className="header__brand">
-        <div className="header__title">ChessGod</div>
+        <img src="/logo.png" alt="ChessGod" style={{ height: '42px', borderRadius: '4px' }} />
       </div>
 
       <div className="header__actions">
