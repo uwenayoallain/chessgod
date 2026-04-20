@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import csv
+import logging
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import chess
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
+from app.models.external_sync_state import ExternalSyncState
 from app.models.position import Position
 from app.models.position_move import PositionMove
 from app.services.theory import LichessExplorerClient, cache_is_stale, load_moves_for_position, refresh_master_data
@@ -14,6 +19,69 @@ from app.utils.fen import normalize_fen
 
 
 BOOK_TSV_FILES = ("a.tsv", "b.tsv", "c.tsv", "d.tsv", "e.tsv")
+LICHESS_SYNC_PROVIDER = "lichess_opening_explorer"
+
+logger = logging.getLogger(__name__)
+
+
+def _now_utc() -> datetime:
+    return datetime.now(UTC)
+
+
+def _parse_retry_after_seconds(header_value: str | None) -> int | None:
+    if not header_value:
+        return None
+    try:
+        parsed = int(header_value)
+    except ValueError:
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+async def _load_sync_state(session: AsyncSession) -> ExternalSyncState | None:
+    return await session.get(ExternalSyncState, LICHESS_SYNC_PROVIDER)
+
+
+def _is_cooldown_active(state: ExternalSyncState | None) -> bool:
+    if state is None or state.cooldown_until is None:
+        return False
+    cooldown_until = state.cooldown_until
+    if cooldown_until.tzinfo is None:
+        cooldown_until = cooldown_until.replace(tzinfo=UTC)
+    return cooldown_until > _now_utc()
+
+
+async def _set_cooldown(
+    session: AsyncSession,
+    *,
+    status_code: int,
+    error: str,
+    duration_seconds: int,
+) -> None:
+    state = await _load_sync_state(session)
+    cooldown_until = _now_utc() + timedelta(seconds=max(duration_seconds, 1))
+    if state is None:
+        state = ExternalSyncState(provider=LICHESS_SYNC_PROVIDER)
+        session.add(state)
+
+    state.cooldown_until = cooldown_until
+    state.last_status_code = status_code
+    state.last_error = error
+    state.updated_at = _now_utc()
+    await session.flush()
+
+
+async def _clear_cooldown(session: AsyncSession) -> None:
+    state = await _load_sync_state(session)
+    if state is None:
+        return
+    state.cooldown_until = None
+    state.last_status_code = None
+    state.last_error = None
+    state.updated_at = _now_utc()
+    await session.flush()
 
 
 def opening_data_dir() -> Path:
@@ -163,10 +231,31 @@ async def sync_stale_master_data(
     *,
     force: bool = False,
     batch_size: int = 50,
+    min_position_games: int = 0,
+    max_positions: int | None = None,
 ) -> int:
-    position_result = await session.execute(
-        select(Position).join(PositionMove, PositionMove.from_position_id == Position.id).distinct()
+    sync_state = await _load_sync_state(session)
+    if _is_cooldown_active(sync_state):
+        logger.info(
+            "Skipping master opening sync during cooldown",
+            extra={
+                "cooldown_until": sync_state.cooldown_until.isoformat() if sync_state and sync_state.cooldown_until else None,
+                "last_status_code": sync_state.last_status_code if sync_state else None,
+            },
+        )
+        return 0
+
+    position_query = (
+        select(Position)
+        .join(PositionMove, PositionMove.from_position_id == Position.id)
+        .where(Position.total_games >= min_position_games)
+        .order_by(Position.total_games.desc(), Position.id.asc())
+        .distinct()
     )
+    if max_positions is not None and max_positions > 0:
+        position_query = position_query.limit(max_positions)
+
+    position_result = await session.execute(position_query)
     refreshed = 0
 
     for position in position_result.scalars().all():
@@ -177,8 +266,47 @@ async def sync_stale_master_data(
         if not moves:
             continue
 
-        await refresh_master_data(session, client, position, moves)
+        try:
+            await refresh_master_data(session, client, position, moves)
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if exc.response is not None and exc.response.status_code in {401, 403}:
+                await _set_cooldown(
+                    session,
+                    status_code=exc.response.status_code,
+                    error="authorization",
+                    duration_seconds=settings.lichess_sync_cooldown_auth_minutes * 60,
+                )
+                logger.warning(
+                    "Skipping master opening sync after authorization error",
+                    extra={"status_code": exc.response.status_code, "fen": position.fen},
+                )
+                break
+            if status_code == 429:
+                retry_after_seconds = _parse_retry_after_seconds(exc.response.headers.get("Retry-After") if exc.response else None)
+                cooldown_seconds = max(
+                    settings.lichess_sync_cooldown_rate_limit_seconds,
+                    retry_after_seconds or 0,
+                )
+                await _set_cooldown(
+                    session,
+                    status_code=status_code,
+                    error="rate_limit",
+                    duration_seconds=cooldown_seconds,
+                )
+                logger.warning(
+                    "Stopping master opening sync after rate limit response",
+                    extra={
+                        "status_code": status_code,
+                        "retry_after": exc.response.headers.get("Retry-After") if exc.response else None,
+                        "fen": position.fen,
+                    },
+                )
+                break
+            raise
         refreshed += 1
+        if refreshed == 1:
+            await _clear_cooldown(session)
 
         if refreshed % batch_size == 0:
             await session.commit()

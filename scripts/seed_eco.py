@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.database import async_session_factory  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.services.master_openings import seed_opening_book, sync_stale_master_data  # noqa: E402
 from app.services.theory import LichessExplorerClient  # noqa: E402
 
@@ -31,6 +32,8 @@ async def run(force_sync: bool) -> None:
                 session,
                 LichessExplorerClient(http_client),
                 force=force_sync,
+                min_position_games=settings.lichess_sync_min_position_games,
+                max_positions=settings.lichess_sync_max_positions_per_run,
             )
             await session.commit()
 
