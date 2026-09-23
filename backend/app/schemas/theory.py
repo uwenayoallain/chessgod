@@ -119,3 +119,23 @@ class TrainingLineOut(BaseModel):
     opening_name: str
     source_game_id: int
     moves: list[TrainingMoveOut]
+
+
+class QuizMoveOut(BaseModel):
+    uci: str
+    san: str
+    count: int
+    share: float
+
+
+class OpeningQuizPositionOut(BaseModel):
+    position_id: int
+    fen: str
+    ply: int
+    side_to_move: str
+    occurrences: int
+    opening_name: str | None = None
+    last_move_uci: str | None = None
+    user_moves: list[QuizMoveOut]
+    book_moves: list[QuizMoveOut]
+    usual_move_in_book: bool

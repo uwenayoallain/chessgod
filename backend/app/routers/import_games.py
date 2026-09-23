@@ -285,6 +285,8 @@ async def run_import(username: str, request: Request, force: bool = False, *, jo
                     await get_shared_cache().delete_prefix(f"famstats:{username}:")
                     # Deviations read every player's positions, so one import stales them all.
                     await get_shared_cache().delete_prefix("deviations:")
+                    await get_shared_cache().delete_prefix(f"opening-quiz:{username}:")
+                    await get_shared_cache().delete_prefix(f"opening-quiz-last:{username}:")
                     await get_shared_cache().delete_prefix(f"recurrent-opening-pairs:v1:{username}:")
                     await get_shared_cache().delete_prefix(f"opening-recurrence:v1:{username}:")
                 else:

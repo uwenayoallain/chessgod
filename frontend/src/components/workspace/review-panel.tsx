@@ -5,6 +5,7 @@ import { StatsOverview } from '@/components/dashboard/stats-overview'
 import { TimeClassChart } from '@/components/dashboard/time-class-chart'
 import { TopOpenings } from '@/components/dashboard/top-openings'
 import { ImprovementTrainer } from '@/components/improvement/improvement-trainer'
+import { OpeningQuiz } from '@/components/openings/opening-quiz'
 import { DeviationTable } from '@/components/theory/deviation-table'
 import { EngineAnalyzeBatch } from '@/components/theory/engine-analyze-batch'
 import { FamilyBrowser } from '@/components/theory/family-browser'
@@ -169,6 +170,20 @@ export function ReviewPanel({
         timeClass={timeClass}
         username={username}
       />
+
+      <CollapsibleSection
+        defaultOpen={false}
+        description="Your own opening positions, asked against the master book"
+        id="review-opening-quiz"
+        title="Opening Quiz"
+      >
+        <OpeningQuiz
+          color={color}
+          onBegin={onBeginDrill}
+          timeClass={timeClass}
+          username={username}
+        />
+      </CollapsibleSection>
 
       <CollapsibleSection
         defaultOpen={false}

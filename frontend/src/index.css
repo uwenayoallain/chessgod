@@ -6872,3 +6872,105 @@ body {
   background: color-mix(in srgb, var(--danger) 80%, transparent);
   color: #fff;
 }
+
+/* Opening quiz. Neutral like the drills; green only for the primary action. */
+.opening-quiz {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.opening-quiz__intro,
+.opening-quiz__headline,
+.opening-quiz__question,
+.opening-quiz__prompt,
+.opening-quiz__usual {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.opening-quiz__meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.opening-quiz__answer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-faint);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.opening-quiz__answer[data-kind='main'],
+.opening-quiz__answer[data-kind='book'] {
+  border-left-color: var(--accent);
+}
+
+.opening-quiz__answer[data-kind='off-book'] {
+  border-left-color: var(--danger);
+}
+
+.opening-quiz__verdict {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.opening-quiz__verdict svg {
+  flex: none;
+  margin-top: 0.15rem;
+}
+
+.opening-quiz__book {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.opening-quiz__book li {
+  display: grid;
+  grid-template-columns: 3.2rem 1fr 2.6rem;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.opening-quiz__san {
+  font-weight: 700;
+}
+
+.opening-quiz__bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.opening-quiz__bar span {
+  display: block;
+  height: 100%;
+  background: var(--text-muted);
+}
+
+.opening-quiz__book span.muted {
+  text-align: right;
+}
+
+.opening-quiz__actions {
+  display: flex;
+  gap: 0.5rem;
+}

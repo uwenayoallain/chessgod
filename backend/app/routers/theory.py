@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from typing import Annotated
 
 from datetime import UTC
@@ -16,6 +17,7 @@ from app.models.opening_family import OpeningFamily
 from app.models.position import Position
 from app.models.position_move import PositionMove
 from app.schemas.theory import (
+    OpeningQuizPositionOut,
     DeviationOut,
     FamilyDetailOut,
     FamilySummaryOut,
@@ -55,6 +57,7 @@ from app.services.theory import (
 )
 from app.services.common_book import get_common_book_moves
 from app.services.swr import stale_while_revalidate
+from app.services.opening_quiz import build_opening_quiz
 
 router = APIRouter()
 
@@ -558,6 +561,34 @@ async def theory_eco(
     if not opening:
         raise HTTPException(status_code=404, detail="Opening not found")
     return {"eco": opening.get("eco"), "name": opening.get("name")}
+
+
+@router.get("/opening-quiz", response_model=list[OpeningQuizPositionOut])
+async def theory_opening_quiz(
+    username: str = Query(..., min_length=1, max_length=64),
+    color: str = Query("both", pattern="^(white|black|both)$"),
+    time_class: str | None = None,
+    limit: int = Query(12, ge=1, le=50),
+    session: AsyncSession = Depends(get_db),
+) -> list[OpeningQuizPositionOut]:
+    """The player's own opening positions, asked against the master book."""
+    suffix = f"{username}:{color}:{time_class}:{limit}"
+
+    async def compute(db: AsyncSession) -> list[dict]:
+        quiz = await build_opening_quiz(
+            db, username=username, color=color, time_class=time_class, limit=limit
+        )
+        return [asdict(item) for item in quiz]
+
+    # ~0.35s to build and only an import changes it (imports drop both copies).
+    payload = await stale_while_revalidate(
+        session,
+        fresh_base=f"opening-quiz:{suffix}",
+        last_key=f"opening-quiz-last:{suffix}",
+        compute=compute,
+        fresh_ttl=3_600.0,
+    )
+    return [OpeningQuizPositionOut.model_validate(item) for item in payload]
 
 
 @router.get("/training-line", response_model=TrainingLineOut)
