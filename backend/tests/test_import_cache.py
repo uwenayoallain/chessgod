@@ -1,7 +1,9 @@
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.base import Base
+from app.models.import_archive import ImportArchive
 from app.services.import_cache import mark_archive_cached, should_fetch_archive
 
 
@@ -38,7 +40,7 @@ async def test_cached_archive_skips_refetch_unless_forced() -> None:
     archive_url = "https://api.chess.com/pub/player/hikaru/games/2024/03"
 
     async with session_factory() as session:
-        record = await mark_archive_cached(
+        await mark_archive_cached(
             session,
             username="hikaru",
             archive_url=archive_url,
@@ -46,9 +48,19 @@ async def test_cached_archive_skips_refetch_unless_forced() -> None:
         )
         await session.commit()
 
-        assert record.games_in_archive == 87
+        cached = await session.scalar(
+            select(ImportArchive).where(ImportArchive.archive_url == archive_url)
+        )
+        assert cached is not None and cached.games_in_archive == 87
         assert not await should_fetch_archive(session, "hikaru", archive_url)
         assert await should_fetch_archive(session, "hikaru", archive_url, force=True)
+        cached.ownership_version = 0
+        await session.flush()
+        assert await should_fetch_archive(session, "HIKARU", archive_url)
+        await mark_archive_cached(session, "HIKARU", archive_url, 87)
+        await session.commit()
+        assert not await should_fetch_archive(session, "HIKARU", archive_url)
+        assert len(list(await session.scalars(select(ImportArchive)))) == 1
 
     await engine.dispose()
 

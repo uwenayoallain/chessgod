@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -11,7 +13,8 @@ from app.models.position import Position
 from app.models.position_move import PositionMove
 from app.schemas.game import GameListOut, GameOut
 from app.schemas.tree import MoveOut, TreeNodeOut
-from app.services.common_book import is_common_book_move
+from app.services.common_book import common_book_move_keys
+from app.services.game_scope import time_class_condition
 
 router = APIRouter()
 
@@ -30,83 +33,119 @@ async def get_position_tree(
             fen=fen, total_games=0, white_wins=0, draws=0, black_wins=0, moves=[]
         )
 
-    game_filters = [GamePosition.position_id == position.id]
-    game_attr_filters: list = []
+    game_join_filters = []
     if color != "both":
-        game_filters.append(Game.user_color == color)
-        game_attr_filters.append(Game.user_color == color)
-    if time_class:
-        game_filters.append(Game.time_class == time_class)
-        game_attr_filters.append(Game.time_class == time_class)
+        game_join_filters.append(Game.user_color == color)
+    time_filter = time_class_condition(Game.time_class, time_class)
+    if time_filter is not None:
+        game_join_filters.append(time_filter)
 
-    game_ids_query = (
-        select(GamePosition.game_id)
-        .join(Game, Game.id == GamePosition.game_id)
-        .where(*game_filters)
-    )
-    game_ids_result = await session.execute(game_ids_query)
-    game_ids = game_ids_result.scalars().all()
+    # Fast path: when there are no per-game filters, tree_builder keeps
+    # Position.total_games / white_wins / draws / black_wins accurate via
+    # upsert, so we skip both aggregate JOIN queries entirely.
+    if not game_join_filters:
+        total_games = position.total_games or 0
+        white_wins = position.white_wins or 0
+        draws = position.draws or 0
+        black_wins = position.black_wins or 0
+        if not total_games:
+            return TreeNodeOut(fen=position.fen, total_games=0, white_wins=0, draws=0, black_wins=0, moves=[])
 
-    if not game_ids:
+        book_ucis, book_sans = await asyncio.to_thread(common_book_move_keys, position.fen)
+        fast_rows = await session.execute(
+            select(PositionMove, Position.fen)
+            .join(Position, Position.id == PositionMove.to_position_id)
+            .where(PositionMove.from_position_id == position.id, PositionMove.game_count > 0)
+            .order_by(PositionMove.game_count.desc(), PositionMove.move_san.asc())
+            .limit(60)
+        )
+        moves = [
+            MoveOut(
+                san=m.move_san,
+                uci=m.move_uci,
+                game_count=m.game_count,
+                white_wins=m.white_wins,
+                draws=m.draws,
+                black_wins=m.black_wins,
+                avg_opponent_rating=m.avg_opponent_rating,
+                resulting_fen=resulting_fen,
+                is_book_move=bool(m.master_game_count)
+                or m.move_uci in book_ucis
+                or m.move_san in book_sans,
+                master_game_count=m.master_game_count,
+                master_white_wins=m.master_white_wins,
+                master_draws=m.master_draws,
+                master_black_wins=m.master_black_wins,
+            )
+            for m, resulting_fen in fast_rows.all()
+        ]
+        moves.sort(key=lambda row: (-row.game_count, row.san))
         return TreeNodeOut(
-            fen=position.fen,
-            total_games=0,
-            white_wins=0,
-            draws=0,
-            black_wins=0,
-            moves=[],
+            fen=position.fen, total_games=total_games,
+            white_wins=white_wins, draws=draws, black_wins=black_wins, moves=moves,
         )
 
-    game_rows = await session.execute(select(Game).where(Game.id.in_(game_ids)))
-    games = list(game_rows.scalars().all())
-    total_games = len(games)
-    white_wins = sum(1 for game in games if game.result == "1-0")
-    draws = sum(1 for game in games if game.result == "1/2-1/2")
-    black_wins = sum(1 for game in games if game.result == "0-1")
+    # Filtered path (color or time_class specified): aggregate from games.
+    stats_row = await session.execute(
+        select(
+            func.count(Game.id),
+            func.sum(case((Game.result == "1-0", 1), else_=0)),
+            func.sum(case((Game.result == "1/2-1/2", 1), else_=0)),
+            func.sum(case((Game.result == "0-1", 1), else_=0)),
+        )
+        .select_from(GamePosition)
+        .join(Game, Game.id == GamePosition.game_id)
+        .where(GamePosition.position_id == position.id, *game_join_filters)
+    )
+    total_games, white_wins, draws, black_wins = stats_row.one()
+
+    if not total_games:
+        return TreeNodeOut(fen=position.fen, total_games=0, white_wins=0, draws=0, black_wins=0, moves=[])
 
     move_rows = await session.execute(
-        select(PositionMove, Position.fen)
+        select(
+            PositionMove,
+            Position.fen,
+            func.count(Game.id),
+            func.sum(case((Game.result == "1-0", 1), else_=0)),
+            func.sum(case((Game.result == "1/2-1/2", 1), else_=0)),
+            func.sum(case((Game.result == "0-1", 1), else_=0)),
+        )
         .join(Position, Position.id == PositionMove.to_position_id)
+        .outerjoin(
+            GamePosition,
+            and_(
+                GamePosition.position_id == PositionMove.to_position_id,
+                GamePosition.move_uci == PositionMove.move_uci,
+                GamePosition.ply == PositionMove.move_number,
+            ),
+        )
+        .outerjoin(Game, and_(Game.id == GamePosition.game_id, *game_join_filters))
         .where(PositionMove.from_position_id == position.id)
+        .group_by(PositionMove.id, Position.fen)
         .order_by(PositionMove.game_count.desc(), PositionMove.move_san.asc())
+        .limit(60)
     )
 
-    moves: list[MoveOut] = []
-    for move, resulting_fen in move_rows.all():
-        move_game_ids_result = await session.execute(
-            select(GamePosition.game_id)
-            .join(Game, Game.id == GamePosition.game_id)
-            .where(
-                GamePosition.position_id == move.to_position_id,
-                GamePosition.move_uci == move.move_uci,
-                GamePosition.ply == move.move_number,
-                *game_attr_filters,
-            )
-        )
-        move_game_ids = move_game_ids_result.scalars().all()
-        if not move_game_ids:
+    book_ucis, book_sans = await asyncio.to_thread(common_book_move_keys, position.fen)
+    moves = []
+    for move, resulting_fen, move_total, move_white_wins, move_draws, move_black_wins in move_rows.all():
+        if not move_total:
             continue
-
-        move_games = await session.execute(
-            select(Game).where(Game.id.in_(move_game_ids))
-        )
-        move_game_rows = list(move_games.scalars().all())
-        move_white_wins = sum(1 for game in move_game_rows if game.result == "1-0")
-        move_draws = sum(1 for game in move_game_rows if game.result == "1/2-1/2")
-        move_black_wins = sum(1 for game in move_game_rows if game.result == "0-1")
 
         moves.append(
             MoveOut(
                 san=move.move_san,
                 uci=move.move_uci,
-                game_count=len(move_game_rows),
-                white_wins=move_white_wins,
-                draws=move_draws,
-                black_wins=move_black_wins,
+                game_count=move_total,
+                white_wins=move_white_wins or 0,
+                draws=move_draws or 0,
+                black_wins=move_black_wins or 0,
                 avg_opponent_rating=move.avg_opponent_rating,
                 resulting_fen=resulting_fen,
                 is_book_move=bool(move.master_game_count)
-                or is_common_book_move(position.fen, move.move_uci, move.move_san),
+                or move.move_uci in book_ucis
+                or move.move_san in book_sans,
                 master_game_count=move.master_game_count,
                 master_white_wins=move.master_white_wins,
                 master_draws=move.master_draws,
@@ -119,9 +158,9 @@ async def get_position_tree(
     return TreeNodeOut(
         fen=position.fen,
         total_games=total_games,
-        white_wins=white_wins,
-        draws=draws,
-        black_wins=black_wins,
+        white_wins=white_wins or 0,
+        draws=draws or 0,
+        black_wins=black_wins or 0,
         moves=moves,
     )
 

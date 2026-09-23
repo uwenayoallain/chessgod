@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import hmac
 import json
-from collections import defaultdict, deque
+import re
+from collections import OrderedDict, defaultdict, deque
 from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Any
@@ -19,6 +21,30 @@ MAX_FRONTEND_EVENTS_PER_REQUEST = 100
 MAX_RECENT_BACKEND_ERRORS = 100
 MAX_RECENT_FRONTEND_EVENTS = 200
 MAX_ROUTE_SNAPSHOT = 50
+MAX_RECENT_SLOW_REQUESTS = 100
+MAX_RECENT_SLOW_QUERIES = 100
+MAX_QUERY_TEMPLATES = 50
+MAX_EXTERNAL_CALL_KEYS = 50
+ROUTE_SAMPLE_WINDOW = 256
+QUERY_SAMPLE_WINDOW = 128
+EXTERNAL_SAMPLE_WINDOW = 128
+ENGINE_SAMPLE_WINDOW = 128
+MINUTE_BUCKETS = 60
+LAG_SAMPLES = 30
+
+# Request paths that prove a machine is running, never that a person is here.
+# The healthcheck fires every few seconds for the life of the container, and
+# the crawler holds the other two open for days on an empty desk.
+MACHINE_REQUEST_PREFIXES = (
+    "/api/health",
+    "/api/games/unanalyzed-fens",
+    "/api/analysis/evaluations",
+)
+
+
+_query_count_var: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "_chessgod_query_count", default=None
+)
 
 
 def _now_utc() -> datetime:
@@ -27,6 +53,10 @@ def _now_utc() -> datetime:
 
 def _iso(ts: datetime) -> str:
     return ts.isoformat()
+
+
+def _floor_minute(ts: datetime) -> datetime:
+    return ts.replace(second=0, microsecond=0)
 
 
 def _normalize_str(value: Any, *, max_len: int) -> str | None:
@@ -57,6 +87,63 @@ def _hash_passphrase(passphrase: str) -> str:
     return hashlib.sha256(passphrase.encode("utf-8")).hexdigest()
 
 
+_QUERY_TEMPLATE_WS_RE = re.compile(r"\s+")
+_QUERY_TEMPLATE_LEADING_COMMENT_RE = re.compile(r"^\s*(?:--[^\n]*\n|/\*.*?\*/)\s*", re.DOTALL)
+
+
+def normalize_query_template(statement: str | None, *, max_len: int = 120) -> str:
+    if not statement:
+        return "<empty>"
+    text = str(statement)
+    while True:
+        new = _QUERY_TEMPLATE_LEADING_COMMENT_RE.sub("", text, count=1)
+        if new == text:
+            break
+        text = new
+    text = _QUERY_TEMPLATE_WS_RE.sub(" ", text).strip()
+    if not text:
+        return "<empty>"
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
+
+
+def _percentiles(samples: list[float]) -> dict[str, float]:
+    if not samples:
+        return {"p50": 0.0, "p95": 0.0, "p99": 0.0}
+    sorted_samples = sorted(samples)
+
+    def pct(p: float) -> float:
+        if len(sorted_samples) == 1:
+            return sorted_samples[0]
+        k = (len(sorted_samples) - 1) * p
+        f = int(k)
+        c = min(f + 1, len(sorted_samples) - 1)
+        if f == c:
+            return sorted_samples[f]
+        return sorted_samples[f] + (k - f) * (sorted_samples[c] - sorted_samples[f])
+
+    return {
+        "p50": round(pct(0.50), 2),
+        "p95": round(pct(0.95), 2),
+        "p99": round(pct(0.99), 2),
+    }
+
+
+def _status_bucket(status_code: int | None) -> str | None:
+    if status_code is None:
+        return None
+    if 200 <= status_code < 300:
+        return "2xx"
+    if 300 <= status_code < 400:
+        return "3xx"
+    if 400 <= status_code < 500:
+        return "4xx"
+    if 500 <= status_code < 600:
+        return "5xx"
+    return None
+
+
 class ObservabilityStore:
     def __init__(self) -> None:
         self._lock = Lock()
@@ -64,8 +151,49 @@ class ObservabilityStore:
         self._persist_queue: deque[dict[str, Any]] = deque(maxlen=20000)
 
         self._backend_total_requests = 0
+        # Seeded with the start time rather than None so a restart in the
+        # middle of a session keeps warming; an unattended box falls quiet on
+        # its own once the window passes with nobody asking for anything.
+        self._last_interactive_request_at = self._started_at
         self._backend_routes: dict[str, dict[str, Any]] = {}
         self._backend_recent_errors: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_BACKEND_ERRORS)
+        self._recent_slow_requests: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_SLOW_REQUESTS)
+
+        self._query_stats: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._recent_slow_queries: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_SLOW_QUERIES)
+
+        self._external_calls: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._external_state: dict[str, Any] = {}
+
+        self._inflight = 0
+        self._max_inflight = 0
+
+        self._minute_buckets: deque[dict[str, Any]] = deque(maxlen=MINUTE_BUCKETS)
+
+        self._background_tasks: dict[str, dict[str, Any]] = {}
+
+        self._engine_metrics: dict[str, Any] = {
+            "samples": deque(maxlen=ENGINE_SAMPLE_WINDOW),
+            "last_depth": None,
+            "last_nps": None,
+            "last_queue_depth": None,
+            "last_multi_pv": None,
+            "last_seen_at": None,
+            "errors": 0,
+            "completions": 0,
+        }
+
+        self._event_loop_lag_ms: float | None = None
+        self._event_loop_lag_sampled_at: str | None = None
+        self._event_loop_lag_samples: deque[float] = deque(maxlen=LAG_SAMPLES)
+
+        self._process_metrics: dict[str, Any] = {
+            "rss_mb": None,
+            "cpu_percent": None,
+            "sampled_at": None,
+        }
+
+        self._pool_stats: dict[str, Any] = {}
 
         self._frontend_total_events = 0
         self._frontend_by_kind: dict[str, int] = defaultdict(int)
@@ -80,6 +208,61 @@ class ObservabilityStore:
             return False
         return hmac.compare_digest(_hash_passphrase(passphrase.strip()), configured_hash)
 
+    # ---- request-scoped query counter ---------------------------------
+
+    @staticmethod
+    def begin_request_query_counter() -> contextvars.Token:
+        return _query_count_var.set([0])
+
+    @staticmethod
+    def end_request_query_counter(token: contextvars.Token) -> int:
+        counter = _query_count_var.get()
+        count = counter[0] if counter else 0
+        _query_count_var.reset(token)
+        return count
+
+    @staticmethod
+    def increment_request_query_counter() -> None:
+        counter = _query_count_var.get()
+        if counter is not None:
+            counter[0] += 1
+
+    # ---- inflight gauge -----------------------------------------------
+
+    def inflight_increment(self) -> None:
+        with self._lock:
+            self._inflight += 1
+            if self._inflight > self._max_inflight:
+                self._max_inflight = self._inflight
+
+    def inflight_decrement(self) -> None:
+        with self._lock:
+            if self._inflight > 0:
+                self._inflight -= 1
+
+    # ---- backend request recording ------------------------------------
+
+    def note_interactive_request(self, path: str) -> None:
+        """Record that a *person* asked for something, if this path is one.
+
+        Machine traffic is excluded, because the whole point of the signal is
+        to tell an unattended box from one somebody is looking at. The docker
+        healthcheck runs every few seconds forever, and the crawler's queue and
+        upload endpoints run for days at a stretch with nobody there -- reading
+        any of those as presence would mean the warmup never stops, which is
+        the state this was written to end.
+        """
+        if any(path.startswith(prefix) for prefix in MACHINE_REQUEST_PREFIXES):
+            return
+        with self._lock:
+            self._last_interactive_request_at = _now_utc()
+
+    def seconds_since_interactive_request(self) -> float:
+        """How long since a person last asked this backend for anything."""
+        with self._lock:
+            last = self._last_interactive_request_at
+        return max(0.0, (_now_utc() - last).total_seconds())
+
     def record_backend_request(
         self,
         *,
@@ -88,9 +271,14 @@ class ObservabilityStore:
         status_code: int,
         duration_ms: float,
         request_id: str,
+        query_count: int = 0,
     ) -> None:
         key = f"{method.upper()} {path}"
         now = _now_utc()
+        bucket = _status_bucket(status_code)
+        n_plus_one_threshold = settings.observability_n_plus_one_threshold
+        slow_threshold = settings.observability_slow_request_ms
+        is_high_query = query_count >= n_plus_one_threshold
 
         with self._lock:
             self._backend_total_requests += 1
@@ -108,7 +296,12 @@ class ObservabilityStore:
                     "last_status_code": None,
                     "last_duration_ms": 0.0,
                     "last_seen_at": None,
+                    "last_query_count": 0,
+                    "max_query_count": 0,
+                    "high_query_count_total": 0,
                     "_total_duration_ms": 0.0,
+                    "_samples": deque(maxlen=ROUTE_SAMPLE_WINDOW),
+                    "_status_buckets": defaultdict(int),
                 }
                 self._backend_routes[key] = route
 
@@ -119,6 +312,14 @@ class ObservabilityStore:
             route["last_status_code"] = status_code
             route["last_duration_ms"] = round(duration_ms, 2)
             route["last_seen_at"] = _iso(now)
+            route["last_query_count"] = query_count
+            if query_count > route["max_query_count"]:
+                route["max_query_count"] = query_count
+            if is_high_query:
+                route["high_query_count_total"] += 1
+            route["_samples"].append(duration_ms)
+            if bucket is not None:
+                route["_status_buckets"][bucket] += 1
 
             if status_code >= 500:
                 route["errors"] += 1
@@ -132,6 +333,22 @@ class ObservabilityStore:
                         "duration_ms": round(duration_ms, 2),
                     }
                 )
+
+            if duration_ms >= slow_threshold or is_high_query:
+                self._recent_slow_requests.appendleft(
+                    {
+                        "ts": _iso(now),
+                        "request_id": request_id,
+                        "method": method.upper(),
+                        "path": path,
+                        "status_code": status_code,
+                        "duration_ms": round(duration_ms, 2),
+                        "query_count": query_count,
+                        "high_query_count": is_high_query,
+                    }
+                )
+
+            self._roll_minute_bucket_locked(now, duration_ms, status_code >= 500)
 
             self._persist_queue.append(
                 {
@@ -149,6 +366,243 @@ class ObservabilityStore:
                     "meta": None,
                 }
             )
+
+    def _roll_minute_bucket_locked(self, now: datetime, duration_ms: float, is_error: bool) -> None:
+        minute = _floor_minute(now)
+        if not self._minute_buckets or self._minute_buckets[-1]["minute"] != minute:
+            self._minute_buckets.append(
+                {
+                    "minute": minute,
+                    "requests": 0,
+                    "errors": 0,
+                    "_durations": deque(maxlen=512),
+                }
+            )
+        bucket = self._minute_buckets[-1]
+        bucket["requests"] += 1
+        if is_error:
+            bucket["errors"] += 1
+        bucket["_durations"].append(duration_ms)
+
+    # ---- query timing -------------------------------------------------
+
+    def record_query(self, statement: str | None, duration_ms: float) -> None:
+        template = normalize_query_template(statement)
+        slow_threshold = settings.observability_slow_query_ms
+        now = _now_utc()
+        with self._lock:
+            stats = self._query_stats.get(template)
+            if stats is None:
+                stats = {
+                    "template": template,
+                    "count": 0,
+                    "total_ms": 0.0,
+                    "max_ms": 0.0,
+                    "_samples": deque(maxlen=QUERY_SAMPLE_WINDOW),
+                    "last_seen_at": None,
+                }
+                self._query_stats[template] = stats
+                if len(self._query_stats) > MAX_QUERY_TEMPLATES:
+                    self._query_stats.popitem(last=False)
+            else:
+                self._query_stats.move_to_end(template)
+
+            stats["count"] += 1
+            stats["total_ms"] += duration_ms
+            if duration_ms > stats["max_ms"]:
+                stats["max_ms"] = duration_ms
+            stats["_samples"].append(duration_ms)
+            stats["last_seen_at"] = _iso(now)
+
+            if duration_ms >= slow_threshold:
+                self._recent_slow_queries.appendleft(
+                    {
+                        "ts": _iso(now),
+                        "template": template,
+                        "duration_ms": round(duration_ms, 2),
+                    }
+                )
+
+    # ---- external call timing ----------------------------------------
+
+    def record_external_call(
+        self,
+        *,
+        service: str,
+        operation: str,
+        duration_ms: float,
+        ok: bool,
+        status_code: int | None = None,
+    ) -> None:
+        key = f"{service} {operation}".strip()
+        now = _now_utc()
+        with self._lock:
+            stats = self._external_calls.get(key)
+            if stats is None:
+                stats = {
+                    "service": service,
+                    "operation": operation,
+                    "count": 0,
+                    "errors": 0,
+                    "total_ms": 0.0,
+                    "max_ms": 0.0,
+                    "_samples": deque(maxlen=EXTERNAL_SAMPLE_WINDOW),
+                    "last_seen_at": None,
+                    "last_status_code": None,
+                }
+                self._external_calls[key] = stats
+                if len(self._external_calls) > MAX_EXTERNAL_CALL_KEYS:
+                    self._external_calls.popitem(last=False)
+            else:
+                self._external_calls.move_to_end(key)
+
+            stats["count"] += 1
+            stats["total_ms"] += duration_ms
+            stats["_samples"].append(duration_ms)
+            if duration_ms > stats["max_ms"]:
+                stats["max_ms"] = duration_ms
+            stats["last_seen_at"] = _iso(now)
+            stats["last_status_code"] = status_code
+            if not ok:
+                stats["errors"] += 1
+
+    def update_external_state(self, service: str, state: dict[str, Any] | None) -> None:
+        with self._lock:
+            if state is None:
+                self._external_state.pop(service, None)
+            else:
+                self._external_state[service] = state
+
+    # ---- background task health --------------------------------------
+
+    def record_background_task(
+        self,
+        name: str,
+        *,
+        started_at: datetime,
+        finished_at: datetime,
+        error: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        duration_ms = (finished_at - started_at).total_seconds() * 1000.0
+        with self._lock:
+            entry = self._background_tasks.get(name)
+            if entry is None:
+                entry = {"name": name, "run_count": 0, "error_count": 0}
+                self._background_tasks[name] = entry
+            entry["run_count"] += 1
+            entry["last_started_at"] = _iso(started_at)
+            entry["last_finished_at"] = _iso(finished_at)
+            entry["last_duration_ms"] = round(duration_ms, 2)
+            entry["last_status"] = "error" if error else "ok"
+            entry["last_error"] = error
+            entry["last_meta"] = meta
+            if error:
+                entry["error_count"] += 1
+            self._persist_queue.append(
+                {
+                    "source": "backend",
+                    "kind": "background_task",
+                    "name": name,
+                    "severity": "error" if error else "info",
+                    "request_id": None,
+                    "method": None,
+                    "path": None,
+                    "status_code": None,
+                    "duration_ms": round(duration_ms, 2),
+                    "message": error,
+                    "url": None,
+                    "meta": _normalize_meta(meta),
+                }
+            )
+
+    # ---- engine metrics ----------------------------------------------
+
+    def _record_engine_event_locked(
+        self,
+        *,
+        name: str,
+        severity: str,
+        duration_ms: float | None,
+        meta: dict[str, Any] | None,
+        ts: datetime,
+    ) -> None:
+        if name == "engine_error" or severity == "error":
+            self._engine_metrics["errors"] += 1
+        if duration_ms is not None and duration_ms >= 0:
+            self._engine_metrics["samples"].append(duration_ms)
+            self._engine_metrics["completions"] += 1
+        if meta:
+            for key, attr in (
+                ("depth", "last_depth"),
+                ("nps", "last_nps"),
+                ("queue_depth", "last_queue_depth"),
+                ("multi_pv", "last_multi_pv"),
+            ):
+                value = meta.get(key)
+                if isinstance(value, (int, float)):
+                    self._engine_metrics[attr] = value
+        self._engine_metrics["last_seen_at"] = _iso(ts)
+
+    def record_engine_event(
+        self,
+        *,
+        name: str,
+        severity: str = "info",
+        duration_ms: float | None = None,
+        meta: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> None:
+        now = _now_utc()
+        normalized_meta = _normalize_meta(meta)
+        with self._lock:
+            self._record_engine_event_locked(
+                name=name,
+                severity=severity,
+                duration_ms=duration_ms,
+                meta=normalized_meta,
+                ts=now,
+            )
+            self._persist_queue.append(
+                {
+                    "source": "backend",
+                    "kind": "engine",
+                    "name": name,
+                    "severity": severity,
+                    "request_id": None,
+                    "method": None,
+                    "path": None,
+                    "status_code": None,
+                    "duration_ms": round(duration_ms, 2) if duration_ms is not None else None,
+                    "message": message,
+                    "url": None,
+                    "meta": normalized_meta,
+                }
+            )
+
+    # ---- system samplers ---------------------------------------------
+
+    def update_event_loop_lag(self, sample_ms: float) -> None:
+        with self._lock:
+            self._event_loop_lag_samples.append(sample_ms)
+            if self._event_loop_lag_samples:
+                avg = sum(self._event_loop_lag_samples) / len(self._event_loop_lag_samples)
+                self._event_loop_lag_ms = round(avg, 3)
+                self._event_loop_lag_sampled_at = _iso(_now_utc())
+
+    def update_process_metrics(self, *, rss_mb: float | None, cpu_percent: float | None) -> None:
+        with self._lock:
+            self._process_metrics = {
+                "rss_mb": round(rss_mb, 2) if rss_mb is not None else None,
+                "cpu_percent": round(cpu_percent, 2) if cpu_percent is not None else None,
+                "sampled_at": _iso(_now_utc()),
+            }
+
+    def update_pool_stats(self, stats: dict[str, Any]) -> None:
+        with self._lock:
+            self._pool_stats = dict(stats)
+
+    # ---- frontend ingest ---------------------------------------------
 
     def ingest_frontend_events(self, events: list[dict[str, Any]]) -> int:
         accepted = 0
@@ -186,8 +640,10 @@ class ObservabilityStore:
                     event["meta"] = meta
 
                 duration = raw_event.get("duration_ms")
+                duration_value: float | None = None
                 if isinstance(duration, (int, float)) and duration >= 0:
-                    event["duration_ms"] = round(float(duration), 2)
+                    duration_value = round(float(duration), 2)
+                    event["duration_ms"] = duration_value
 
                 status_code = raw_event.get("status_code")
                 if isinstance(status_code, int):
@@ -201,6 +657,15 @@ class ObservabilityStore:
                 self._frontend_by_severity[severity] += 1
                 self._frontend_recent.appendleft(event)
 
+                if kind == "engine":
+                    self._record_engine_event_locked(
+                        name=name,
+                        severity=severity,
+                        duration_ms=duration_value,
+                        meta=meta,
+                        ts=now,
+                    )
+
                 self._persist_queue.append(
                     {
                         "source": "frontend",
@@ -211,7 +676,7 @@ class ObservabilityStore:
                         "method": None,
                         "path": None,
                         "status_code": status_code if isinstance(status_code, int) else None,
-                        "duration_ms": round(float(duration), 2) if isinstance(duration, (int, float)) and duration >= 0 else None,
+                        "duration_ms": duration_value,
                         "message": message,
                         "url": url,
                         "meta": {
@@ -239,12 +704,17 @@ class ObservabilityStore:
         await self.persist_events(session, pending)
         return len(pending)
 
+    # ---- snapshot -----------------------------------------------------
+
     def runtime_snapshot(self) -> dict[str, Any]:
         with self._lock:
             uptime_seconds = int((_now_utc() - self._started_at).total_seconds())
 
-            routes = []
+            routes: list[dict[str, Any]] = []
             for route in self._backend_routes.values():
+                samples = list(route["_samples"])
+                pcts = _percentiles(samples)
+                status_buckets = dict(route["_status_buckets"])
                 routes.append(
                     {
                         "method": route["method"],
@@ -253,12 +723,104 @@ class ObservabilityStore:
                         "errors": route["errors"],
                         "avg_duration_ms": route["avg_duration_ms"],
                         "max_duration_ms": route["max_duration_ms"],
+                        "p50_duration_ms": pcts["p50"],
+                        "p95_duration_ms": pcts["p95"],
+                        "p99_duration_ms": pcts["p99"],
                         "last_status_code": route["last_status_code"],
                         "last_duration_ms": route["last_duration_ms"],
                         "last_seen_at": route["last_seen_at"],
+                        "last_query_count": route["last_query_count"],
+                        "max_query_count": route["max_query_count"],
+                        "high_query_count_total": route["high_query_count_total"],
+                        "status_buckets": status_buckets,
                     }
                 )
             routes.sort(key=lambda item: item["count"], reverse=True)
+
+            queries: list[dict[str, Any]] = []
+            for stats in self._query_stats.values():
+                samples = list(stats["_samples"])
+                pcts = _percentiles(samples)
+                count = stats["count"] or 1
+                queries.append(
+                    {
+                        "template": stats["template"],
+                        "count": stats["count"],
+                        "total_ms": round(stats["total_ms"], 2),
+                        "avg_ms": round(stats["total_ms"] / count, 2),
+                        "max_ms": round(stats["max_ms"], 2),
+                        "p50_ms": pcts["p50"],
+                        "p95_ms": pcts["p95"],
+                        "p99_ms": pcts["p99"],
+                        "last_seen_at": stats["last_seen_at"],
+                    }
+                )
+            queries.sort(key=lambda item: item["total_ms"], reverse=True)
+
+            external: list[dict[str, Any]] = []
+            for stats in self._external_calls.values():
+                samples = list(stats["_samples"])
+                pcts = _percentiles(samples)
+                count = stats["count"] or 1
+                error_rate = stats["errors"] / count if count else 0.0
+                external.append(
+                    {
+                        "service": stats["service"],
+                        "operation": stats["operation"],
+                        "count": stats["count"],
+                        "errors": stats["errors"],
+                        "error_rate": round(error_rate, 4),
+                        "avg_ms": round(stats["total_ms"] / count, 2),
+                        "max_ms": round(stats["max_ms"], 2),
+                        "p50_ms": pcts["p50"],
+                        "p95_ms": pcts["p95"],
+                        "p99_ms": pcts["p99"],
+                        "last_seen_at": stats["last_seen_at"],
+                        "last_status_code": stats["last_status_code"],
+                    }
+                )
+            external.sort(key=lambda item: item["count"], reverse=True)
+
+            minute_series: list[dict[str, Any]] = []
+            buckets_by_minute = {bucket["minute"]: bucket for bucket in self._minute_buckets}
+            now_minute = _floor_minute(_now_utc())
+            window_start = now_minute - timedelta(minutes=MINUTE_BUCKETS - 1)
+            cursor = window_start
+            while cursor <= now_minute:
+                bucket = buckets_by_minute.get(cursor)
+                if bucket is not None:
+                    durations = list(bucket["_durations"])
+                    pcts = _percentiles(durations)
+                    minute_series.append(
+                        {
+                            "minute": _iso(cursor),
+                            "requests": bucket["requests"],
+                            "errors": bucket["errors"],
+                            "p95_ms": pcts["p95"],
+                        }
+                    )
+                else:
+                    minute_series.append(
+                        {"minute": _iso(cursor), "requests": 0, "errors": 0, "p95_ms": 0.0}
+                    )
+                cursor = cursor + timedelta(minutes=1)
+
+            engine_samples = list(self._engine_metrics["samples"])
+            engine_pcts = _percentiles(engine_samples)
+            engine_count = len(engine_samples) or 1
+            engine_payload = {
+                "completions": self._engine_metrics["completions"],
+                "errors": self._engine_metrics["errors"],
+                "avg_duration_ms": round(sum(engine_samples) / engine_count, 2) if engine_samples else 0.0,
+                "p50_duration_ms": engine_pcts["p50"],
+                "p95_duration_ms": engine_pcts["p95"],
+                "p99_duration_ms": engine_pcts["p99"],
+                "last_depth": self._engine_metrics["last_depth"],
+                "last_nps": self._engine_metrics["last_nps"],
+                "last_queue_depth": self._engine_metrics["last_queue_depth"],
+                "last_multi_pv": self._engine_metrics["last_multi_pv"],
+                "last_seen_at": self._engine_metrics["last_seen_at"],
+            }
 
             return {
                 "uptime_seconds": uptime_seconds,
@@ -266,6 +828,26 @@ class ObservabilityStore:
                     "total_requests": self._backend_total_requests,
                     "routes": routes[:MAX_ROUTE_SNAPSHOT],
                     "recent_errors": list(self._backend_recent_errors),
+                    "slow_requests": list(self._recent_slow_requests),
+                    "inflight": self._inflight,
+                    "max_inflight": self._max_inflight,
+                },
+                "queries": {
+                    "templates": queries,
+                    "slow_recent": list(self._recent_slow_queries),
+                },
+                "external_calls": {
+                    "calls": external,
+                    "state": dict(self._external_state),
+                },
+                "minute_series": minute_series,
+                "background_tasks": list(self._background_tasks.values()),
+                "engine": engine_payload,
+                "system": {
+                    "event_loop_lag_ms": self._event_loop_lag_ms,
+                    "event_loop_lag_sampled_at": self._event_loop_lag_sampled_at,
+                    "process": dict(self._process_metrics),
+                    "db_pool": dict(self._pool_stats),
                 },
                 "frontend": {
                     "total_events": self._frontend_total_events,
@@ -324,18 +906,27 @@ class ObservabilityStore:
                 pass
             return 0
 
-    async def persistent_snapshot(self, session: AsyncSession) -> dict[str, Any]:
+    async def persistent_snapshot(
+        self,
+        session: AsyncSession,
+        *,
+        events_limit: int = MAX_RECENT_FRONTEND_EVENTS,
+        events_offset: int = 0,
+    ) -> dict[str, Any]:
         try:
             now = _now_utc()
             five_minutes_ago = now - timedelta(minutes=5)
             one_hour_ago = now - timedelta(hours=1)
+            events_limit = max(1, min(events_limit, 500))
+            events_offset = max(0, events_offset)
 
             total_events = await session.scalar(select(func.count()).select_from(ObservabilityEvent))
 
             recent_stmt = (
                 select(ObservabilityEvent)
                 .order_by(ObservabilityEvent.created_at.desc(), ObservabilityEvent.id.desc())
-                .limit(MAX_RECENT_FRONTEND_EVENTS)
+                .offset(events_offset)
+                .limit(events_limit)
             )
             recent_events = list((await session.execute(recent_stmt)).scalars().all())
 
@@ -385,7 +976,7 @@ class ObservabilityStore:
                 .where(
                     ObservabilityEvent.source == "backend",
                     ObservabilityEvent.kind == "request",
-                    ObservabilityEvent.duration_ms >= 1000,
+                    ObservabilityEvent.duration_ms >= settings.observability_slow_request_ms,
                     ObservabilityEvent.created_at >= one_hour_ago,
                 )
             )
@@ -398,10 +989,38 @@ class ObservabilityStore:
             source_counts = {
                 source: count for source, count in (await session.execute(source_counts_stmt)).all()
             }
+            background_events_stmt = (
+                select(ObservabilityEvent)
+                .where(ObservabilityEvent.kind == "background_task")
+                .order_by(ObservabilityEvent.created_at.desc(), ObservabilityEvent.id.desc())
+                .limit(1000)
+            )
+            background_tasks: dict[str, dict[str, Any]] = {}
+            for event in (await session.execute(background_events_stmt)).scalars().all():
+                task = background_tasks.get(event.name)
+                if task is None:
+                    task = {
+                        "name": event.name,
+                        "run_count": 0,
+                        "error_count": 0,
+                        "last_started_at": None,
+                        "last_finished_at": _iso(event.created_at if event.created_at.tzinfo else event.created_at.replace(tzinfo=UTC)),
+                        "last_duration_ms": event.duration_ms,
+                        "last_status": "error" if event.severity == "error" else "ok",
+                        "last_error": event.message,
+                        "last_meta": self._safe_load_meta(event.metadata_json),
+                    }
+                    background_tasks[event.name] = task
+                task["run_count"] += 1
+                if event.severity == "error":
+                    task["error_count"] += 1
 
             return {
                 "total_events": int(total_events or 0),
+                "recent_events_limit": events_limit,
+                "recent_events_offset": events_offset,
                 "events_by_source": source_counts,
+                "background_tasks": list(background_tasks.values()),
                 "alerts": {
                     "backend_5xx_last_5m": int(backend_5xx_5m or 0),
                     "frontend_errors_last_5m": int(frontend_errors_5m or 0),
@@ -416,7 +1035,10 @@ class ObservabilityStore:
                 pass
             return {
                 "total_events": 0,
+                "recent_events_limit": events_limit,
+                "recent_events_offset": events_offset,
                 "events_by_source": {},
+                "background_tasks": [],
                 "alerts": {
                     "backend_5xx_last_5m": 0,
                     "frontend_errors_last_5m": 0,

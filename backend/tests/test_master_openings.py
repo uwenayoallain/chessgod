@@ -62,6 +62,54 @@ SYNC_PROVIDER = "lichess_opening_explorer"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["connection", "timeout", "503"])
+async def test_interrupted_sync_preserves_completed_work_and_retries_after_cooldown(failure):
+    from app.services.master_openings import seconds_until_sync_retry
+
+    class InterruptedClient(FakeExplorerClient):
+        async def get_master_stats(self, fen):
+            if not self.calls:
+                return await super().get_master_stats(fen)
+            request = httpx.Request("GET", "https://explorer.lichess.ovh/masters")
+            if failure == "503":
+                response = httpx.Response(503, headers={"Retry-After": "120"}, request=request)
+                raise httpx.HTTPStatusError("Unavailable", request=request, response=response)
+            error = httpx.ConnectError if failure == "connection" else httpx.ReadTimeout
+            raise error("Offline", request=request)
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            for idx in (1, 2, 3):
+                session.add(Position(id=idx, fen=f"position-{idx}", total_games=4-idx,
+                                     white_wins=0, draws=0, black_wins=0))
+            for idx in (1, 2):
+                session.add(PositionMove(from_position_id=idx, to_position_id=idx+1,
+                    move_san="e4", move_uci="e2e4", move_number=idx, is_white_move=True,
+                    game_count=1, white_wins=0, draws=0, black_wins=0))
+            await session.commit()
+            assert await sync_stale_master_data(session, InterruptedClient()) == 1
+            await session.commit()
+        async with sessions() as session:
+            assert (await session.get(Position, 1)).master_total == 20
+            assert (await session.get(Position, 2)).master_fetched_at is None
+            assert await seconds_until_sync_retry(session) > 0
+            healthy = FakeExplorerClient()
+            assert await sync_stale_master_data(session, healthy) == 0
+            assert healthy.calls == []
+            state = await session.get(ExternalSyncState, SYNC_PROVIDER)
+            state.cooldown_until = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+            assert await sync_stale_master_data(session, healthy) == 1
+            assert healthy.calls == ["position-2"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_seed_opening_book_populates_positions_and_moves(tmp_path: Path) -> None:
     data_dir = tmp_path / "openings"
     data_dir.mkdir()

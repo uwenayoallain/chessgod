@@ -9,9 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models.external_sync_state import ExternalSyncState
 from app.models.position import Position
 from app.models.position_move import PositionMove
+from app.services.observability import get_observability_store
 from app.services.pgn_parser import ParsedGame
+
+DEFAULT_CANDIDATE_POSITION_LIMIT = 1_000
 
 
 class LichessExplorerClient:
@@ -28,21 +32,56 @@ class LichessExplorerClient:
         if self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
 
-        async with self._request_lock:
-            if self.request_delay > 0 and self._last_request_at is not None:
-                elapsed = time.monotonic() - self._last_request_at
-                if elapsed < self.request_delay:
-                    await asyncio.sleep(self.request_delay - elapsed)
+        store = get_observability_store()
+        started = time.perf_counter()
+        status_code: int | None = None
+        ok = False
+        try:
+            async with self._request_lock:
+                if self.request_delay > 0 and self._last_request_at is not None:
+                    elapsed = time.monotonic() - self._last_request_at
+                    if elapsed < self.request_delay:
+                        await asyncio.sleep(self.request_delay - elapsed)
 
-            response = await self.client.get(
-                f"{self.base_url}/masters",
-                params={"fen": fen, "moves": 12, "topGames": 0, "recentGames": 0},
-                headers=headers or None,
+                response = await self.client.get(
+                    f"{self.base_url}/masters",
+                    params={"fen": fen, "moves": 12, "topGames": 0, "recentGames": 0},
+                    headers=headers or None,
+                )
+                self._last_request_at = time.monotonic()
+
+            status_code = response.status_code
+            response.raise_for_status()
+            ok = True
+            return response.json()
+        finally:
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            store.record_external_call(
+                service="lichess",
+                operation="masters",
+                duration_ms=duration_ms,
+                ok=ok,
+                status_code=status_code,
             )
-            self._last_request_at = time.monotonic()
 
-        response.raise_for_status()
-        return response.json()
+
+async def load_lichess_sync_state(session: AsyncSession) -> dict[str, str | int | None] | None:
+    state = await session.get(ExternalSyncState, "lichess_opening_explorer")
+    if state is None:
+        return None
+    cooldown_until = state.cooldown_until
+    if cooldown_until is not None and cooldown_until.tzinfo is None:
+        cooldown_until = cooldown_until.replace(tzinfo=UTC)
+    updated_at = state.updated_at
+    if updated_at is not None and updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=UTC)
+    return {
+        "provider": state.provider,
+        "cooldown_until": cooldown_until.isoformat() if cooldown_until else None,
+        "last_status_code": state.last_status_code,
+        "last_error": state.last_error,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
 
 
 def total_games_from_counts(white_wins: int, draws: int, black_wins: int) -> int:
@@ -191,7 +230,11 @@ async def cache_master_stats(
     moves: list[PositionMove],
     master_data: dict,
 ) -> None:
-    opening = master_data.get("opening", {})
+    # Lichess sends `"opening": null` for a position with no named opening, and
+    # a default only applies to a *missing* key -- `.get("opening", {})` hands
+    # back None for every such position. Latent until the explorer started
+    # answering at all: with the sync 401ing, no response ever reached here.
+    opening = master_data.get("opening") or {}
     position.master_total = master_data.get("white", 0) + master_data.get("draws", 0) + master_data.get("black", 0)
     position.master_white = master_data.get("white")
     position.master_draws = master_data.get("draws")
@@ -202,7 +245,7 @@ async def cache_master_stats(
 
     move_map = {move.move_uci: move for move in moves}
     san_map = {move.move_san: move for move in moves}
-    for master_move in master_data.get("moves", []):
+    for master_move in master_data.get("moves") or []:
         move = move_map.get(master_move.get("uci")) or san_map.get(master_move.get("san"))
         if move is None:
             continue
@@ -269,18 +312,53 @@ async def load_candidate_positions(
     session: AsyncSession,
     color: str,
     min_games: int,
+    limit: int = DEFAULT_CANDIDATE_POSITION_LIMIT,
 ) -> list[tuple[Position, list[PositionMove]]]:
+    """Load a bounded, popularity-ordered candidate set for deviations.
+
+    Materializing every qualifying position and interpolating all IDs into one
+    ``IN`` query exceeded PostgreSQL's 32,767 bind-parameter limit on large
+    imports. The deviations panel needs the most-played positions first, so a
+    bounded top-N read keeps memory and parameter counts proportional to the
+    requested result size.
+    """
+
     is_white_move = color == "white"
+    limit = max(1, min(limit, 5_000))
     position_result = await session.execute(
         select(Position)
-        .where(Position.total_games >= min_games)
+        .where(
+            Position.total_games >= min_games,
+            select(PositionMove.id)
+            .where(
+                PositionMove.from_position_id == Position.id,
+                PositionMove.is_white_move == is_white_move,
+            )
+            .exists(),
+        )
         .order_by(Position.total_games.desc(), Position.id.asc())
+        .limit(limit)
     )
+    positions = list(position_result.scalars().all())
+    if not positions:
+        return []
+
+    moves_result = await session.execute(
+        select(PositionMove)
+        .where(
+            PositionMove.from_position_id.in_([p.id for p in positions]),
+            PositionMove.is_white_move == is_white_move,
+        )
+        .order_by(PositionMove.game_count.desc(), PositionMove.move_san.asc())
+    )
+    moves_by_pos: dict[int, list[PositionMove]] = {}
+    for move in moves_result.scalars().all():
+        moves_by_pos.setdefault(move.from_position_id, []).append(move)
 
     candidates: list[tuple[Position, list[PositionMove]]] = []
-    for position in position_result.scalars().all():
-        moves = await load_moves_for_position(session, position.id)
-        if not moves or moves[0].is_white_move != is_white_move:
+    for position in positions:
+        moves = moves_by_pos.get(position.id, [])
+        if not moves:
             continue
         candidates.append((position, moves))
     return candidates

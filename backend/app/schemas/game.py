@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AnalysisQueueExclusions(BaseModel):
+    # Browser-local timeout history is selection context, never completed work.
+    exclude_fens: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
+        default_factory=list, max_length=512
+    )
 
 
 class GameOut(BaseModel):
@@ -21,7 +29,9 @@ class GameOut(BaseModel):
     opening_name: str | None = None
     played_at: datetime
     num_moves: int | None = None
+    termination: str | None = None
     pgn: str | None = None
+    has_analysis: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
