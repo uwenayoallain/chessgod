@@ -1,0 +1,17 @@
+services:
+  backend:
+    environment:
+      CORS_ORIGINS: ${CORS_ORIGINS:-["https://chess.uwe.rw","http://localhost:5173"]}
+
+  frontend:
+    environment:
+      # Public visitors must call /api on chess.uwe.rw, not their own localhost.
+      VITE_API_URL: ${VITE_API_URL:-}
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.5.0
+    depends_on:
+      frontend:
+        condition: service_started
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env.tunnel}
+    restart: unless-stopped

@@ -1,12 +1,17 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # The crawler runs for days and the stack is its only dependency, so every
+    # service it needs comes back by itself after a crash, an OOM kill, a docker
+    # daemon restart or a host reboot. `unless-stopped` still honours a
+    # deliberate `make down`.
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-chessgod}
       POSTGRES_USER: ${POSTGRES_USER:-chessgod}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chessgod}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -15,38 +20,214 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   backend:
     build:
       context: ./backend
+    restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://chessgod:chessgod@postgres:5432/chessgod}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
       OBSERVABILITY_RETENTION_DAYS: ${OBSERVABILITY_RETENTION_DAYS:-14}
       OBSERVABILITY_ADMIN_PASSPHRASE_SHA256: ${OBSERVABILITY_ADMIN_PASSPHRASE_SHA256:-3f665a20748df42949e495a1b363194e5c5ab24b12080232a8ec3263fcb2145e}
+      # The Opening Explorer requires OAuth (`security: OAuth2` on the masters
+      # endpoint in lichess-api.yaml), so without a token every sync returns 401
+      # and backs off for LICHESS_SYNC_COOLDOWN_AUTH_MINUTES. There was no way to
+      # pass one in at all: the setting existed in app/config.py and nothing
+      # forwarded it to the container, so master theory stayed empty and the
+      # deviation surface -- which joins every decision against master moves --
+      # could never return a row. Create one at
+      # https://lichess.org/account/oauth/token/create (no scopes needed) and put
+      # LICHESS_API_TOKEN in .env.
+      LICHESS_API_TOKEN: ${LICHESS_API_TOKEN:-}
+      LICHESS_EXPLORER_URL: ${LICHESS_EXPLORER_URL:-https://explorer.lichess.org}
+      # The explorer answered ~35 requests at ~27/min, then a 429 and a 60s
+      # cooldown, every cycle: ~15 positions/min and an error each time.
+      # Pacing under its bucket is faster overall and error-free.
+      LICHESS_REQUEST_DELAY: ${LICHESS_REQUEST_DELAY:-3.0}
+      LICHESS_SYNC_COOLDOWN_RATE_LIMIT_SECONDS: ${LICHESS_SYNC_COOLDOWN_RATE_LIMIT_SECONDS:-60}
+      # How long the read caches keep being warmed after the last request from
+      # a person. The warmup was unconditional, and its premise -- "a no-op
+      # while the cached entries are fresh" -- was false: the shortest TTL it
+      # warms is 60s and a pass sleeps 50s after a 12-15s run, so those entries
+      # had always just expired and every pass recomputed them in full. On an
+      # idle box that was 0.8-1.6 Postgres cores for 10-15s every minute,
+      # forever, which drove the package 55C -> 82C on its own and read to the
+      # crawler as a person at the keyboard. Ten minutes matches the crawler's
+      # CRAWL_IDLE_AFTER_MS so both agree on when nobody is here.
+      CACHE_WARMUP_IDLE_AFTER_SECONDS: ${CACHE_WARMUP_IDLE_AFTER_SECONDS:-600}
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend:/app
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # The crawler waits on this, not merely on the container existing: its whole
+    # job is `GET /api/games/unanalyzed-fens`, so a backend that is up but still
+    # running `alembic upgrade head` is, to the crawler, indistinguishable from
+    # one that is down. `start_period` covers the migration; python3 is the only
+    # HTTP client in the image (no curl, no wget).
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
 
   frontend:
     build:
       context: ./frontend
-    environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     depends_on:
-      - backend
+      postgres:
+        condition: service_healthy
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT:-5173}:5173"
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
+    # Serves the production build by default. The dev server ran React in
+    # development mode, and that alone made stepping through a game freeze the
+    # page ~88ms a move (3.5s over 40 moves) against 0.2s in production, and
+    # took the workspace from 0.3s to 0.6s to appear. FRONTEND_MODE=dev brings
+    # the hot-reloading dev server back for working on the frontend.
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+      API_PROXY_TARGET: http://backend:8000
+      FRONTEND_MODE: ${FRONTEND_MODE:-production}
     command: >
-      sh -c "node /app/scripts/sync-stockfish-assets.mjs &&
-      pnpm dev --host 0.0.0.0"
+      sh -c "CI=true SKIP_STOCKFISH_NNUE_DOWNLOAD=1 vp install --frozen-lockfile --ignore-scripts &&
+      node /app/scripts/sync-stockfish-assets.mjs &&
+      if [ \"$$FRONTEND_MODE\" = dev ]; then vp dev --host 0.0.0.0;
+      else vp build && vp preview --host 0.0.0.0 --port 5173; fi"
+
+  # Opt-in: `docker compose --profile crawl up crawl`. Never starts with the
+  # normal stack, because it is the one service that will happily eat a core.
+  # The reservation is a hard ceiling, not a request: one core at most, and the
+  # crawler additionally stands down whenever load per core rises above
+  # CRAWL_MAX_LOAD, so it yields the machine rather than competing for it.
+  crawl:
+    profiles: ["crawl"]
+    image: node:24-alpine
+    working_dir: /app
+    environment:
+      CRAWL_API: ${CRAWL_API:-http://backend:8000}
+      # Left unset on purpose: a "required variable" here would make
+      # `docker compose config` fail for the whole file, breaking `make run`
+      # for anyone not crawling. The script exits 2 with a clear message.
+      CRAWL_USERNAME: ${CRAWL_USERNAME:-}
+      CRAWL_WORKERS_MIN: ${CRAWL_WORKERS_MIN:-1}
+      CRAWL_WORKERS_MAX: ${CRAWL_WORKERS_MAX:-5}
+      CRAWL_THREADS: ${CRAWL_THREADS:-1}
+      CRAWL_MAX_LOAD: ${CRAWL_MAX_LOAD:-0.7}
+      # Presence gating: while the machine is in use the pool is capped here,
+      # and the full pool unlocks only after it has been quiet this long. This
+      # is what stops the crawler producing a surge in the first place, rather
+      # than reacting to one it already caused. Set CRAWL_ACTIVE_MAX=0 to pause
+      # entirely whenever the machine is in use.
+      CRAWL_ACTIVE_CORES: ${CRAWL_ACTIVE_CORES:-0.5}
+      CRAWL_ACTIVE_MAX: ${CRAWL_ACTIVE_MAX:-1}
+      CRAWL_IDLE_AFTER_MS: ${CRAWL_IDLE_AFTER_MS:-600000}
+      CRAWL_BATCH: ${CRAWL_BATCH:-24}
+      CRAWL_REST_MS: ${CRAWL_REST_MS:-100}
+      # Thermal gating. Every other guard measures contention, and one nice-19
+      # engine contends with nobody -- so they all read clean while the package
+      # heat-soaks and throttling takes 30% of the clock off every core. The
+      # crawler stands down above CRAWL_HOT_C and resumes at CRAWL_COOL_C.
+      #
+      # Both are compared against a 30s *mean*, never an instant reading. This
+      # box's package swings 64-90C with nothing running but a browser and a
+      # music player -- 5 samples of 24 at or above 85C -- so an instantaneous
+      # trip fires on somebody scrolling a page, and a 75C floor is the median
+      # of that same trace. Judged instantaneously the crawler sat at 0.00% CPU
+      # while 90% of the machine was idle, charged for heat it did not produce.
+      # Across that trace no 30s window averages above 83C, while a crawling
+      # package holds 88-91C. See `scripts/engine/thermal.mjs`.
+      CRAWL_HOT_C: ${CRAWL_HOT_C:-85}
+      CRAWL_COOL_C: ${CRAWL_COOL_C:-80}
+      # The same pair while somebody is at the machine. 85C is the right
+      # unattended limit -- throttling starts around 83-85C here, so it sits as
+      # close to the hardware as it can without paying -- but it is the wrong
+      # number to hand a person, who then arrives to a package with no headroom
+      # left and waits out a 30s mean before the crawler moves. Presence moves
+      # the line instead: it is sampled every 2s, so the pool stands down on
+      # the next poll rather than half a minute later.
+      CRAWL_HOT_ACTIVE_C: ${CRAWL_HOT_ACTIVE_C:-80}
+      CRAWL_COOL_ACTIVE_C: ${CRAWL_COOL_ACTIVE_C:-75}
+      # Samples averaged before the package counts as cool again, against the
+      # trip's six. The long window defends against a false hot (a page render
+      # spikes past 85C); nothing produces a false cool, and charging recovery
+      # the same 30s of history left the crawler standing at 55-62C, 20C below
+      # its own threshold, for about twenty seconds of every cycle.
+      CRAWL_COOL_WINDOW: ${CRAWL_COOL_WINDOW:-2}
+      # How often a standing-down crawler re-checks whether it may resume. This
+      # used to be CRAWL_BUSY_MS, a queue-outage backoff, which spent on average
+      # fifteen seconds idle on a machine that was already cool and free.
+      CRAWL_RECHECK_MS: ${CRAWL_RECHECK_MS:-2000}
+    # A crawler running without a backend is not a crawler, it is a log full of
+    # "queue unavailable" -- it has no other source of work and no other place to
+    # put a result. That happened for 35 hours: the stack was stopped, the crawl
+    # profile was not, and `restart: unless-stopped` kept the empty loop alive
+    # while coverage sat at 45.91%. The long form waits for *healthy*, so
+    # `make crawl-recreate` brings the backend with it rather than starting a
+    # crawler next to a dead one. `make down` stops this service too.
+    depends_on:
+      backend:
+        condition: service_healthy
+    # unless-stopped, so a crash, an OOM, a daemon restart or a host reboot all
+    # bring the crawl back — it runs for days at a stretch, and the failure mode
+    # that matters is nobody noticing it stopped. This was on-failure while the
+    # crawler still exited 0 on a stall, which would have restart-looped; it now
+    # waits a stall out instead, so the only clean exit is a deliberate stop,
+    # and `unless-stopped` leaves those alone.
+    restart: unless-stopped
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./frontend/public/stockfish:/app/frontend/public/stockfish:ro
+    deploy:
+      resources:
+        limits:
+          # The backstop, not the governor: CRAWL_MAX_LOAD sizes the pool from
+          # inside, and this only stops a bug from taking the whole box. It must
+          # leave room for CRAWL_WORKERS_MAX engines (one core each) plus Node,
+          # or the cgroup throttles the pool the controller just grew and the
+          # two fight each other. It was 2.0 against a 3-engine pool for a full
+          # crawl: 77% of scheduling periods throttled, and a measurement taken
+          # against that cap wrongly put the engine knee at 3.
+          #
+          # NOTE: `docker compose restart` does NOT apply a change here -- it
+          # reuses the existing container's cgroup. Use `make crawl-recreate`.
+          cpus: "${CRAWL_CPUS:-6}"
+          # Each engine is ~450MB of hash table, wasm heap and Node runtime, so
+          # five need ~2.8GB measured. Keep headroom: hitting this ceiling is an
+          # OOM kill in the middle of a batch, not a slowdown.
+          memory: ${CRAWL_MEMORY:-4g}
+    # `nice -n 19` matters most in the ~1-2 minutes before the pool notices the
+    # machine got busy: the load average it reads is a one-minute average and it
+    # only resizes between batches, so until then the engines are still running.
+    # At nice 19 the kernel hands them only CPU nobody else wants, so interactive
+    # work preempts them immediately rather than waiting for the resize. This was
+    # missing here while the module docstring claimed the compose service set it.
+    #
+    # It does nothing at all for heat, though, and that is not a detail: nice
+    # picks *who* gets a core, never *how fast* that core runs. A nice-19 engine
+    # on an otherwise idle machine holds a core at full boost, which is exactly
+    # how the package reached 90C and throttled every core for thirty hours. The
+    # thermal guard above is what covers that; nice is not a substitute for it.
+    command: nice -n 19 node scripts/engine/crawl.mjs
 
 volumes:
   frontend_node_modules:
