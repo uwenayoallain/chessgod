@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine_contract import MAX_PAIR_DEPTH_GAP
 from app.models.opening_family import OpeningFamily
-from app.services.cache import get_shared_cache
+from app.services.swr import stale_while_revalidate
 from app.models.position import Position
 from app.schemas.theory import MistakeOut, TheoryMove
 
@@ -337,25 +337,28 @@ async def find_mistakes_cached(
     threshold_cp: int = 50,
     min_depth: int = 18,
 ) -> list[MistakeOut]:
-    cache = get_shared_cache()
-    key = f"mistakes:v7:{username}:{color}:{time_class}:{family_id}:{min_occurrences}:{threshold_cp}:{min_depth}"
-    key = await cache.versioned_key(key)
-    cached = await cache.get_json(key)
-    if cached is not None:
-        return [MistakeOut.model_validate(item) for item in cached]
-    result = await find_mistakes(
+    suffix = f"{username}:{color}:{time_class}:{family_id}:{min_occurrences}:{threshold_cp}:{min_depth}"
+
+    async def compute(db: AsyncSession) -> list[dict]:
+        result = await find_mistakes(
+            db,
+            username,
+            color=color,
+            time_class=time_class,
+            family_id=family_id,
+            min_occurrences=min_occurrences,
+            threshold_cp=threshold_cp,
+            min_depth=min_depth,
+        )
+        return [mistake.model_dump(mode="json") for mistake in result]
+
+    # Every evidence upload bumps the generation, so a plain cache was cold on
+    # most visits (~0.6s); the last list is served while the new one builds.
+    payload = await stale_while_revalidate(
         session,
-        username,
-        color=color,
-        time_class=time_class,
-        family_id=family_id,
-        min_occurrences=min_occurrences,
-        threshold_cp=threshold_cp,
-        min_depth=min_depth,
+        fresh_base=f"mistakes:v7:{suffix}",
+        last_key=f"mistakes:last:{suffix}",
+        compute=compute,
+        fresh_ttl=_MISTAKES_TTL_SECONDS,
     )
-    await cache.set_json(
-        key,
-        [mistake.model_dump(mode="json") for mistake in result],
-        ttl_seconds=_MISTAKES_TTL_SECONDS,
-    )
-    return result
+    return [MistakeOut.model_validate(item) for item in payload]

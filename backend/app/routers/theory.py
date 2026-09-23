@@ -54,6 +54,7 @@ from app.services.theory import (
     serialize_user_move,
 )
 from app.services.common_book import get_common_book_moves
+from app.services.swr import stale_while_revalidate
 
 router = APIRouter()
 
@@ -431,6 +432,30 @@ async def theory_deviations(
     min_games: int = Query(5, ge=1),
     limit: Annotated[int, Query(ge=1, le=5_000)] = DEFAULT_CANDIDATE_POSITION_LIMIT,
     session: AsyncSession = Depends(get_db),
+) -> list[DeviationOut]:
+    # ~0.2s warm and ~0.7s cold, and nothing it reads changes between imports
+    # except master data, so the last list is served while a new one builds.
+    suffix = f"{color}:{min_games}:{limit}"
+
+    async def compute(db: AsyncSession) -> list[dict]:
+        found = await _find_deviations(db, color=color, min_games=min_games, limit=limit)
+        return [deviation.model_dump(mode="json") for deviation in found]
+
+    payload = await stale_while_revalidate(
+        session,
+        fresh_base=f"deviations:v1:{suffix}",
+        last_key=f"deviations:last:{suffix}",
+        compute=compute,
+        fresh_ttl=_DEVIATIONS_TTL_SECONDS,
+    )
+    return [DeviationOut.model_validate(item) for item in payload]
+
+
+_DEVIATIONS_TTL_SECONDS = 300.0
+
+
+async def _find_deviations(
+    session: AsyncSession, *, color: str, min_games: int, limit: int
 ) -> list[DeviationOut]:
     candidates = await load_candidate_positions(
         session, color=color, min_games=min_games, limit=limit

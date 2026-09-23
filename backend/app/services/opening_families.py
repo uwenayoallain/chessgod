@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.external_sync_state import ExternalSyncState
 from app.models.game import Game
-from app.services.cache import get_shared_cache
+from app.services.swr import stale_while_revalidate
 from app.services.game_scope import time_class_condition
 from app.models.game_position import GamePosition
 from app.models.opening_family import OpeningFamily
@@ -190,43 +190,41 @@ async def family_user_stats_bulk(
 
     root_fens = list({f.root_fen for f in families})
     fens_digest = hashlib.md5("|".join(sorted(root_fens)).encode()).hexdigest()
-    cache = get_shared_cache()
-    cache_key = f"famstats:{username}:{color}:{time_class}:{fens_digest}"
-    cache_key = await cache.versioned_key(cache_key)
-    cached = await cache.get_json(cache_key)
-    if cached is not None:
-        return _fill_family_stats(
-            families, {fen: (int(c), int(w)) for fen, (c, w) in cached.items()}, empty
-        )
+    suffix = f"{color}:{time_class}:{fens_digest}"
 
-    filters = [Game.username == username, Position.fen.in_(root_fens)]
-    if color != "both":
-        filters.append(Game.user_color == color)
-    time_filter = time_class_condition(Game.time_class, time_class)
-    if time_filter is not None:
-        filters.append(time_filter)
-
-    result = await session.execute(
-        select(
-            Position.fen,
-            func.count(func.distinct(Game.id)),
-            func.sum(case((Game.user_result == "win", 1), else_=0)),
+    async def compute(db: AsyncSession) -> dict[str, list[int]]:
+        filters = [Game.username == username, Position.fen.in_(root_fens)]
+        if color != "both":
+            filters.append(Game.user_color == color)
+        time_filter = time_class_condition(Game.time_class, time_class)
+        if time_filter is not None:
+            filters.append(time_filter)
+        result = await db.execute(
+            select(
+                Position.fen,
+                func.count(func.distinct(Game.id)),
+                func.sum(case((Game.user_result == "win", 1), else_=0)),
+            )
+            .select_from(Game)
+            .join(GamePosition, GamePosition.game_id == Game.id)
+            .join(Position, Position.id == GamePosition.position_id)
+            .where(*filters)
+            .group_by(Position.fen)
         )
-        .select_from(Game)
-        .join(GamePosition, GamePosition.game_id == Game.id)
-        .join(Position, Position.id == GamePosition.position_id)
-        .where(*filters)
-        .group_by(Position.fen)
+        return {row[0]: [row[1] or 0, row[2] or 0] for row in result.all()}
+
+    # The last-known copy sits under the same `famstats:{username}:` prefix,
+    # so an import (which deletes that prefix) never serves pre-import counts.
+    cached = await stale_while_revalidate(
+        session,
+        fresh_base=f"famstats:{username}:{suffix}",
+        last_key=f"famstats:{username}:last:{suffix}",
+        compute=compute,
+        fresh_ttl=_FAMILY_STATS_TTL_SECONDS,
     )
-    stats_by_fen: dict[str, tuple[int, int]] = {
-        row[0]: (row[1] or 0, row[2] or 0) for row in result.all()
-    }
-    await cache.set_json(
-        cache_key,
-        {fen: [count, wins] for fen, (count, wins) in stats_by_fen.items()},
-        ttl_seconds=_FAMILY_STATS_TTL_SECONDS,
+    return _fill_family_stats(
+        families, {fen: (int(c), int(w)) for fen, (c, w) in cached.items()}, empty
     )
-    return _fill_family_stats(families, stats_by_fen, empty)
 
 
 async def family_child_counts(
