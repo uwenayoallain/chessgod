@@ -8,7 +8,14 @@ export type SparResult = 'win' | 'loss' | 'draw'
 export type SparOutcome = {
   /** From the player's side of the board. */
   result: SparResult
-  reason: 'checkmate' | 'stalemate' | 'insufficient material' | 'repetition' | 'resignation'
+  reason:
+    | 'checkmate'
+    | 'stalemate'
+    | 'insufficient material'
+    | 'repetition'
+    | 'resignation'
+    | 'timeout'
+    | 'timeout vs insufficient material'
 }
 
 /**
@@ -230,7 +237,39 @@ export function applyUciMove(fen: string, uci: string) {
   }
 }
 
+/** Clock choices, in seconds per side; null is an untimed game. */
+export const SPAR_TIME_CONTROLS = [null, 600, 300, 180] as const
+export type SparTimeControl = (typeof SPAR_TIME_CONTROLS)[number]
+
+/**
+ * Who a flag fall favours. Running out of time loses, except that it is a draw
+ * when the side still on the clock has too little material to ever mate —
+ * the rule over the board, and the one Chess.com applies.
+ */
+export function timeoutOutcome(fen: string, flagged: SparColor, userColor: SparColor): SparOutcome {
+  const placement = fen.trim().split(/\s+/)[0]
+  const winner = flagged === 'white' ? 'black' : 'white'
+  const pieces = placement.split('').filter((char) => /[a-z]/i.test(char))
+  const winnerPieces = pieces.filter((char) =>
+    winner === 'white' ? char === char.toUpperCase() : char === char.toLowerCase(),
+  )
+  const canMate = winnerPieces.some((char) => /[pqr]/i.test(char)) || winnerPieces.length > 2
+  if (!canMate) return { result: 'draw', reason: 'timeout vs insufficient material' }
+  return { result: flagged === userColor ? 'loss' : 'win', reason: 'timeout' }
+}
+
+/** A clock reading as m:ss, or s.t under ten seconds. */
+export function formatClock(ms: number) {
+  const clamped = Math.max(0, ms)
+  if (clamped < 10_000) return (clamped / 1000).toFixed(1)
+  const total = Math.ceil(clamped / 1000)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
 export function describeOutcome(outcome: SparOutcome) {
+  if (outcome.reason === 'timeout') {
+    return outcome.result === 'win' ? 'Stockfish ran out of time.' : 'You ran out of time.'
+  }
   if (outcome.result === 'win') {
     return outcome.reason === 'resignation'
       ? 'The engine resigned.'

@@ -6730,3 +6730,125 @@ body {
   text-decoration: underline;
   cursor: pointer;
 }
+
+.sparring__clock-choice {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.25rem;
+}
+
+.sparring__clock-option {
+  padding: 0.35rem 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.sparring__clock-option[aria-pressed='true'] {
+  border-color: var(--text);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.sparring__clocks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.sparring__clock {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.sparring__clock strong {
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sparring__clock[data-running] {
+  border-color: var(--text);
+  color: var(--text);
+}
+
+.sparring__clock[data-running][data-low] strong {
+  color: var(--danger);
+}
+
+.sparring__review {
+  margin: 0;
+  font-size: 0.8rem;
+  /* Reserved so the review status changing never shifts the buttons. */
+  min-height: 2.3em;
+}
+
+.sparring__record {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.sparring__record-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+}
+
+.sparring__record-head strong {
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sparring__games {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.78rem;
+}
+
+.sparring__game {
+  display: grid;
+  grid-template-columns: 1.4rem 1fr auto;
+  align-items: center;
+  gap: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.sparring__result {
+  display: inline-grid;
+  place-items: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-weight: 700;
+  font-size: 0.7rem;
+}
+
+.sparring__result[data-result='win'] {
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+
+.sparring__result[data-result='loss'] {
+  background: color-mix(in srgb, var(--danger) 80%, transparent);
+  color: #fff;
+}

@@ -17,7 +17,7 @@ import { useEngineEvalSync } from '@/hooks/use-engine-eval-sync'
 import { useImportSummary } from '@/hooks/use-import-summary'
 import { useGameLine } from '@/hooks/use-game-line'
 import { useMoveAnnotations } from '@/hooks/use-move-annotations'
-import { useSparringController, useStartSparring } from '@/hooks/use-sparring'
+import { useSparringController, useSparringRecorder, useStartSparring } from '@/hooks/use-sparring'
 import { isServerUnreachable } from '@/lib/api-errors'
 import { getAppAccessState } from '@/lib/app-access'
 import {
@@ -140,6 +140,8 @@ function Workspace({ username }: { username: string }) {
   // The review covers the whole loaded game, wherever the board happens to be.
   const gameLine = useGameLine()
   const gameAnnotations = useMoveAnnotations(gameLine)
+  // Saves a finished engine game and sends its reviewed mistakes to drills.
+  useSparringRecorder(gameAnnotations, gameLine)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialLayout.sidebarCollapsed)
   const [sidebarWidth, setSidebarWidth] = useState(initialLayout.sidebarWidth)
   const [railWidth, setRailWidth] = useState(initialLayout.railWidth)

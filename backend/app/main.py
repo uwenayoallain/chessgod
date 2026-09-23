@@ -16,7 +16,7 @@ from starlette.requests import Request
 
 from app.config import settings
 from app.database import async_session_factory, engine, pool_stats
-from app.routers import analysis, games, health, import_games, improvement, theory, tree
+from app.routers import analysis, games, health, import_games, improvement, sparring, theory, tree
 from sqlalchemy import select
 
 from app.models.game import Game
@@ -374,3 +374,4 @@ app.include_router(tree.router, prefix="/api/tree", tags=["tree"])
 app.include_router(theory.router, prefix="/api/theory", tags=["theory"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(improvement.router, prefix="/api/improvement", tags=["improvement"])
+app.include_router(sparring.router, prefix="/api/sparring", tags=["sparring"])

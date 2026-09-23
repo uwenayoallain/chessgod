@@ -15,12 +15,13 @@ import chess
 from sqlalchemy import DateTime, Integer, Text, bindparam, case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.engine_contract import ENGINE_NAME, ENGINE_VERSION, MAX_PAIR_DEPTH_GAP
+from app.engine_contract import ENGINE_NAME, ENGINE_VERSION, MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
 from app.models.analysis import AnalysisResult
 from app.models.drill_progress import DrillAttempt, DrillProgress
 from app.models.game import Game
 from app.models.game_position import GamePosition
 from app.models.position import Position
+from app.models.sparring import SparringGame, SparringMistake
 from app.schemas.improvement import (
     DrillAttemptIn,
     DrillFollowUpOut,
@@ -1235,6 +1236,74 @@ ORDER BY game_rank, ply
 )
 
 
+async def _sparring_candidates(
+    session: AsyncSession, *, username: str, threshold_cp: int, limit: int = 200
+) -> list[dict[str, Any]]:
+    """Recent mistakes from games against the engine, shaped like SQL candidates."""
+
+    rows = (await session.execute(
+        select(SparringMistake, SparringGame, Position.fen)
+        .join(SparringGame, SparringGame.id == SparringMistake.game_id)
+        .join(Position, Position.id == SparringMistake.position_id)
+        .where(SparringGame.username == username, SparringMistake.eval_drop_cp >= threshold_cp)
+        .order_by(SparringGame.played_at.desc(), SparringMistake.ply.asc())
+        .limit(limit)
+    )).all()
+    # Drill answers are graded against the deepest trusted evaluation of the
+    # position (`record_drill_attempt`), so the card must quote that same one:
+    # the review's own results are uploaded with it, and a deeper search that
+    # arrives later wins. A position without one yet waits for it.
+    position_ids = {mistake.position_id for mistake, _, _ in rows}
+    deepest: dict[int, tuple[str, str | None]] = {}
+    if position_ids:
+        for position_id, best, pv in (await session.execute(
+            select(AnalysisResult.position_id, AnalysisResult.best_move_uci, AnalysisResult.pv_uci)
+            .where(
+                AnalysisResult.position_id.in_(position_ids),
+                AnalysisResult.engine == ENGINE_NAME,
+                AnalysisResult.engine_version == ENGINE_VERSION,
+                AnalysisResult.multipv_rank == 1,
+                AnalysisResult.depth >= MIN_TRUSTED_DEPTH,
+            )
+            .order_by(AnalysisResult.position_id, AnalysisResult.depth.desc(), AnalysisResult.id.desc())
+        )).all():
+            deepest.setdefault(int(position_id), (best, pv))
+    items: list[dict[str, Any]] = []
+    for mistake, game, fen in rows:
+        trusted = deepest.get(mistake.position_id)
+        if trusted is None or not trusted[0] or trusted[0] == mistake.user_move_uci:
+            continue
+        best_move_uci, best_pv_uci = trusted
+        reply = (mistake.reply_pv_uci or "").split()
+        item: dict[str, Any] = {
+            "position_id": mistake.position_id,
+            "fen": fen,
+            "ply": mistake.ply,
+            "user_move_uci": mistake.user_move_uci,
+            "user_move_san": mistake.user_move_san,
+            "best_move_uci": best_move_uci,
+            "best_move_san": move_san(fen, best_move_uci),
+            "opponent_reply_uci": reply[0] if reply else None,
+            "previous_move_uci": mistake.previous_move_uci,
+            "best_pv_uci": best_pv_uci,
+            "reply_pv_uci": mistake.reply_pv_uci,
+            "parent_eval_cp": mistake.parent_eval_cp,
+            "parent_eval_mate": mistake.parent_eval_mate,
+            "eval_drop_cp": mistake.eval_drop_cp,
+            "occurrences": 1,
+            "source_game_id": game.id,
+            "source_game_url": "",
+            "source_played_at": game.played_at.isoformat(),
+            "time_class": "engine",
+            "time_control": None,
+            "clock_seconds_after": None,
+            "think_seconds": None,
+        }
+        item["analysis"] = _analyse_candidate(item)
+        items.append(item)
+    return items
+
+
 def _analyse_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
     """Pre-compute the board-replay work so a warm plan read stays cheap."""
 
@@ -2101,6 +2170,12 @@ async def build_improvement_plan(
                 )
         raw_candidates = [*raw_candidates, *reviews]
         position_ids.extend(item["position_id"] for item in reviews)
+    # Mistakes from games against the engine opponent drill alongside the
+    # imported ones: the post-game review already graded them, and a mistake
+    # made in practice is as much the player's as one made on Chess.com.
+    sparring = await _sparring_candidates(session, username=username, threshold_cp=threshold_cp)
+    raw_candidates = [*sparring, *raw_candidates]
+    position_ids = [*(item["position_id"] for item in sparring), *position_ids]
     progress_by_key: dict[tuple[int, str], DrillProgress] = {}
     if position_ids:
         progress_rows = await session.execute(

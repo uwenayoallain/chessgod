@@ -2,6 +2,9 @@ import { create } from 'zustand'
 
 import {
   clampSparRating,
+  sideToMove,
+  SPAR_TIME_CONTROLS,
+  type SparTimeControl,
   nextSparElo,
   startingSparElo,
   type SparColor,
@@ -40,7 +43,31 @@ type SparState = {
    */
   override: number | null
   setOverride: (elo: number | null) => void
-  start: (options: { userColor: SparColor; elo: number; rated: boolean; epoch: number }) => void
+  /** The finished game once it is saved, and the mistakes its review sent to drills. */
+  savedGameId: number | null
+  mistakesPosted: number | null
+  /** Seconds per side for the next game (null: no clock), and the running clocks. */
+  timeControlSeconds: SparTimeControl
+  setTimeControl: (seconds: SparTimeControl) => void
+  /** Time left per side at the last move, in ms; null in an untimed game. */
+  clocks: { white: number; black: number } | null
+  /** The side whose clock is running, and since when (ms since epoch). */
+  clockSide: SparColor | null
+  turnStartedAt: number | null
+  /** The position at the end of the game line when the clock last switched. */
+  clockFen: string | null
+  /** A move reached the end of the line: charge its maker and start the other clock. */
+  chargeMove: (mover: SparColor, now: number, fen: string) => void
+  recordSaved: (gameId: number) => void
+  recordMistakes: (count: number) => void
+  start: (options: {
+    userColor: SparColor
+    elo: number
+    rated: boolean
+    epoch: number
+    /** The position the game starts from; its side to move starts the clock. */
+    fen: string
+  }) => void
   finish: (outcome: SparOutcome, username: string | null) => void
   markUnrated: () => void
   /** Leave the game; the line stays on the board for review. */
@@ -91,6 +118,56 @@ export function resolveSparElo(
   return readSparStrength(username)?.elo ?? startingSparElo(ratings)
 }
 
+const TIME_CONTROL_KEY = 'chessgod.sparringTimeControl'
+
+function readTimeControl(): SparTimeControl {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(TIME_CONTROL_KEY)
+    const value = raw === null || raw === 'none' ? null : Number(raw)
+    return (SPAR_TIME_CONTROLS as readonly (number | null)[]).includes(value)
+      ? (value as SparTimeControl)
+      : null
+  } catch {
+    return null
+  }
+}
+
+function writeTimeControl(seconds: SparTimeControl) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(TIME_CONTROL_KEY, seconds == null ? 'none' : String(seconds))
+  } catch {
+    // A preference that cannot be saved still applies this session.
+  }
+}
+
+/** The clocks with the running side charged up to `now`, and stopped. */
+function stoppedClocks(
+  state: Pick<SparState, 'clocks' | 'clockSide' | 'turnStartedAt'>,
+  now: number,
+) {
+  if (!state.clocks || !state.clockSide || state.turnStartedAt == null) return { clockSide: null }
+  return {
+    clocks: {
+      ...state.clocks,
+      [state.clockSide]: Math.max(0, state.clocks[state.clockSide] - (now - state.turnStartedAt)),
+    },
+    clockSide: null,
+  }
+}
+
+/** Time left for `side` at `now`, counting the running clock down. */
+export function clockRemaining(
+  state: Pick<SparState, 'clocks' | 'clockSide' | 'turnStartedAt'>,
+  side: SparColor,
+  now: number,
+) {
+  if (!state.clocks) return null
+  const running = state.clockSide === side && state.turnStartedAt != null
+  return Math.max(0, state.clocks[side] - (running ? now - state.turnStartedAt! : 0))
+}
+
 export const useSparStore = create<SparState>((set, get) => ({
   status: 'idle',
   userColor: 'white',
@@ -101,8 +178,35 @@ export const useSparStore = create<SparState>((set, get) => ({
   eloChange: 0,
   reviewing: null,
   override: null,
+  savedGameId: null,
+  mistakesPosted: null,
+  timeControlSeconds: readTimeControl(),
+  setTimeControl: (seconds) => {
+    writeTimeControl(seconds)
+    set({ timeControlSeconds: seconds })
+  },
+  clocks: null,
+  turnStartedAt: null,
+  clockSide: null,
+  clockFen: null,
+  chargeMove: (mover, now, fen) =>
+    set((state) => {
+      if (!state.clocks || state.turnStartedAt == null || state.status !== 'playing') return {}
+      return {
+        clocks: {
+          ...state.clocks,
+          [mover]: Math.max(0, state.clocks[mover] - (now - state.turnStartedAt)),
+        },
+        clockSide: mover === 'white' ? 'black' : 'white',
+        clockFen: fen,
+        turnStartedAt: now,
+      }
+    }),
+  recordSaved: (gameId) => set({ savedGameId: gameId }),
+  recordMistakes: (count) => set({ mistakesPosted: count }),
   setOverride: (elo) => set({ override: elo == null ? null : clampSparRating(elo) }),
-  start: ({ userColor, elo, rated, epoch }) =>
+  start: ({ userColor, elo, rated, epoch, fen }) => {
+    const seconds = get().timeControlSeconds
     set({
       status: 'playing',
       userColor,
@@ -112,7 +216,14 @@ export const useSparStore = create<SparState>((set, get) => ({
       outcome: null,
       eloChange: 0,
       reviewing: null,
-    }),
+      savedGameId: null,
+      mistakesPosted: null,
+      clocks: seconds == null ? null : { white: seconds * 1000, black: seconds * 1000 },
+      clockSide: seconds == null ? null : sideToMove(fen),
+      clockFen: fen,
+      turnStartedAt: Date.now(),
+    })
+  },
   finish: (outcome, username) => {
     const { status, elo, rated } = get()
     if (status !== 'playing') return
@@ -123,15 +234,26 @@ export const useSparStore = create<SparState>((set, get) => ({
       const previous = readSparStrength(username)
       writeSparStrength(username, { elo: next, games: (previous?.games ?? 0) + 1 })
     }
-    set({ status: 'over', outcome, eloChange })
+    // The game is reviewed as soon as it ends, labelled You / Stockfish.
+    set((state) => ({
+      ...stoppedClocks(state, Date.now()),
+      status: 'over',
+      outcome,
+      eloChange,
+      reviewing: { userColor: state.userColor, epoch: state.epoch },
+    }))
   },
   markUnrated: () => set({ rated: false }),
   close: ({ review = false } = {}) =>
     set((state) => ({
+      ...stoppedClocks(state, Date.now()),
       status: 'idle',
       outcome: null,
       eloChange: 0,
-      reviewing: review ? { userColor: state.userColor, epoch: state.epoch } : null,
+      reviewing:
+        review || state.status === 'over'
+          ? { userColor: state.userColor, epoch: state.epoch }
+          : null,
     })),
 }))
 

@@ -13,6 +13,7 @@ from app.models.position import Position
 from app.models.position_outcome import PositionOutcome
 from app.models.position_move import PositionMove
 from app.models.repertoire_mark import RepertoireMark
+from app.models.sparring import SparringGame, SparringMistake
 
 __all__ = [
     "AnalysisResult",
@@ -29,4 +30,6 @@ __all__ = [
     "PositionOutcome",
     "PositionMove",
     "RepertoireMark",
+    "SparringGame",
+    "SparringMistake",
 ]

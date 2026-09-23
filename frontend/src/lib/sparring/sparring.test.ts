@@ -7,11 +7,13 @@ import {
   chooseSparMove,
   sparSearchParams,
   describeOutcome,
+  formatClock,
   nextSparElo,
   sparMoveTimeMs,
   sparOutcome,
   sideToMove,
   startingSparElo,
+  timeoutOutcome,
 } from './sparring'
 
 const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -'
@@ -158,5 +160,27 @@ describe('opening book', () => {
   it('leaves the move to the engine out of book', () => {
     expect(chooseBookMove(AFTER_E4, [], () => 0)).toBeNull()
     expect(chooseBookMove(AFTER_E4, [{ uci: 'a7a6', game_count: 5 }], () => 0)).toBeNull()
+  })
+})
+
+describe('running out of time', () => {
+  it('loses on time, unless the other side cannot mate', () => {
+    expect(timeoutOutcome(START, 'white', 'white')).toEqual({ result: 'loss', reason: 'timeout' })
+    expect(timeoutOutcome(START, 'black', 'white')).toEqual({ result: 'win', reason: 'timeout' })
+    // White flags; Black has king and knight only.
+    expect(timeoutOutcome('8/8/4k3/8/3n4/8/2P5/4K3 w - -', 'white', 'white')).toEqual({
+      result: 'draw',
+      reason: 'timeout vs insufficient material',
+    })
+    // A lone pawn can still promote.
+    expect(timeoutOutcome('8/8/4k3/3p4/8/8/2N5/4K3 w - -', 'white', 'white').result).toBe('loss')
+    expect(describeOutcome({ result: 'loss', reason: 'timeout' })).toBe('You ran out of time.')
+  })
+
+  it('reads a clock the way a board clock does', () => {
+    expect(formatClock(300_000)).toBe('5:00')
+    expect(formatClock(61_200)).toBe('1:02')
+    expect(formatClock(9_450)).toBe('9.4')
+    expect(formatClock(-5)).toBe('0.0')
   })
 })
