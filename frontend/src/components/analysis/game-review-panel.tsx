@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 
 import { EvalGraph } from '@/components/analysis/eval-graph'
 import { AnnotationIcon, annotationTitle } from '@/components/ui/annotation-icon'
@@ -10,8 +11,11 @@ import type { ReplayMoveAnnotation } from '@/lib/analysis/replay-annotations'
 import { formatDuration } from '@/lib/analysis/progress-rate'
 import { useAnalysisProgress } from '@/hooks/use-analysis-progress'
 import { useAnalyzeLine } from '@/hooks/use-analyze-line'
+import { api } from '@/lib/api'
 import { uciToSan } from '@/lib/chess-utils'
+import { explanationRequests, type MoveExplanation } from '@/lib/analysis/move-explanations'
 import { useAppStore } from '@/store/app-store'
+import { useEngineStore } from '@/store/engine-store'
 
 function moveNumber(ply: number) {
   return `${Math.ceil(ply / 2)}${ply % 2 === 1 ? '.' : '…'}`
@@ -43,6 +47,8 @@ function Scoreline({
       ),
     [fenHistory, review.costly],
   )
+  const shown = review.costly.slice(0, 6)
+  const explanations = useMoveExplanations(shown, fenHistory)
 
   return (
     <div className="scoreline">
@@ -65,7 +71,7 @@ function Scoreline({
 
       {review.costly.length ? (
         <ul className="scoreline__costly">
-          {review.costly.slice(0, 6).map((move) => (
+          {shown.map((move) => (
             <li key={move.ply}>
               <button onClick={() => pushPosition(move.fen)} type="button">
                 <AnnotationIcon label={move.label!} size={14} />
@@ -77,12 +83,57 @@ function Scoreline({
                   <span className="scoreline__better">best {bestSan.get(move.ply)}</span>
                 ) : null}
               </button>
+              <MoveWhy explanation={explanations.get(move.ply)} />
             </li>
           ))}
         </ul>
       ) : null}
     </div>
   )
+}
+
+/** One line on why a move cost what it did; the box is there before the words arrive. */
+function MoveWhy({ explanation }: { explanation: MoveExplanation | undefined }) {
+  const text = explanation ? (explanation.detail ?? explanation.cue) : ''
+  return (
+    <p className="scoreline__why" title={explanation ? `${explanation.label}. ${text}` : undefined}>
+      {explanation ? (
+        <>
+          <strong>{explanation.label}.</strong> {text}
+        </>
+      ) : null}
+    </p>
+  )
+}
+
+/**
+ * Names what each costly move did — a hung piece, an allowed fork, a missed
+ * mate — with the classifier the drills use, so a review says why a move was
+ * bad and not only how much it cost. Asked once per set of judged moves.
+ */
+function useMoveExplanations(moves: ReplayMoveAnnotation[], fenHistory: string[]) {
+  const analysisVersion = useEngineStore((state) => state.analysisVersion)
+  const requests = useMemo(
+    () =>
+      explanationRequests({
+        moves,
+        analysisByFen: useEngineStore.getState().analysisByFen,
+        fenHistory,
+      }),
+    // analysisVersion: the lines behind each move arrive after the move is graded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [moves, fenHistory, analysisVersion],
+  )
+  const { data } = useQuery({
+    enabled: requests.length > 0,
+    queryKey: ['move-explanations', requests],
+    queryFn: async ({ signal }) =>
+      (await api.post<MoveExplanation[]>('/api/analysis/explain', { items: requests }, { signal }))
+        .data,
+    staleTime: Infinity,
+    placeholderData: (previous) => previous,
+  })
+  return useMemo(() => new Map((data ?? []).map((item) => [item.ply, item])), [data])
 }
 
 /**

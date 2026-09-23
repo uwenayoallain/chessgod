@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
+import chess
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,14 +16,69 @@ from app.schemas.analysis import (
     AnalysisEvaluationBatchIn,
     AnalysisEvaluationOut,
     AnalysisResultOut,
+    MoveExplanationOut,
+    MoveExplanationsIn,
     RecurringMistakeOut,
 )
 from app.services.analysis import get_analysis_for_position
-from app.services.improvement import invalidate_improvement_caches_for_positions
+from app.services.improvement import classify_pattern, invalidate_improvement_caches_for_positions
 from app.services.mistakes import find_mistakes_cached
 from app.utils.fen import normalize_fen
 
 router = APIRouter()
+
+_PIECE_NAMES = {
+    chess.PAWN: "pawn", chess.KNIGHT: "knight", chess.BISHOP: "bishop",
+    chess.ROOK: "rook", chess.QUEEN: "queen",
+}
+
+
+def _explain(item) -> MoveExplanationOut | None:
+    """Name what a review's costly move did, with the classifier the drills use."""
+    fen = item.fen if len(item.fen.split()) == 6 else f"{item.fen} 0 1"
+    try:
+        board = chess.Board(fen)
+        user_move = chess.Move.from_uci(item.user_move_uci)
+        best_move = chess.Move.from_uci(item.best_move_uci)
+    except ValueError:
+        return None
+    if user_move not in board.legal_moves or best_move not in board.legal_moves:
+        return None
+    reply_uci = (item.reply_pv_uci or "").split()[0] if item.reply_pv_uci else None
+    pattern = classify_pattern(
+        fen=normalize_fen(board.fen()),
+        ply=item.ply,
+        user_move_uci=item.user_move_uci,
+        best_move_uci=item.best_move_uci,
+        opponent_reply_uci=reply_uci,
+        parent_eval_cp=item.parent_eval_cp,
+        mover_is_white=board.turn == chess.WHITE,
+        eval_drop_cp=item.eval_drop_cp,
+        user_move_san=board.san(user_move),
+        best_move_san=board.san(best_move),
+        best_pv_uci=item.best_pv_uci,
+        reply_pv_uci=item.reply_pv_uci,
+        best_eval_mate=item.best_eval_mate,
+    )
+    detail = None
+    if pattern.motifs:
+        motif = pattern.motifs[0]
+        detail = f"{'Allowed' if motif.side == 'allowed' else 'Missed'}: {motif.detail}"
+    elif reply_uci:
+        # The reply that punished the move, when it simply takes something.
+        after = board.copy(stack=False)
+        after.push(user_move)
+        try:
+            reply = chess.Move.from_uci(reply_uci)
+        except ValueError:
+            reply = None
+        if reply is not None and reply in after.legal_moves and after.is_capture(reply):
+            captured = after.piece_at(reply.to_square)
+            if captured is not None and captured.piece_type in _PIECE_NAMES:
+                detail = f"{after.san(reply)} wins the {_PIECE_NAMES[captured.piece_type]}."
+    return MoveExplanationOut(
+        ply=item.ply, key=pattern.key, label=pattern.label, detail=detail, cue=pattern.cue,
+    )
 
 _EVALUATION_CONTENT_FIELDS = (
     "engine_version", "depth", "eval_cp", "eval_mate", "best_move_uci",
@@ -262,3 +318,9 @@ async def get_evaluations(
         for requested, normalized in lookup_fens.items()
         if normalized in evaluations
     }
+
+
+@router.post("/explain", response_model=list[MoveExplanationOut])
+async def explain_moves(payload: MoveExplanationsIn) -> list[MoveExplanationOut]:
+    """Why each costly move in a review cost what it did, in board terms."""
+    return [explained for item in payload.items if (explained := _explain(item)) is not None]

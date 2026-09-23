@@ -32,6 +32,18 @@ export function sideOfPly(ply: number): 'white' | 'black' {
   return ply % 2 === 1 ? 'white' : 'black'
 }
 
+/**
+ * Who played a move: the opposite of the side to move after it. Ply parity
+ * only holds for a game from the starting position; a position played out
+ * against the engine can start with Black to move.
+ */
+function moverOf(annotation: ReplayMoveAnnotation): 'white' | 'black' {
+  const side = annotation.fen.split(' ')[1]
+  if (side === 'w') return 'black'
+  if (side === 'b') return 'white'
+  return sideOfPly(annotation.ply)
+}
+
 function emptyCounts(): Record<ReviewLabel, number> {
   return Object.fromEntries(REVIEW_LABELS.map((label) => [label, 0])) as Record<ReviewLabel, number>
 }
@@ -46,7 +58,7 @@ export function reviewSide(
   annotations: ReplayMoveAnnotation[],
   side: 'white' | 'black',
 ): SideReview {
-  const mine = annotations.filter((annotation) => sideOfPly(annotation.ply) === side)
+  const mine = annotations.filter((annotation) => moverOf(annotation) === side)
   const counts = emptyCounts()
   let lossTotal = 0
   let judged = 0

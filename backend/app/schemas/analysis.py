@@ -90,3 +90,33 @@ class RecurringMistakeOut(BaseModel):
     classification: str
     occurrences: int
     opening_context: str | None = None
+
+
+_UCI_MOVE = r"^[a-h][1-8][a-h][1-8][qrbn]?$"
+
+
+class MoveExplanationIn(BaseModel):
+    """One graded move from a review, with the lines either side of it."""
+
+    fen: str = Field(max_length=120)  # the position the move was played from
+    ply: int = Field(ge=1, le=1000)
+    user_move_uci: str = Field(pattern=_UCI_MOVE)
+    best_move_uci: str = Field(pattern=_UCI_MOVE)
+    best_pv_uci: str | None = Field(default=None, max_length=1536)
+    reply_pv_uci: str | None = Field(default=None, max_length=1536)
+    parent_eval_cp: int = Field(ge=-2000, le=2000)  # White's view, mate mapped onto ±2000
+    best_eval_mate: int | None = Field(default=None, ge=-1000, le=1000)
+    eval_drop_cp: int = Field(ge=0, le=4000)
+
+
+class MoveExplanationsIn(BaseModel):
+    items: list[MoveExplanationIn] = Field(max_length=40)
+
+
+class MoveExplanationOut(BaseModel):
+    ply: int
+    key: str
+    label: str
+    # The board fact behind the label, when there is one ("Kxf7 wins the queen").
+    detail: str | None = None
+    cue: str

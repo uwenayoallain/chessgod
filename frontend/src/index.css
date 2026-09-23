@@ -5390,6 +5390,26 @@ body {
   color: var(--text-faint);
 }
 
+/* Why the move cost what it did. The line is reserved, so an explanation
+   arriving after the grade never pushes the list down. */
+.scoreline__why {
+  display: -webkit-box;
+  min-height: calc(1.4em * 2);
+  margin: -2px 0 4px;
+  padding: 0 8px 0 32px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.scoreline__why strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .panel-error {
   display: flex;
   align-items: flex-start;
