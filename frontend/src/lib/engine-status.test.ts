@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vite-plus/test'
 
 import { getEngineStatusMessage } from './engine-status'
 
@@ -28,7 +28,7 @@ describe('getEngineStatusMessage', () => {
         isLoadingNnue: true,
         isReady: false,
       }),
-    ).toBe('Loading NNUE…')
+    ).toBe('Loading analysis model…')
   })
 
   it('reports the latest reached depth when ready', () => {
@@ -42,6 +42,21 @@ describe('getEngineStatusMessage', () => {
         isLoadingNnue: false,
         isReady: true,
       }),
-    ).toBe('Engine ready at depth 22.')
+    ).toBe('Ready at depth 22.')
+  })
+
+  it('names the active analysis mode while searching', () => {
+    expect(
+      getEngineStatusMessage({
+        activeMode: 'quick',
+        currentDepth: 12,
+        enabled: true,
+        error: null,
+        hasAttempted: true,
+        isAnalyzing: true,
+        isLoadingNnue: false,
+        isReady: true,
+      }),
+    ).toBe('Quick analysis d12…')
   })
 })

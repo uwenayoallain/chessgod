@@ -1,14 +1,21 @@
 import type StockfishWeb from '@lichess-org/stockfish-web'
 
+import { buildUciSearchCommands } from './analysis-policy'
 import { getStockfishModuleUrl, getStockfishNnueUrl } from './asset-url'
+import { fetchNnueBuffer, resolveNnueLoads } from './nnue'
 import type { EngineWorkerCommand, EngineWorkerEvent, EngineWorkerStatus } from './protocol'
 
 let stockfish: StockfishWeb | null = null
 let initialized = false
-let ready = false
 let initPromise: Promise<void> | null = null
-let pendingAnalysis: Extract<EngineWorkerCommand, { type: 'analyze' }> | null = null
 let initConfig: Extract<EngineWorkerCommand, { type: 'init' }> | null = null
+type SearchCommand = Extract<EngineWorkerCommand, { type: 'analyze' }>
+
+let pendingAnalysis: SearchCommand | null = null
+let searchActive = false
+let stoppingForPending = false
+let activeSearchId: number | null = null
+let latestSearchId: number | null = null
 
 function send(event: EngineWorkerEvent) {
   self.postMessage(event)
@@ -22,46 +29,72 @@ function sendStatus(status: EngineWorkerStatus) {
   send({ type: 'status', status })
 }
 
-async function loadRecommendedNnue(engine: StockfishWeb) {
-  const filename = engine.getRecommendedNnue(0)
-  const response = await fetch(getStockfishNnueUrl(self.location.origin, filename))
-
-  if (!response.ok) {
-    throw new Error(`Failed to load NNUE: ${response.status}`)
-  }
-
-  engine.setNnueBuffer(new Uint8Array(await response.arrayBuffer()), 0)
+async function loadNnueAtIndex(engine: StockfishWeb, index: number, filename: string) {
+  const url = getStockfishNnueUrl(self.location.origin, filename)
+  engine.setNnueBuffer(await fetchNnueBuffer(url, filename), index)
 }
 
-function runPendingAnalysis() {
-  if (!stockfish || !pendingAnalysis) {
-    return
+async function loadRecommendedNnue(engine: StockfishWeb) {
+  const loads = resolveNnueLoads((index) => engine.getRecommendedNnue(index))
+  if (loads.length === 0) {
+    throw new Error('The analysis model could not be loaded.')
   }
 
-  const nextAnalysis = pendingAnalysis
-  pendingAnalysis = null
+  for (const { index, filename } of loads) {
+    await loadNnueAtIndex(engine, index, filename)
+  }
+}
 
-  stockfish.uci(`position fen ${nextAnalysis.fen}`)
-  stockfish.uci(`go depth ${nextAnalysis.depth}`)
+function startAnalysis(command: SearchCommand) {
+  if (!stockfish) return
+  activeSearchId = command.searchId
+  searchActive = true
+
+  for (const uciCommand of buildUciSearchCommands({
+    depth: command.depth,
+    fen: command.fen,
+    multiPV: command.multiPV,
+  })) {
+    stockfish.uci(uciCommand)
+  }
 }
 
 function attachListeners(engine: StockfishWeb) {
   engine.listen = (line) => {
-    send({ type: 'line', line })
+    const lineSearchId = activeSearchId
+    if (line.startsWith('bestmove')) {
+      searchActive = false
+      activeSearchId = null
+      if (stoppingForPending && pendingAnalysis) {
+        const nextAnalysis = pendingAnalysis
+        pendingAnalysis = null
+        stoppingForPending = false
+        startAnalysis(nextAnalysis)
+        return
+      }
+      stoppingForPending = false
+    }
+
+    send({ type: 'line', line, searchId: lineSearchId })
 
     if (line === 'uciok') {
       if (initConfig) {
         engine.uci(`setoption name Threads value ${initConfig.threads}`)
         engine.uci(`setoption name Hash value ${initConfig.hash}`)
       }
+      engine.uci('setoption name UCI_AnalyseMode value true')
       engine.uci('isready')
       return
     }
 
     if (line === 'readyok') {
-      ready = true
+      initialized = true
       sendStatus('ready')
-      runPendingAnalysis()
+      if (!searchActive && pendingAnalysis) {
+        const nextAnalysis = pendingAnalysis
+        pendingAnalysis = null
+        startAnalysis(nextAnalysis)
+      }
     }
   }
 
@@ -97,14 +130,15 @@ async function initializeEngine(config: Extract<EngineWorkerCommand, { type: 'in
       sendStatus('nnue-loaded')
 
       stockfish = engine
-      initialized = true
       engine.uci('uci')
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to initialize Stockfish.'
+      const message = error instanceof Error ? error.message : 'Failed to initialize analysis.'
       initPromise = null
       initialized = false
-      ready = false
       stockfish = null
+      pendingAnalysis = null
+      searchActive = false
+      stoppingForPending = false
       sendError(message)
       throw error
     }
@@ -119,7 +153,7 @@ async function onInit(command: Extract<EngineWorkerCommand, { type: 'init' }>) {
   } catch {}
 }
 
-async function onAnalyze(command: Extract<EngineWorkerCommand, { type: 'analyze' }>) {
+async function onAnalyze(command: SearchCommand) {
   if (!stockfish) {
     if (!initConfig) {
       sendError('Engine not initialized.')
@@ -133,20 +167,32 @@ async function onAnalyze(command: Extract<EngineWorkerCommand, { type: 'analyze'
     }
   }
 
+  if (command.searchId !== latestSearchId) return
+
   if (!stockfish) {
     sendError('Engine not initialized.')
     return
   }
 
-  ready = false
-  pendingAnalysis = command
-  stockfish.uci('stop')
-  stockfish.uci(`setoption name MultiPV value ${command.multiPV}`)
-  stockfish.uci('isready')
+  if (!initialized) {
+    pendingAnalysis = command
+    return
+  }
+
+  if (searchActive) {
+    pendingAnalysis = command
+    stoppingForPending = true
+    stockfish.uci('stop')
+    return
+  }
+
+  startAnalysis(command)
 }
 
 function onStop() {
+  latestSearchId = null
   pendingAnalysis = null
+  stoppingForPending = false
   stockfish?.uci('stop')
 }
 
@@ -159,6 +205,7 @@ self.onmessage = (event: MessageEvent<EngineWorkerCommand>) => {
   }
 
   if (command.type === 'analyze') {
+    latestSearchId = command.searchId
     void onAnalyze(command)
     return
   }

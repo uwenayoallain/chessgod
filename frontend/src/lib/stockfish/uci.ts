@@ -27,11 +27,22 @@ export function parseUCIInfoLine(line: string): UCIInfo | null {
   const mateMatch = line.match(/\bscore mate (-?\d+)/)
   const pvIndex = line.indexOf(' pv ')
 
-  if (!depthMatch || pvIndex === -1) {
+  // Aspiration-search bounds are not exact evaluations. Publishing them as
+  // scores can invent blunders and poison persisted training evidence.
+  if (
+    !depthMatch ||
+    pvIndex === -1 ||
+    (!cpMatch && !mateMatch) ||
+    /\b(?:lowerbound|upperbound)\b/.test(line)
+  ) {
     return null
   }
 
-  const pv = line.slice(pvIndex + 4).trim().split(/\s+/).filter(Boolean)
+  const pv = line
+    .slice(pvIndex + 4)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
   if (!pv.length) {
     return null
   }

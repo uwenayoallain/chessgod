@@ -8,6 +8,7 @@ export type EngineWorkerCommand =
     }
   | {
       type: 'analyze'
+      searchId: number
       fen: string
       depth: number
       multiPV: number
@@ -24,6 +25,7 @@ export type EngineWorkerEvent =
   | {
       type: 'line'
       line: string
+      searchId: number | null
     }
   | {
       type: 'error'

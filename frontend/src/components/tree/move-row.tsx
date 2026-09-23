@@ -12,10 +12,10 @@ export function MoveRow({ move, onSelect }: MoveRowProps) {
     <div className="move-row">
       <button onClick={() => onSelect(move)} type="button">
         <div className="toolbar" style={{ justifyContent: 'space-between' }}>
-          <strong>{move.san}</strong>
+          <strong className="san">{move.san}</strong>
           <div className="toolbar" style={{ gap: 6 }}>
             <span className="muted">
-              {move.game_count}
+              {move.game_count.toLocaleString()}
               <span className="faint" style={{ fontSize: 11, marginLeft: 3 }}>
                 ({move.white_wins}W-{move.draws}D-{move.black_wins}L)
               </span>

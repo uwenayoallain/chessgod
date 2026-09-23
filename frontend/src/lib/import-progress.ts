@@ -122,14 +122,16 @@ export function reduceImportProgress(
 
 export function formatImportProgressLabel(progress: ImportProgress | null, status: string) {
   if (!progress) {
-    return status === 'complete' ? 'Import complete' : 'Starting import...'
+    return status === 'complete' ? 'Import complete' : 'Starting import…'
   }
 
   if (status === 'complete' || progress.currentGameLabel === 'Import complete') {
     return `Import complete · ${pluralize(progress.newGames, 'new game')}`
   }
 
-  const cacheLabel = progress.cached ? 'cached' : `${pluralize(progress.newGames, 'new game')} found`
+  const cacheLabel = progress.cached
+    ? 'cached'
+    : `${pluralize(progress.newGames, 'new game')} found`
   return `Archive ${progress.archiveIndex}/${progress.totalArchives} · ${cacheLabel}`
 }
 
@@ -137,7 +139,10 @@ export function formatImportProgressDetail(progress: ImportProgress | null) {
   if (!progress) return 'Connecting to Chess.com archives'
 
   if (progress.currentGameLabel === 'Import complete') {
-    const cached = progress.cachedArchives > 0 ? ` · ${pluralize(progress.cachedArchives, 'cached archive')}` : ''
+    const cached =
+      progress.cachedArchives > 0
+        ? ` · ${pluralize(progress.cachedArchives, 'cached archive')}`
+        : ''
     return `${pluralize(progress.skippedGames, 'existing game')} skipped${cached}`
   }
 
@@ -145,6 +150,11 @@ export function formatImportProgressDetail(progress: ImportProgress | null) {
     return `${progress.currentArchive} reused from cache · ${pluralize(progress.archiveSkippedGames, 'game')} already stored`
   }
 
-  const archiveTotal = progress.gamesInArchive > 0 ? progress.gamesInArchive : '?'
-  return `${progress.currentArchive} · ${progress.currentGameIndex}/${archiveTotal} games · ${importCount(progress.archiveNewGames, 'new here')} · ${importCount(progress.archiveSkippedGames, 'existing here')}`
+  // Before the archive reports its size there is no denominator to show, and
+  // "0/? games" is worse than saying nothing about the total.
+  const counted =
+    progress.gamesInArchive > 0
+      ? `${progress.currentGameIndex}/${progress.gamesInArchive} games`
+      : 'reading games'
+  return `${progress.currentArchive} · ${counted} · ${importCount(progress.archiveNewGames, 'new here')} · ${importCount(progress.archiveSkippedGames, 'existing here')}`
 }

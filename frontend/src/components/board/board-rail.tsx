@@ -1,14 +1,24 @@
-import { FlipVertical, GraduationCap, RotateCcw, Search, StepBack, StepForward, X } from 'lucide-react'
+import {
+  Gauge,
+  GraduationCap,
+  FlipVertical,
+  RotateCcw,
+  Search,
+  StepBack,
+  StepForward,
+  Target,
+  X,
+} from 'lucide-react'
 import { type ReactNode, useEffect } from 'react'
 
 import { MoveList } from '@/components/board/move-list'
 import { Button } from '@/components/ui/button'
-import { useActiveReplayLine } from '@/hooks/use-active-replay-line'
+import { useAnalyzeLine } from '@/hooks/use-analyze-line'
 import { useEngine } from '@/hooks/use-engine'
 import { useTrainingMode } from '@/hooks/use-training-mode'
-import { prefetchBookPlies } from '@/lib/analysis/book-moves'
-import { api } from '@/lib/api'
 import { useAppStore } from '@/store/app-store'
+import { useEngineStore } from '@/store/engine-store'
+import { useIsSparring } from '@/store/spar-store'
 
 export function BoardRail({
   actions,
@@ -40,43 +50,87 @@ export function BoardRail({
     analysisRequested,
     setAnalysisRequested,
   } = useAppStore()
-  const setBookPlies = useAppStore((state) => state.setBookPlies)
+  const engineDepth = useEngineStore((state) => state.engineDepth)
 
   const training = useTrainingMode()
-  const { analyze, queueReplayAnalysis, enabled } = useEngine()
-  const { fenHistory, replayMoves: activeReplayMoves } = useActiveReplayLine()
+  const { activeMode, analyze } = useEngine({ autoAnalyze: false })
+  const { analyzeLine, canAnalyze } = useAnalyzeLine()
+  // Mid-game against the engine an evaluation is the answer to the next move.
+  const sparring = useIsSparring()
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (training.active) return
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return
-      if (e.key === 'ArrowLeft') { e.preventDefault(); goBack() }
-      else if (e.key === 'ArrowRight') { e.preventDefault(); goForward() }
-      else if (e.key === 'Home') { e.preventDefault(); resetToStart() }
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement
+      )
+        return
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        goBack()
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        goForward()
+      } else if (e.key === 'Home') {
+        e.preventDefault()
+        resetToStart()
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault()
+        flipBoard()
+      }
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [goBack, goForward, resetToStart, training.active])
+  }, [flipBoard, goBack, goForward, resetToStart, training.active])
 
   return (
     <aside className="workspace-rail">
-      <div className="workspace-rail__section">
-        <div className="workspace-rail__label">Board</div>
+      <div className="workspace-rail__section workspace-rail__section--board">
         <div className="workspace-rail__buttons">
-          <Button disabled={!nodes[currentNodeId]?.parentId || training.active} onClick={goBack} type="button">
+          <Button
+            aria-label="Previous move (←)"
+            disabled={!nodes[currentNodeId]?.parentId || training.active}
+            onClick={goBack}
+            title="Previous move (←)"
+            type="button"
+          >
             <StepBack size={16} />
           </Button>
-          <Button disabled={!(nodes[currentNodeId]?.children.length) || training.active} onClick={goForward} type="button">
+          <Button
+            aria-label="Next move (→)"
+            disabled={!nodes[currentNodeId]?.children.length || training.active}
+            onClick={goForward}
+            title="Next move (→)"
+            type="button"
+          >
             <StepForward size={16} />
           </Button>
-          <Button disabled={training.active} onClick={resetToStart} type="button">
+          <Button
+            aria-label="Reset to start (Home)"
+            disabled={training.active}
+            onClick={resetToStart}
+            title="Reset to start (Home)"
+            type="button"
+          >
             <RotateCcw size={16} />
           </Button>
-          <Button onClick={flipBoard} type="button">
+          <Button
+            aria-label="Flip board (F)"
+            onClick={flipBoard}
+            title="Flip board (F)"
+            type="button"
+          >
             <FlipVertical size={16} />
           </Button>
           {loadedContextLabel && onClearLoadedContext ? (
-            <Button disabled={training.active} onClick={onClearLoadedContext} type="button" variant="ghost">
+            <Button
+              disabled={training.active}
+              onClick={onClearLoadedContext}
+              type="button"
+              variant="ghost"
+            >
               <X size={16} />
               <span>{loadedContextLabel}</span>
             </Button>
@@ -93,74 +147,54 @@ export function BoardRail({
         </label>
       </div>
 
-      <div className="workspace-rail__section">
-        <div className="workspace-rail__label">Analysis</div>
+      <div className="workspace-rail__section workspace-rail__section--analysis">
         <div className="workspace-rail__stack">
-          <Button
-            onClick={() => {
-              const requestFenHistory = [...fenHistory]
-              const requestReplayMoves = [...activeReplayMoves]
-
-              void (async () => {
+          <div className="workspace-rail__buttons">
+            <Button
+              disabled={sparring}
+              onClick={() => {
                 setAnalysisRequested(true)
-                let didWarmStartEngine = false
-
-                if (!enabled) {
-                  await analyze()
-                  didWarmStartEngine = true
-                }
-
-                if (requestFenHistory.length > 1) {
-                  await queueReplayAnalysis(requestFenHistory)
-                } else if (!didWarmStartEngine) {
-                  await analyze()
-                }
-
-                if (!requestReplayMoves.length) {
-                  setBookPlies([])
-                  return
-                }
-
-                void prefetchBookPlies({
-                  fenHistory: requestFenHistory,
-                  fetchTheoryCompare: async (fen) => {
-                    try {
-                      const response = await api.get<{ master_moves: Array<{ san: string; uci?: string | null }> }>('/api/theory/compare', {
-                        params: { fen },
-                      })
-                      return response.data
-                    } catch {
-                      return null
-                    }
-                  },
-                  replayMoves: requestReplayMoves,
-                }).then((result) => {
-                  setBookPlies(result.plies)
-                  if (result.hadErrors) {
-                    console.warn('[chessgod] Book moves partially loaded — theory API returned errors for some positions.')
-                  }
-                }).catch((err) => {
-                  console.warn('[chessgod] Failed to load book moves:', err)
-                })
-              })()
-            }}
+                void analyze(undefined, true, { stable: false })
+              }}
+              type="button"
+              variant={activeMode === 'quick' || activeMode === 'standard' ? 'primary' : 'default'}
+            >
+              <Gauge size={14} />
+              <span>Quick · d18</span>
+            </Button>
+            <Button
+              disabled={sparring}
+              onClick={() => {
+                setAnalysisRequested(true)
+                void analyze(undefined, true, { deep: true })
+              }}
+              type="button"
+              variant={activeMode === 'deep' ? 'primary' : 'default'}
+            >
+              <Target size={14} />
+              <span>Deep · d{engineDepth}</span>
+            </Button>
+          </div>
+          <Button
+            disabled={!canAnalyze || sparring}
+            onClick={() => void analyzeLine()}
             type="button"
             variant={analysisRequested ? 'primary' : 'default'}
           >
             <Search size={14} />
-            <span style={{ marginLeft: 6 }}>Request Evaluation</span>
+            <span>Analyze line</span>
           </Button>
         </div>
       </div>
 
       {loadedReplayMoves.length > 0 ? (
-        <div className="workspace-rail__section">
+        <div className="workspace-rail__section workspace-rail__section--line-training">
           <div className="workspace-rail__label">Training</div>
           <div className="workspace-rail__stack">
             {!training.active ? (
               <Button onClick={training.start} type="button" variant="primary">
                 <GraduationCap size={14} />
-                <span style={{ marginLeft: 6 }}>Train on this line</span>
+                <span>Train on this line</span>
               </Button>
             ) : (
               <>
@@ -182,9 +216,13 @@ export function BoardRail({
                 ) : null}
                 <div className="workspace-rail__buttons">
                   {training.status === 'incorrect' ? (
-                    <Button onClick={training.retry} type="button">Retry</Button>
+                    <Button onClick={training.retry} type="button">
+                      Retry
+                    </Button>
                   ) : null}
-                  <Button onClick={training.stop} type="button" variant="ghost">Stop Training</Button>
+                  <Button onClick={training.stop} type="button" variant="ghost">
+                    Stop Training
+                  </Button>
                 </div>
               </>
             )}
@@ -193,20 +231,22 @@ export function BoardRail({
       ) : null}
 
       {actions ? (
-        <div className="workspace-rail__section">
-          <div className="workspace-rail__label">Actions</div>
+        <div className="workspace-rail__section workspace-rail__section--actions">
           <div className="workspace-rail__stack">{actions}</div>
         </div>
       ) : null}
 
       {showColorFilter || showTimeClassFilter ? (
-        <div className="workspace-rail__section">
+        <div className="workspace-rail__section workspace-rail__section--filters">
           <div className="workspace-rail__label">Filters</div>
           <div className="workspace-rail__stack">
             {showColorFilter ? (
               <select
+                aria-label="Filter by the color you played"
                 className="select"
-                onChange={(event) => setColorFilter(event.target.value as 'white' | 'black' | 'both')}
+                onChange={(event) =>
+                  setColorFilter(event.target.value as 'white' | 'black' | 'both')
+                }
                 value={colorFilter}
               >
                 <option value="both">Both colors</option>
@@ -215,11 +255,17 @@ export function BoardRail({
               </select>
             ) : null}
             {showTimeClassFilter ? (
-              <select className="select" onChange={(event) => setTimeClassFilter(event.target.value || null)} value={timeClassFilter ?? ''}>
-                <option value="">All time classes</option>
-                <option value="bullet">Bullet</option>
+              <select
+                aria-label="Filter by time control"
+                className="select"
+                onChange={(event) => setTimeClassFilter(event.target.value || null)}
+                value={timeClassFilter ?? ''}
+              >
+                <option value="rapid_blitz">Rapid + Blitz</option>
                 <option value="blitz">Blitz</option>
                 <option value="rapid">Rapid</option>
+                <option value="">All time classes</option>
+                <option value="bullet">Bullet</option>
                 <option value="daily">Daily</option>
               </select>
             ) : null}
@@ -227,8 +273,7 @@ export function BoardRail({
         </div>
       ) : null}
 
-      <div className="workspace-rail__section workspace-rail__section--fill">
-        <div className="workspace-rail__label">Move List</div>
+      <div className="workspace-rail__section workspace-rail__section--fill workspace-rail__section--moves">
         <div className="workspace-rail__moves">
           <MoveList showHeader={false} />
         </div>

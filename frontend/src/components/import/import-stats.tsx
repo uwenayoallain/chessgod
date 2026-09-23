@@ -21,12 +21,17 @@ export function ImportStats() {
             <div className="muted">Status</div>
             <div>{status}</div>
             <div className="muted">Imported games</div>
-            <div>{data?.total_games ?? 0}</div>
+            <div>{(data?.total_games ?? 0).toLocaleString()}</div>
           </>
         ) : (
           <>
-            <div className="muted">Imports are stored in the database as games arrive, so stopping midway keeps the games already written.</div>
-            <div className="muted">Explorer, theory, and analysis unlock automatically after the first successful import.</div>
+            <div className="muted">
+              Imports are stored in the database as games arrive, so stopping midway keeps the games
+              already written.
+            </div>
+            <div className="muted">
+              Explorer, theory, and analysis unlock automatically after the first successful import.
+            </div>
           </>
         )}
       </CardBody>

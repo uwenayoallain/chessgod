@@ -2,7 +2,9 @@ import { useState } from 'react'
 
 import { api } from '@/lib/api'
 import { getApiErrorMessage } from '@/lib/api-errors'
+import { describeImportError } from '@/lib/import-errors'
 import { reduceImportProgress, type ImportEvent } from '@/lib/import-progress'
+import { queryClient } from '@/lib/query-client'
 import { useAppStore } from '@/store/app-store'
 
 export function useImport(username: string) {
@@ -20,8 +22,12 @@ export function useImport(username: string) {
     setImportProgress(null)
 
     try {
-      await api.post(`/api/import/${username}`, undefined, { params: { force: options?.force ?? false } })
-      const source = new EventSource(`${import.meta.env.VITE_API_URL ?? ''}/api/import/${username}/status`)
+      await api.post(`/api/import/${username}`, undefined, {
+        params: { force: options?.force ?? false },
+      })
+      const source = new EventSource(
+        `${import.meta.env.VITE_API_URL ?? ''}/api/import/${username}/status`,
+      )
       source.onmessage = (event) => {
         let payload: ImportEvent
         try {
@@ -30,16 +36,25 @@ export function useImport(username: string) {
           console.warn('[chessgod] Malformed SSE event data:', event.data)
           return
         }
-        if (payload.type === 'archive_start' || payload.type === 'game_progress' || payload.type === 'archive_complete' || payload.type === 'complete') {
+        if (
+          payload.type === 'archive_start' ||
+          payload.type === 'game_progress' ||
+          payload.type === 'archive_complete' ||
+          payload.type === 'complete'
+        ) {
           setImportProgress(reduceImportProgress(useAppStore.getState().importProgress, payload))
+        }
+        if (payload.type === 'archive_complete' && (payload.new_games ?? 0) > 0) {
+          void queryClient.invalidateQueries()
         }
         if (payload.type === 'complete') {
           setImportStatus('complete')
           source.close()
+          void queryClient.invalidateQueries()
         }
         if (payload.type === 'error') {
           setImportStatus('error')
-          setError(String(payload.message ?? 'Import failed'))
+          setError(describeImportError(String(payload.message ?? 'Import failed'), username))
           source.close()
         }
       }
@@ -50,7 +65,7 @@ export function useImport(username: string) {
       }
     } catch (caught) {
       setImportStatus('error')
-      setError(getApiErrorMessage(caught, 'Import failed'))
+      setError(describeImportError(getApiErrorMessage(caught, 'Import failed'), username))
     }
   }
 

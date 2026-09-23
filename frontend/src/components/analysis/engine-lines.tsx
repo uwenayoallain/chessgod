@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 import { Chess } from 'chess.js'
 
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
@@ -6,6 +6,7 @@ import { getPvPrefixToMove } from '@/lib/analysis/pv-actions'
 import { scoreToWhitePerspective } from '@/lib/stockfish/eval'
 import type { UCIInfo } from '@/lib/stockfish/uci'
 import { useAppStore } from '@/store/app-store'
+import { useEngineStore } from '@/store/engine-store'
 
 type SanMove = {
   san: string
@@ -63,51 +64,85 @@ function scoreLabel(score: UCIInfo['score'], fen: string): { text: string; white
 }
 
 export function EngineLines({
+  hidden = false,
   lines,
   isAnalyzing,
-  statusMessage,
 }: {
+  hidden?: boolean
   lines: UCIInfo[]
   isAnalyzing?: boolean
-  statusMessage?: string
 }) {
   const currentFen = useAppStore((state) => state.currentFen)
   const currentNodeId = useAppStore((state) => state.currentNodeId)
   const nodes = useAppStore((state) => state.nodes)
   const pushPosition = useAppStore((state) => state.pushPosition)
+  const enabled = useEngineStore((state) => state.enabled)
+  const highPerformance = useEngineStore((state) => state.highPerformance)
+  const setHighPerformance = useEngineStore((state) => state.setHighPerformance)
+
+  // Cache pvToSan results keyed by fen+pv — avoids recreating Chess instances
+  // on every depth update. Scoped to this component instance, GC'd on unmount.
+  const pvCache = useRef<Map<string, SanMove[]>>(new Map())
 
   const parsed = useMemo(() => {
     const currentPly = nodes[currentNodeId]?.ply ?? 0
     return lines
-      .map((line) => ({
-        line,
-        moves: pvToSan(currentFen, line.pv),
-        score: scoreLabel(line.score, currentFen),
-        startPly: currentPly,
-      }))
+      .map((line) => {
+        const cacheKey = `${currentFen}|${line.pv.join(' ')}`
+        let moves = pvCache.current.get(cacheKey)
+        if (!moves) {
+          moves = pvToSan(currentFen, line.pv)
+          pvCache.current.set(cacheKey, moves)
+        }
+        return { line, moves, score: scoreLabel(line.score, currentFen), startPly: currentPly }
+      })
       .filter((entry) => entry.moves.length > 0)
   }, [currentFen, currentNodeId, lines, nodes])
 
   return (
     <Card>
       <CardHeader>
-        <h2>Engine Lines</h2>
+        <div className="engine-lines__title">
+          <h2>Best lines</h2>
+          <span>Live</span>
+        </div>
+        <label
+          className="engine-lines__performance"
+          title="Use a 1GB hash table for deeper analysis. This restarts the engine."
+        >
+          <input
+            type="checkbox"
+            checked={highPerformance}
+            onChange={(event) => void setHighPerformance(event.target.checked)}
+          />
+          <span>Deeper search</span>
+        </label>
       </CardHeader>
       <CardBody className="column" style={{ minHeight: 120 }}>
-        {!parsed.length ? (
-          <div className="muted">
-            {statusMessage ?? (isAnalyzing ? 'Analyzing…' : 'Start analysis to see principal variations.')}
+        {hidden ? (
+          <div className="muted engine-lines__empty">
+            Hidden while you play the engine — it returns when the game ends.
+          </div>
+        ) : !parsed.length ? (
+          <div className="muted engine-lines__empty">
+            {isAnalyzing
+              ? 'Analyzing…'
+              : enabled
+                ? 'Play a move or load a game to see the best lines for that position.'
+                : 'Turn the engine on to see its best lines.'}
           </div>
         ) : null}
-        {parsed.length && isAnalyzing && statusMessage ? (
-          <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>{statusMessage}</div>
-        ) : null}
-        {parsed.map(({ line, moves, score, startPly }) => (
+        {(hidden ? [] : parsed).map(({ line, moves, score, startPly }) => (
           <div className="engine-line" key={`${line.multipv}-${line.depth}`}>
             <div className="engine-line__header">
               <div className="engine-line__eval" style={{ color: scoreColor(score.whiteCp) }}>
-                <span className="engine-line__eval-bar" style={{ background: scoreColor(score.whiteCp) }} />
-                <span className="mono" style={{ fontWeight: 700, fontSize: 14 }}>{score.text}</span>
+                <span
+                  className="engine-line__eval-bar"
+                  style={{ background: scoreColor(score.whiteCp) }}
+                />
+                <span className="mono" style={{ fontWeight: 700, fontSize: 14 }}>
+                  {score.text}
+                </span>
               </div>
               <div className="engine-line__meta">
                 <span className="engine-line__badge">d{line.depth}</span>

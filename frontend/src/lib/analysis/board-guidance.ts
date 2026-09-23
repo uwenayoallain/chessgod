@@ -3,8 +3,10 @@ import type { CSSProperties } from 'react'
 
 import { findOpponentHangingPieceThreat } from './hanging-threats'
 
-export const BEST_MOVE_ARROW_COLOR = 'rgba(20, 184, 166, 0.72)'
-export const THREAT_ARROW_COLOR = 'rgba(239, 68, 68, 0.72)'
+// Amber reads on both square colors; red is reserved for the threat arrow.
+export const BEST_MOVE_ARROW_COLOR = 'rgba(255, 170, 0, 0.85)'
+export const THREAT_ARROW_COLOR = 'rgba(214, 60, 45, 0.8)'
+export const LAST_MOVE_SQUARE = 'rgba(255, 255, 51, 0.42)'
 
 export type BoardArrow = {
   startSquare: string
@@ -17,24 +19,18 @@ export function getLatestMoveSquares(uci: string | null | undefined): [string, s
   return [uci.slice(0, 2), uci.slice(2, 4)]
 }
 
-export function buildLatestMoveSquareStyles(uci: string | null | undefined): Record<string, CSSProperties> {
+export function buildLatestMoveSquareStyles(
+  uci: string | null | undefined,
+): Record<string, CSSProperties> {
   const squares = getLatestMoveSquares(uci)
   if (!squares) return {}
 
   const [from, to] = squares
-  return {
-    [from]: {
-      backgroundColor: 'rgba(250, 204, 21, 0.3)',
-      boxShadow: 'inset 0 0 0 3px rgba(250, 204, 21, 0.55)',
-    },
-    [to]: {
-      backgroundColor: 'rgba(250, 204, 21, 0.2)',
-      boxShadow: 'inset 0 0 0 3px rgba(250, 204, 21, 0.45)',
-    },
-  }
+  const overlay = { backgroundImage: `linear-gradient(${LAST_MOVE_SQUARE}, ${LAST_MOVE_SQUARE})` }
+  return { [from]: { ...overlay }, [to]: { ...overlay } }
 }
 
-function isLegalUciMove(fen: string, uci: string) {
+export function isLegalUciMove(fen: string, uci: string) {
   const squares = getLatestMoveSquares(uci)
   if (!squares) return false
 
@@ -59,7 +55,13 @@ function uciToArrow(uci: string | null | undefined, fen: string, color: string):
   return { color, endSquare, startSquare }
 }
 
-export function buildGuidanceArrows({ bestMove, fen }: { bestMove: string | null | undefined; fen: string }): BoardArrow[] {
+export function buildGuidanceArrows({
+  bestMove,
+  fen,
+}: {
+  bestMove: string | null | undefined
+  fen: string
+}): BoardArrow[] {
   const arrows: BoardArrow[] = []
   const bestArrow = uciToArrow(bestMove, fen, BEST_MOVE_ARROW_COLOR)
   if (bestArrow) {

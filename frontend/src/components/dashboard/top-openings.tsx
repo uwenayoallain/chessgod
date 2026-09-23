@@ -11,15 +11,10 @@ export function TopOpenings({ openings }: { openings: OpeningStat[] }) {
       </CardHeader>
       <CardBody className="stats-panel__body stats-panel__body--list">
         {openings.map((opening, index) => (
-          <div
-            className="stats-opening-row"
-            key={opening.opening_name}
-          >
-            <span className="muted stats-opening-row__rank">
-              {index + 1}
-            </span>
+          <div className="stats-opening-row" key={opening.opening_name}>
+            <span className="muted stats-opening-row__rank">{index + 1}</span>
             <span className="stats-opening-row__name">{opening.opening_name}</span>
-            <span className="badge">{opening.games} games</span>
+            <span className="badge">{opening.games.toLocaleString()} games</span>
           </div>
         ))}
       </CardBody>

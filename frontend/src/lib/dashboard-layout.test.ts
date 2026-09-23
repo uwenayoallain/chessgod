@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vite-plus/test'
 
 import { readDashboardLayout, writeDashboardLayout } from './dashboard-layout'
 
@@ -22,7 +22,7 @@ describe('dashboard layout persistence', () => {
     })
 
     expect(readDashboardLayout(storage)).toEqual({
-      activeTab: 'openings',
+      activeTab: 'explore',
       railWidth: 400,
       sidebarCollapsed: false,
       sidebarWidth: 400,
@@ -33,17 +33,29 @@ describe('dashboard layout persistence', () => {
     const storage = storageWith({})
 
     writeDashboardLayout(storage, {
-      activeTab: 'engine',
+      activeTab: 'review',
       railWidth: 240,
       sidebarCollapsed: true,
       sidebarWidth: 520,
     })
 
     expect(readDashboardLayout(storage)).toEqual({
-      activeTab: 'engine',
+      activeTab: 'review',
       railWidth: 240,
       sidebarCollapsed: true,
       sidebarWidth: 520,
     })
+  })
+
+  it('maps legacy tab ids from before the 2-tab consolidation', () => {
+    expect(readDashboardLayout(storageWith({ 'chessgod.activeTab': 'engine' })).activeTab).toBe(
+      'explore',
+    )
+    expect(readDashboardLayout(storageWith({ 'chessgod.activeTab': 'stats' })).activeTab).toBe(
+      'review',
+    )
+    expect(
+      readDashboardLayout(storageWith({ 'chessgod.activeTab': 'recommendations' })).activeTab,
+    ).toBe('review')
   })
 })
