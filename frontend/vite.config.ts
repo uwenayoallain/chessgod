@@ -3,6 +3,9 @@ import { defineConfig, lazyPlugins } from 'vite-plus'
 import react from '@vitejs/plugin-react'
 
 const serverOptions = {
+  // Vite refuses requests for any host it does not know, so the public
+  // hostname behind the Cloudflare tunnel got a 403 on every page.
+  allowedHosts: ['chess.uwe.rw', ...(process.env.ALLOWED_HOSTS?.split(',').filter(Boolean) ?? [])],
   headers: {
     'Cross-Origin-Embedder-Policy': 'require-corp',
     'Cross-Origin-Opener-Policy': 'same-origin',

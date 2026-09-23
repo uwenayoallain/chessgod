@@ -54,14 +54,19 @@ crawl-recreate:
 backend-restart:
 	docker compose restart backend
 
+# Both env files: `--env-file` replaces `.env` rather than adding to it, so
+# naming only .env.tunnel dropped LICHESS_API_TOKEN and CRAWL_USERNAME and the
+# public stack ran with master theory blocked. The later file wins on overlap.
+TUNNEL_COMPOSE = docker compose --env-file .env --env-file .env.tunnel -f docker-compose.yml -f docker-compose.tunnel.yml
+
 tunnel:
-	docker compose --env-file .env.tunnel -f docker-compose.yml -f docker-compose.tunnel.yml up --build
+	$(TUNNEL_COMPOSE) up --build
 
 tunnel-down:
-	docker compose --env-file .env.tunnel -f docker-compose.yml -f docker-compose.tunnel.yml down
+	$(TUNNEL_COMPOSE) --profile crawl down
 
 tunnel-logs:
-	docker compose --env-file .env.tunnel -f docker-compose.yml -f docker-compose.tunnel.yml logs -f
+	$(TUNNEL_COMPOSE) logs -f
 
 # `--profile crawl` on purpose: without it, `down` leaves the opt-in crawler
 # running against a backend that is no longer there. It did exactly that for 35
