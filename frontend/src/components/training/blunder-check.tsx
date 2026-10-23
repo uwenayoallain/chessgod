@@ -3,6 +3,7 @@ import { ArrowRight, RotateCcw } from 'lucide-react'
 
 import { DrillContinuation } from '@/components/improvement/drill-continuation'
 import { HintControl } from '@/components/training/hint-control'
+import { ExploreButton } from '@/components/ui/explore-button'
 import { useHint } from '@/hooks/use-hint'
 import type { Hint } from '@/lib/training/hints'
 import { Emblem, Medal, TitlePiece } from '@/components/training/trophies'
@@ -362,15 +363,18 @@ export function BlunderCheck({ username, onBegin }: { username: string; onBegin?
             asking phase and a child of the question's root. */}
         {question && lesson ? <DrillContinuation active fen={fullFen(question.fen)} /> : null}
         {lesson ? (
-          <Button onClick={() => ask(questions, index + 1)} type="button" variant="primary">
-            {index + 1 < questions.length ? (
-              <>
-                Next position <ArrowRight size={14} />
-              </>
-            ) : (
-              'See how you did'
-            )}
-          </Button>
+          <div className="trainer-actions">
+            <Button onClick={() => ask(questions, index + 1)} type="button" variant="primary">
+              {index + 1 < questions.length ? (
+                <>
+                  Next position <ArrowRight size={14} />
+                </>
+              ) : (
+                'See how you did'
+              )}
+            </Button>
+            <ExploreButton />
+          </div>
         ) : null}
       </section>
     )

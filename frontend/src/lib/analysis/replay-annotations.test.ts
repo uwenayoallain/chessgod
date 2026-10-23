@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test'
 
-import { buildReplayMoveAnnotations } from './replay-annotations'
+import { buildReplayMoveAnnotations, isSacrifice } from './replay-annotations'
 import type { UCIInfo } from '@/lib/stockfish/uci'
 import { Chess } from 'chess.js'
 
@@ -357,9 +357,24 @@ describe('brilliant moves', () => {
     expect(annotate()[0].label).toBe('Brilliant')
   })
 
-  it('does not award a plain capture that keeps the material', () => {
-    // Same move, but the opponent does not recapture: nothing was sacrificed.
-    expect(annotate({ reply: 'f6g4' })[0].label).toBe('Best')
+  it('judges the sacrifice on the board, not on whether the engine takes it', () => {
+    // Chess.com's reading: the bishop is offered whatever Black replies.
+    expect(annotate({ reply: 'f6g4' })[0].label).toBe('Brilliant')
+  })
+
+  it('does not award a quiet best move that offers nothing', () => {
+    const parent = 'r1bq1rk1/ppp2ppp/5n2/8/8/3B1N2/PPP2PPP/R2Q1RK1 w - - 0 1'
+    const child = 'r1bq1rk1/ppp2ppp/5n2/8/8/P2B1N2/1PP2PPP/R2Q1RK1 b - - 0 1'
+    const [graded] = buildReplayMoveAnnotations({
+      analysisByFen: {
+        [parent]: { bestMove: 'a2a3', depth: 22, lines: [line({ pv: ['a2a3'], value: 150 })] },
+        [child]: { bestMove: 'a7a6', depth: 22, lines: [line({ pv: ['a7a6'], value: -150 })] },
+      },
+      bookPlies: new Set(),
+      fenHistory: [parent, child],
+      replayMoves: [{ ply: 21, san: 'a3', uci: 'a2a3', fen: child }],
+    })
+    expect(graded.label).toBe('Best')
   })
 
   it('does not award a sacrifice in an already winning position', () => {
@@ -431,5 +446,32 @@ describe('missed wins', () => {
     })
     expect(annotations[0].cpLoss).toBe(1500)
     expect(annotations[0].label).toBe('Missed Win')
+  })
+})
+
+describe('isSacrifice', () => {
+  it('reads a hanging piece as a sacrifice, judged on the board after the move', () => {
+    // The Greek gift: after Bxh7+ the bishop stands undefended next to the king.
+    expect(isSacrifice('r1bq1rk1/ppp2ppB/2n5/3pp3/8/8/PPPPPPPP/RNBQK1NR b KQ - 0 1', 1)).toBe(true)
+    // An exchange sacrifice: the rook on c3 can be taken by a pawn.
+    expect(isSacrifice('r1bq1rk1/pp3ppp/2n5/8/8/1Pr5/P1P2PPP/RNBQK1NR w KQ - 0 1')).toBe(true)
+  })
+
+  it('does not read an even trade, a trade gone wrong or a pawn as one', () => {
+    // A knight on e5 defended by the d4 pawn, attacked by a knight: an even trade.
+    expect(isSacrifice('r1bqkb1r/pppn1ppp/5n2/4N3/3PP3/8/PPP2PPP/RNBQKB1R b KQkq - 0 1')).toBe(
+      false,
+    )
+    // The same knight attacked by a pawn is a knight for a pawn: a sacrifice.
+    expect(isSacrifice('rnbqkb1r/ppp2ppp/3p1n2/4N3/3PP3/8/PPP2PPP/RNBQKB1R b KQkq - 0 1')).toBe(
+      true,
+    )
+    // Unless the knight had just taken a pawn there and gets a pawn back: a trade.
+    expect(isSacrifice('rnbqkb1r/ppp2ppp/3p1n2/4N3/3PP3/8/PPP2PPP/RNBQKB1R b KQkq - 0 1', 1)).toBe(
+      false,
+    )
+    // A pawn on e4 the opponent can take.
+    expect(isSacrifice('rnbqkbnr/pppp1ppp/8/4p3/3PP3/8/PPP2PPP/RNBQKBNR b KQkq - 0 1')).toBe(false)
+    expect(isSacrifice('not a fen')).toBe(false)
   })
 })

@@ -19,6 +19,7 @@ import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { getTrainingTimeClass, useImprovementPlan, type DrillCard } from '@/hooks/use-improvement'
 import { DrillContinuation } from '@/components/improvement/drill-continuation'
 import { HintControl } from '@/components/training/hint-control'
+import { ExploreButton } from '@/components/ui/explore-button'
 import { useHint } from '@/hooks/use-hint'
 import { drillLine, drillStep, drillStepLabel } from '@/lib/drills/drill-steps'
 import { recommendedTheme } from '@/lib/drills/recommended'
@@ -563,6 +564,7 @@ function ScopedImprovementTrainer({
                           <Swords size={14} /> Play it out
                         </Button>
                       ) : null}
+                      <ExploreButton />
                     </div>
                     <div className="drill-feedback__lesson">
                       <p>{card.explanation}</p>

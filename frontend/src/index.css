@@ -11712,3 +11712,168 @@ button.sparring__game:disabled {
   width: 7rem;
   flex: none;
 }
+
+/* ---------------------------------------------------------------------------
+   GAME REVIEW — about the move on the board. The current-move box keeps one
+   height whatever it says (three fixed lines), the summary is each side's
+   accuracy over a table of grade counts, and the move list keeps a slot for
+   its grade icon so a grade arriving moves nothing. */
+.review-move {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-height: 6.4rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.review-move__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  min-height: 1.6rem;
+  font-size: 0.95rem;
+}
+
+.review-move__icon {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.review-move__verdict {
+  color: var(--text-muted);
+}
+
+.review-move__who {
+  font-size: 0.72rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.review-move__cost {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--danger-text);
+}
+
+.review-move__best,
+.review-move__why {
+  margin: 0;
+  min-height: 1.35em;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.review-move__why {
+  color: var(--text-muted);
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  min-height: 2.7em;
+}
+
+.review-move[data-label='Brilliant'] {
+  border-color: #1baca6;
+  background: linear-gradient(135deg, rgba(27, 172, 166, 0.16), transparent 60%), var(--surface-2);
+}
+
+.review-move[data-label='Blunder'],
+.review-move[data-label='Missed Win'] {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.review-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.review-summary__sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.review-summary__side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.5rem;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 0.72rem;
+}
+
+.review-summary__side[data-you] {
+  border: 1px solid var(--accent-edge, var(--accent));
+}
+
+.review-summary__name {
+  font-weight: 700;
+}
+
+.review-summary__accuracy {
+  font-size: 1.5rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.review-counts {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.review-counts td {
+  padding: 0.2rem 0.3rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.review-counts tr:last-child td {
+  border-bottom: 0;
+}
+
+.review-counts__count {
+  width: 2.6rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.review-counts__label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  color: var(--text-muted);
+}
+
+.move-btn .move-annotation {
+  width: 14px;
+  height: 14px;
+}
+
+/* The row of buttons that ends a question: the next step first, then the
+   way out into Explore with the position kept. */
+.trainer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.trainer-actions--quiet {
+  margin-top: 0.2rem;
+}

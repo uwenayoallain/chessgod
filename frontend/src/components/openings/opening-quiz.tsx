@@ -4,6 +4,7 @@ import { Check, ChevronRight, RotateCcw, X } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { HintControl } from '@/components/training/hint-control'
+import { ExploreButton } from '@/components/ui/explore-button'
 import { Medal } from '@/components/training/trophies'
 import { useHint } from '@/hooks/use-hint'
 import { EmptyState } from '@/components/ui/empty-state'
@@ -256,6 +257,7 @@ export function OpeningQuiz({
                 <RotateCcw size={14} /> Try again
               </Button>
             ) : null}
+            <ExploreButton />
           </>
         ) : (
           <>

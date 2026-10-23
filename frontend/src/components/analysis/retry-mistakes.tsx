@@ -5,6 +5,7 @@ import { create } from 'zustand'
 
 import { Button } from '@/components/ui/button'
 import { HintControl } from '@/components/training/hint-control'
+import { ExploreButton } from '@/components/ui/explore-button'
 import { Medal, TitlePiece } from '@/components/training/trophies'
 import { useHint } from '@/hooks/use-hint'
 import { play } from '@/lib/sound'
@@ -292,10 +293,13 @@ export function RetryMistakes() {
               : ''}
             In the game you played {moveNumber(item.ply)} {item.san}.
           </p>
-          <Button onClick={() => next(done.verdict !== 'worse')} type="button" variant="primary">
-            {session.index + 1 < session.items.length ? 'Next mistake' : 'Finish'}{' '}
-            <ArrowRight size={14} />
-          </Button>
+          <div className="trainer-actions">
+            <Button onClick={() => next(done.verdict !== 'worse')} type="button" variant="primary">
+              {session.index + 1 < session.items.length ? 'Next mistake' : 'Finish'}{' '}
+              <ArrowRight size={14} />
+            </Button>
+            <ExploreButton />
+          </div>
         </>
       ) : (
         <>

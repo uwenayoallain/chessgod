@@ -44,11 +44,10 @@ const MoveButton = memo(function MoveButton({
     >
       {ply % 2 === 1 ? <span className="move-btn__num">{Math.ceil(ply / 2)}.</span> : null}
       <span className="move-btn__san">{san}</span>
-      {label ? (
-        <span className="move-annotation" title={annotationTitle(label)}>
-          <AnnotationIcon label={label} size={14} />
-        </span>
-      ) : null}
+      {/* The slot is always there, so a grade arriving moves nothing. */}
+      <span className="move-annotation" title={label ? annotationTitle(label) : undefined}>
+        {label ? <AnnotationIcon label={label} size={14} /> : null}
+      </span>
     </button>
   )
 })

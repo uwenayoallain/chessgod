@@ -33,6 +33,7 @@ import {
   SIDEBAR_MIN,
 } from '@/lib/dashboard-layout'
 import { useRetryStore } from '@/components/analysis/retry-mistakes'
+import { OPEN_EXPLORE_EVENT } from '@/lib/explore-position'
 import { useAppStore } from '@/store/app-store'
 import { useIsSparring } from '@/store/spar-store'
 import { Celebrations, OPEN_TODAY_EVENT } from '@/components/training/training-widgets'
@@ -174,8 +175,18 @@ function Workspace({ username }: { username: string }) {
       // open on the Today page.
       window.setTimeout(() => revealSection('review-today'), 60)
     }
+    // Any trainer's "Explore this position": the Explore tab at a section.
+    function openExplore(event: Event) {
+      const section = (event as CustomEvent<{ section?: string }>).detail?.section
+      setActiveTab('explore')
+      window.setTimeout(() => revealSection(section ?? 'explore-engine'), 60)
+    }
     window.addEventListener(OPEN_TODAY_EVENT, openToday)
-    return () => window.removeEventListener(OPEN_TODAY_EVENT, openToday)
+    window.addEventListener(OPEN_EXPLORE_EVENT, openExplore)
+    return () => {
+      window.removeEventListener(OPEN_TODAY_EVENT, openToday)
+      window.removeEventListener(OPEN_EXPLORE_EVENT, openExplore)
+    }
   }, [])
   // Auto-analysis only runs while the Engine section is visible — avoids burning
   // CPU on every FEN change when the user is looking at anything else.

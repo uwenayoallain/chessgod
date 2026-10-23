@@ -1,4 +1,5 @@
-import type { ReplayMoveAnnotation } from './replay-annotations'
+import { moverCpOf, type ReplayMoveAnnotation } from './replay-annotations'
+import type { CachedEngineAnalysis } from '@/store/engine-store'
 
 export type ReviewLabel = NonNullable<ReplayMoveAnnotation['label']>
 
@@ -11,6 +12,7 @@ export const REVIEW_LABELS = [
   'Book',
   'Inaccuracy',
   'Mistake',
+  'Missed Win',
   'Blunder',
 ] as const satisfies readonly ReviewLabel[]
 
@@ -100,4 +102,85 @@ export function formatCost(cpLoss: number | null): string {
   const loss = Math.max(0, Math.round(cpLoss))
   if (loss >= 1000) return '\u2212999+'
   return `\u2212${loss}`
+}
+
+/** Winning chances from a centipawn evaluation, 0-100: the curve Lichess uses. */
+export function winningChances(cp: number): number {
+  return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * cp)) - 1)
+}
+
+/**
+ * How accurate one move was, 0-100, from the winning chances it kept: the
+ * Lichess formula, which Chess.com's accuracy resembles. A move the engine
+ * would have played is 100; losing ten points of winning chances is ~64.
+ */
+export function moveAccuracy(winBefore: number, winAfter: number): number {
+  if (winAfter >= winBefore) return 100
+  const raw = 103.1668 * Math.exp(-0.04354 * (winBefore - winAfter)) - 3.1669
+  return Math.max(0, Math.min(100, raw))
+}
+
+/**
+ * A side's accuracy over its judged moves, or null before anything is judged.
+ * Each move's chances before and after come from the evaluations either side
+ * of it, from the mover's point of view; a best move counts as 100 whatever
+ * the two searches say.
+ */
+export function sideAccuracy(
+  annotations: ReplayMoveAnnotation[],
+  fenHistory: string[],
+  analysisByFen: Record<string, CachedEngineAnalysis>,
+  side: 'white' | 'black',
+): number | null {
+  let total = 0
+  let judged = 0
+  annotations.forEach((annotation, index) => {
+    if (moverOf(annotation) !== side || annotation.cpLoss == null) return
+    const parentFen = fenHistory[index]
+    const before = parentFen ? moverCpOf(parentFen, analysisByFen[parentFen]) : null
+    const afterOpp = moverCpOf(annotation.fen, analysisByFen[annotation.fen])
+    if (before == null || afterOpp == null) return
+    const accuracy =
+      annotation.cpLoss === 0
+        ? 100
+        : moveAccuracy(winningChances(before), winningChances(-afterOpp))
+    total += accuracy
+    judged += 1
+  })
+  return judged ? Math.round((total / judged) * 10) / 10 : null
+}
+
+/** The annotation of the move that led to `fen`, or null at the start of the line. */
+export function annotationAtFen(
+  annotations: ReplayMoveAnnotation[],
+  fen: string | null | undefined,
+): ReplayMoveAnnotation | null {
+  if (!fen) return null
+  return annotations.find((annotation) => annotation.fen === fen) ?? null
+}
+
+/** How a move reads in a sentence: "is a blunder", "is the best move". */
+export function describeLabel(label: ReviewLabel | null): string {
+  switch (label) {
+    case 'Brilliant':
+      return 'is brilliant'
+    case 'Best':
+      return 'is the best move'
+    case 'Excellent':
+      return 'is excellent'
+    case 'Good':
+      return 'is good'
+    case 'Book':
+      return 'is a book move'
+    case 'Inaccuracy':
+      return 'is an inaccuracy'
+    case 'Mistake':
+      return 'is a mistake'
+    case 'Missed Win':
+      return 'misses a win'
+    case 'Blunder':
+      return 'is a blunder'
+    default:
+      return 'is not judged yet'
+  }
 }

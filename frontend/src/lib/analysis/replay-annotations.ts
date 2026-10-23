@@ -1,3 +1,4 @@
+import { Chess } from 'chess.js'
 import { scoreToWhitePerspective } from '@/lib/stockfish/eval'
 import { getTerminalOutcome } from '@/lib/stockfish/legal-analysis'
 import type { UCIInfo } from '@/lib/stockfish/uci'
@@ -111,29 +112,6 @@ function getCpLoss(
   return Math.max(0, bestMoverCp - actualMoverCp)
 }
 
-function getMaterialByColor(fen: string) {
-  const pieceValues: Record<string, number> = {
-    p: 1,
-    n: 3,
-    b: 3,
-    r: 5,
-    q: 9,
-    P: 1,
-    N: 3,
-    B: 3,
-    R: 5,
-    Q: 9,
-  }
-  const position = fen.split(' ')[0]
-  let white = 0
-  let black = 0
-  for (const ch of position) {
-    if (ch >= 'A' && ch <= 'Z' && pieceValues[ch]) white += pieceValues[ch]
-    else if (ch >= 'a' && ch <= 'z' && pieceValues[ch]) black += pieceValues[ch]
-  }
-  return { white, black }
-}
-
 function toMoverCp(score: UCIInfo['score'], fen: string): number {
   const n = scoreToWhitePerspective(score, fen)
   const cp =
@@ -147,69 +125,66 @@ function toMoverCp(score: UCIInfo['score'], fen: string): number {
 
 const PIECE_VALUE: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 }
 
-/** The piece on `square` in a FEN placement, or null for an empty square. */
-function pieceAt(placement: string, square: string): string | null {
-  const file = square.charCodeAt(0) - 97
-  const rank = Number(square[1])
-  const row = placement.split('/')[8 - rank]
-  if (row === undefined || file < 0 || file > 7) return null
-  let column = 0
-  for (const char of row) {
-    if (char >= '1' && char <= '8') {
-      column += Number(char)
-    } else {
-      if (column === file) return char
-      column += 1
-    }
-    if (column > file) return null
-  }
-  return null
-}
-
 /**
- * Material both sides hold after `replyUci` is played in `fen`.
+ * Does the side that just moved leave a piece to be taken for less than it is
+ * worth? Judged on the board, two plies deep: for every capture the opponent
+ * has, the piece taken against the cheapest way the mover can recapture. A
+ * knight or better hanging with no recapture, or taken by something cheaper
+ * with the recapture not making up the difference, is a sacrifice. A pawn is
+ * not: every sound gambit would be brilliant.
  *
- * Returns null when the reply does not start from a piece of the side to move,
- * so an unknown or stale line leaves the move ungraded rather than guessing a
- * sacrifice into existence. Counted from the board directly: replaying it with
- * chess.js cost a board load per move, on every re-grade of the whole game.
+ * This is how Chess.com reads a sacrifice — what *could* be taken — rather
+ * than whether the engine's reply takes it, which is what the earlier rule
+ * looked at and so missed every sacrifice the engine declines.
  */
-function materialAfterReply(fen: string, replyUci: string) {
-  if (!/^[a-h][1-8][a-h][1-8][qrbn]?$/.test(replyUci)) return null
-  const [placement, turn] = fen.split(' ')
-  const mover = pieceAt(placement, replyUci.slice(0, 2))
-  if (!mover || (turn === 'w') !== (mover === mover.toUpperCase())) return null
-  const material = getMaterialByColor(fen)
-  const replierIsWhite = turn === 'w'
-  let captured = pieceAt(placement, replyUci.slice(2, 4))
-  // En passant: a pawn changing file onto an empty square takes a pawn.
-  if (!captured && mover.toLowerCase() === 'p' && replyUci[0] !== replyUci[2]) captured = 'p'
-  if (captured) {
-    const value = PIECE_VALUE[captured.toLowerCase()] ?? 0
-    if (replierIsWhite) material.black -= value
-    else material.white -= value
+export function isSacrifice(childFen: string, gainedByMove = 0): boolean {
+  let board: Chess
+  try {
+    board = new Chess(childFen.split(' ').length >= 6 ? childFen : `${childFen} 0 1`)
+  } catch {
+    return false
   }
-  if (replyUci.length > 4) {
-    const gain = (PIECE_VALUE[replyUci[4]] ?? 0) - 1
-    if (replierIsWhite) material.white += gain
-    else material.black += gain
+  const captures = board.moves({ verbose: true }).filter((move) => move.captured)
+  for (const capture of captures) {
+    const taken = PIECE_VALUE[capture.captured ?? 'p'] ?? 0
+    if (taken < 3) continue
+    const taker = PIECE_VALUE[capture.piece] ?? 0
+    const after = new Chess(board.fen())
+    try {
+      after.move({ from: capture.from, to: capture.to, promotion: capture.promotion })
+    } catch {
+      continue
+    }
+    const recaptures = after
+      .moves({ verbose: true })
+      .filter((move) => move.to === capture.to && move.captured)
+    // What the move itself captured comes off the loss: Nxe5 winning a pawn
+    // and then losing the knight for it is a trade gone wrong, not a sacrifice.
+    const loss = taken - (recaptures.length ? taker : 0) - gainedByMove
+    if (loss >= 2) return true
   }
-  return material
+  return false
+}
+
+/** The value of what a move captured, read from the position it was played in. */
+function capturedValue(parentFen: string, uci: string): number {
+  try {
+    const board = new Chess(parentFen.split(' ').length >= 6 ? parentFen : `${parentFen} 0 1`)
+    const move = board.move({
+      from: uci.slice(0, 2),
+      to: uci.slice(2, 4),
+      promotion: uci.slice(4) || undefined,
+    })
+    return move.captured ? (PIECE_VALUE[move.captured] ?? 0) : 0
+  } catch {
+    return 0
+  }
 }
 
 /**
- * A sacrifice that is still the engine's move.
- *
- * **A sacrifice is not visible in the child position.** That is the ply on
- * which the player is briefly *up* material — Bxh7+ wins a pawn, and only loses
- * the bishop when the king recaptures. Comparing parent to child therefore
- * measures the opposite of what it means to sacrifice: for any move, the
- * mover's own material cannot fall, so `moverLost - opponentLost` was never
- * positive and `Brilliant` could not be awarded at all. It had no test, which
- * is why nobody noticed.
- *
- * So the judgement waits one more ply, for the opponent's best reply out of the
- * child position's own analysis. No reply, no verdict.
+ * Brilliant, the way Chess.com awards it: a piece sacrifice (see
+ * `isSacrifice`) that is the engine's move or nearly so, made from a position
+ * that was not already won, into one that is not lost.
  */
 function isBrilliantMove(
   move: ReplayMove,
@@ -220,36 +195,27 @@ function isBrilliantMove(
   cpLoss?: number | null,
 ): boolean {
   if (!parentAnalysis?.bestMove) return false
-  if (cpLoss == null || cpLoss > 10) return false
+  if (cpLoss == null || cpLoss > 30) return false
 
   const parentTopLine = getTopLine(parentAnalysis)
   const childTopLine = getTopLine(childAnalysis)
   if (!parentTopLine || !childTopLine) return false
 
-  // Handing material back while already winning is not brilliance.
+  // Already winning outright: giving material back is not brilliance.
   if (toMoverCp(parentTopLine.score, parentFen) > 500) return false
+  // The child is the opponent's turn; negate to read it from the mover's side.
+  if (-toMoverCp(childTopLine.score, childFen) < -100) return false
 
-  const reply = childTopLine.pv[0]
-  if (!reply) return false
-  const after = materialAfterReply(childFen, reply)
-  if (!after) return false
+  return isSacrifice(childFen, capturedValue(parentFen, move.uci))
+}
 
-  const moverIsWhite = parentFen.split(' ')[1] === 'w'
-  const before = getMaterialByColor(parentFen)
-  const moverLost =
-    (moverIsWhite ? before.white : before.black) - (moverIsWhite ? after.white : after.black)
-  const opponentLost =
-    (moverIsWhite ? before.black : before.white) - (moverIsWhite ? after.black : after.white)
-  const netSacrifice = moverLost - opponentLost
-  if (netSacrifice < 1) return false
-
-  // A piece-level investment speaks for itself. A pawn has to also be the one
-  // move that works, or every sound gambit becomes brilliant.
-  if (netSacrifice >= 2) return true
-
-  const secondBest = parentAnalysis.lines.find((l) => l.multipv === 2)
-  if (!secondBest || secondBest.depth !== parentTopLine.depth) return false
-  return toMoverCp(parentTopLine.score, parentFen) - toMoverCp(secondBest.score, parentFen) >= 100
+/**
+ * The engine's evaluation of a position from the side to move, capped like
+ * every grade here, or null while the position is not searched deep enough.
+ */
+export function moverCpOf(fen: string, analysis?: CachedEngineAnalysis): number | null {
+  const line = getTopLine(analysis)
+  return line ? toMoverCp(line.score, fen) : null
 }
 
 /** A won position, in centipawns from the mover's side. */

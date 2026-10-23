@@ -4,6 +4,7 @@ import { Check, Crosshair, Eye, RotateCcw, X } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { HintControl } from '@/components/training/hint-control'
+import { ExploreButton } from '@/components/ui/explore-button'
 import { Medal, TitlePiece } from '@/components/training/trophies'
 import { useHint } from '@/hooks/use-hint'
 import { play } from '@/lib/sound'
@@ -381,6 +382,9 @@ export function LineTrainer({
         </div>
       )}
 
+      <div className="trainer-actions trainer-actions--quiet">
+        <ExploreButton />
+      </div>
       <p className="muted line-trainer__count">
         {done.toLocaleString()} / {yours.length.toLocaleString()} moves
         {phase !== 'finished' ? (

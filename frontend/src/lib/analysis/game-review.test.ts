@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vite-plus/test'
 
-import { formatCost, REVIEW_LABELS, reviewCoverage, reviewSide, sideOfPly } from './game-review'
+import {
+  annotationAtFen,
+  describeLabel,
+  formatCost,
+  moveAccuracy,
+  REVIEW_LABELS,
+  reviewCoverage,
+  reviewSide,
+  sideAccuracy,
+  sideOfPly,
+  winningChances,
+} from './game-review'
 import type { ReplayMoveAnnotation } from './replay-annotations'
 
 function move(
@@ -114,5 +125,38 @@ describe('formatCost', () => {
   it('shows nothing when the move has not been judged', () => {
     expect(formatCost(null)).toBe('')
     expect(formatCost(Number.NaN)).toBe('')
+  })
+})
+
+describe('accuracy and the current move', () => {
+  it('turns kept winning chances into Lichess-style accuracy', () => {
+    expect(moveAccuracy(50, 50)).toBe(100)
+    expect(moveAccuracy(50, 60)).toBe(100)
+    expect(Math.round(moveAccuracy(60, 50))).toBe(64)
+    expect(winningChances(0)).toBe(50)
+    expect(winningChances(1000)).toBeGreaterThan(95)
+  })
+
+  it("reads a side's accuracy from the evaluations either side of each move", () => {
+    const parent = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+    const child = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+    const line = (cp: number) => ({
+      bestMove: 'e2e4',
+      lines: [{ multipv: 1, depth: 22, score: { type: 'cp', value: cp }, pv: ['e2e4'] }],
+    })
+    const annotations = [
+      { ply: 1, san: 'e4', uci: 'e2e4', fen: child, bestMove: 'e2e4', cpLoss: 0, label: 'Best' },
+    ] as never
+    const analysisByFen = { [parent]: line(30), [child]: line(-30) } as never
+    expect(sideAccuracy(annotations, [parent, child], analysisByFen, 'white')).toBe(100)
+    expect(sideAccuracy(annotations, [parent, child], analysisByFen, 'black')).toBeNull()
+    expect(annotationAtFen(annotations, child)?.san).toBe('e4')
+    expect(annotationAtFen(annotations, parent)).toBeNull()
+  })
+
+  it('says what a label means in a sentence', () => {
+    expect(describeLabel('Blunder')).toBe('is a blunder')
+    expect(describeLabel('Best')).toBe('is the best move')
+    expect(describeLabel(null)).toBe('is not judged yet')
   })
 })

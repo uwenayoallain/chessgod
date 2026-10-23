@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RotateCcw } from 'lucide-react'
 
 import { HintControl } from '@/components/training/hint-control'
+import { ExploreButton } from '@/components/ui/explore-button'
 import { Medal, TitlePiece } from '@/components/training/trophies'
 import { useHint } from '@/hooks/use-hint'
 import { play } from '@/lib/sound'
@@ -293,9 +294,12 @@ export function OpeningRush({ username, onBegin }: { username: string; onBegin?:
             {result.requeued === 1 ? 'move is' : 'moves are'} back in your reviews.
           </p>
         ) : null}
-        <Button onClick={() => void start()} type="button" variant="primary">
-          <RotateCcw size={14} /> Go again
-        </Button>
+        <div className="trainer-actions">
+          <Button onClick={() => void start()} type="button" variant="primary">
+            <RotateCcw size={14} /> Go again
+          </Button>
+          <ExploreButton />
+        </div>
       </section>
     )
   }

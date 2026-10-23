@@ -8,7 +8,15 @@ import { AnnotationIcon, annotationTitle } from '@/components/ui/annotation-icon
 import { Button } from '@/components/ui/button'
 import { Card, CardBody } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
-import { formatCost, REVIEW_LABELS, reviewCoverage, reviewSide } from '@/lib/analysis/game-review'
+import {
+  annotationAtFen,
+  describeLabel,
+  formatCost,
+  REVIEW_LABELS,
+  reviewCoverage,
+  reviewSide,
+  sideAccuracy,
+} from '@/lib/analysis/game-review'
 import type { ReplayMoveAnnotation } from '@/lib/analysis/replay-annotations'
 import { formatDuration } from '@/lib/analysis/progress-rate'
 import { useAnalysisProgress } from '@/hooks/use-analysis-progress'
@@ -24,93 +32,6 @@ import { useEngineStore } from '@/store/engine-store'
 
 function moveNumber(ply: number) {
   return `${Math.ceil(ply / 2)}${ply % 2 === 1 ? '.' : '…'}`
-}
-
-function Scoreline({
-  annotations,
-  fenHistory,
-  side,
-  title,
-}: {
-  annotations: ReplayMoveAnnotation[]
-  fenHistory: string[]
-  side: 'white' | 'black'
-  title: string
-}) {
-  const review = useMemo(() => reviewSide(annotations, side), [annotations, side])
-  // Jumping lands on the game's own node, keeping the move list, the
-  // highlight and the annotations; pushing a branch here lost all three.
-  const jumpToFen = useAppStore((state) => state.jumpToFen)
-  // SAN needs a board per move; worked out once per review, not per render.
-  const bestSan = useMemo(
-    () =>
-      new Map(
-        review.costly.map((move) => [
-          move.ply,
-          move.bestMove && fenHistory[move.ply - 1]
-            ? uciToSan(fenHistory[move.ply - 1], move.bestMove)
-            : move.bestMove,
-        ]),
-      ),
-    [fenHistory, review.costly],
-  )
-  const shown = review.costly.slice(0, 6)
-  const explanations = useMoveExplanations(shown, fenHistory)
-
-  return (
-    <div className="scoreline">
-      <div className="scoreline__head">
-        <strong>{title}</strong>
-        <span className="scoreline__acpl">
-          {review.averageLossCp == null ? '—' : `${review.averageLossCp} avg loss`}
-        </span>
-      </div>
-
-      <div className="scoreline__chips">
-        {REVIEW_LABELS.filter((label) => review.counts[label] > 0).map((label) => (
-          <span className="scoreline__chip" key={label} title={annotationTitle(label)}>
-            <AnnotationIcon label={label} size={15} />
-            {review.counts[label]}
-          </span>
-        ))}
-        {review.judged === 0 ? <span className="muted">Not judged yet</span> : null}
-      </div>
-
-      {review.costly.length ? (
-        <ul className="scoreline__costly">
-          {shown.map((move) => (
-            <li key={move.ply}>
-              <button onClick={() => jumpToFen(move.fen)} type="button">
-                <AnnotationIcon label={move.label!} size={14} />
-                <span className="scoreline__move">
-                  {moveNumber(move.ply)} {move.san}
-                </span>
-                <span className="scoreline__cost">{formatCost(move.cpLoss)}</span>
-                {move.bestMove ? (
-                  <span className="scoreline__better">best {bestSan.get(move.ply)}</span>
-                ) : null}
-              </button>
-              <MoveWhy explanation={explanations.get(move.ply)} />
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  )
-}
-
-/** One line on why a move cost what it did; the box is there before the words arrive. */
-function MoveWhy({ explanation }: { explanation: MoveExplanation | undefined }) {
-  const text = explanation ? (explanation.detail ?? explanation.cue) : ''
-  return (
-    <p className="scoreline__why" title={explanation ? `${explanation.label}. ${text}` : undefined}>
-      {explanation ? (
-        <>
-          <strong>{explanation.label}.</strong> {text}
-        </>
-      ) : null}
-    </p>
-  )
 }
 
 /**
@@ -220,6 +141,149 @@ function RetryButton({
 }
 
 /**
+ * The move on the board, the way Chess.com's review reads it: the grade, the
+ * move it should have been, what it cost and why. Everything else in the panel
+ * is a summary; this is the part that changes as the player steps. Its box is
+ * the same height whatever it says, so stepping moves nothing.
+ */
+function CurrentMove({
+  annotations,
+  fenHistory,
+  you,
+}: {
+  annotations: ReplayMoveAnnotation[]
+  fenHistory: string[]
+  you: 'white' | 'black'
+}) {
+  const currentFen = useAppStore((state) => state.nodes[state.currentNodeId]?.fen ?? null)
+  const annotation = annotationAtFen(annotations, currentFen)
+  const asked = useMemo(() => (annotation ? [annotation] : []), [annotation])
+  const explanations = useMoveExplanations(asked, fenHistory)
+  const explanation = annotation ? explanations.get(annotation.ply) : undefined
+  if (!annotation) {
+    return (
+      <section aria-live="polite" className="review-move" data-label="none">
+        <div className="review-move__head">
+          <strong>Start of the game</strong>
+        </div>
+        <p className="review-move__best">Step through the moves. Each one is judged here.</p>
+        <p className="review-move__why">&nbsp;</p>
+      </section>
+    )
+  }
+  const mover = annotation.fen.split(' ')[1] === 'w' ? 'black' : 'white'
+  const parentFen = fenHistory[annotation.ply - 1]
+  const bestSan =
+    annotation.bestMove && parentFen
+      ? uciToSan(parentFen, annotation.bestMove)
+      : annotation.bestMove
+  const costly = annotation.cpLoss != null && annotation.cpLoss > 40
+  const detail =
+    annotation.label === 'Brilliant'
+      ? "A piece sacrifice that is also the engine's move."
+      : annotation.label === 'Best' || annotation.cpLoss === 0
+        ? "The engine's own choice."
+        : annotation.label === 'Book'
+          ? 'Masters play this here.'
+          : annotation.label == null
+            ? 'Not judged yet.'
+            : bestSan
+              ? `Best was ${bestSan}.`
+              : ''
+  return (
+    <section aria-live="polite" className="review-move" data-label={annotation.label ?? 'none'}>
+      <div className="review-move__head">
+        <span className="review-move__icon">
+          {annotation.label ? <AnnotationIcon label={annotation.label} size={22} /> : null}
+        </span>
+        <strong>
+          {moveNumber(annotation.ply)} {annotation.san}
+        </strong>
+        <span className="review-move__verdict">{describeLabel(annotation.label)}</span>
+        <span className="review-move__who muted">{mover === you ? 'you' : 'opponent'}</span>
+        {costly ? <span className="review-move__cost">{formatCost(annotation.cpLoss)}</span> : null}
+      </div>
+      <p className="review-move__best">{detail || '\u00a0'}</p>
+      <p
+        className="review-move__why"
+        title={
+          explanation ? `${explanation.label}. ${explanation.detail ?? explanation.cue}` : undefined
+        }
+      >
+        {explanation ? (
+          <>
+            <strong>{explanation.label}.</strong> {explanation.detail ?? explanation.cue}
+          </>
+        ) : (
+          '\u00a0'
+        )}
+      </p>
+    </section>
+  )
+}
+
+/** Each side's accuracy and the count of every grade, Chess.com's summary table. */
+function ReviewSummary({
+  annotations,
+  fenHistory,
+  you,
+  opponentTitle,
+}: {
+  annotations: ReplayMoveAnnotation[]
+  fenHistory: string[]
+  you: 'white' | 'black'
+  opponentTitle: string
+}) {
+  const analysisVersion = useEngineStore((state) => state.analysisVersion)
+  const them = you === 'white' ? 'black' : 'white'
+  const { mine, theirs, mineAccuracy, theirAccuracy } = useMemo(() => {
+    const analysisByFen = useEngineStore.getState().analysisByFen
+    return {
+      mine: reviewSide(annotations, you),
+      theirs: reviewSide(annotations, them),
+      mineAccuracy: sideAccuracy(annotations, fenHistory, analysisByFen, you),
+      theirAccuracy: sideAccuracy(annotations, fenHistory, analysisByFen, them),
+    }
+    // analysisVersion: the evaluations behind the accuracy arrive after the grades.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annotations, fenHistory, you, them, analysisVersion])
+  return (
+    <div className="review-summary">
+      <div className="review-summary__sides">
+        <div className="review-summary__side" data-you>
+          <span className="review-summary__name">You</span>
+          <strong className="review-summary__accuracy">
+            {mineAccuracy == null ? '—' : mineAccuracy.toFixed(1)}
+          </strong>
+          <span className="muted">accuracy</span>
+        </div>
+        <div className="review-summary__side">
+          <span className="review-summary__name">{opponentTitle}</span>
+          <strong className="review-summary__accuracy">
+            {theirAccuracy == null ? '—' : theirAccuracy.toFixed(1)}
+          </strong>
+          <span className="muted">accuracy</span>
+        </div>
+      </div>
+      <table className="review-counts">
+        <tbody>
+          {REVIEW_LABELS.map((label) => (
+            <tr key={label}>
+              <td className="review-counts__count">{mine.counts[label] || '·'}</td>
+              <td className="review-counts__label">
+                <AnnotationIcon label={label} size={15} />
+                <span title={annotationTitle(label)}>{label}</span>
+              </td>
+              <td className="review-counts__count">{theirs.counts[label] || '·'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/**
  * What the engine made of the line currently on the board: a scoreline per
  * side and the moves that actually cost something, each one a link back to the
  * position it happened in.
@@ -245,7 +309,6 @@ export function GameReviewPanel({
   const retrying = useIsRetrying()
 
   const you = userColor ?? 'white'
-  const them = you === 'white' ? 'black' : 'white'
 
   return (
     <Card>
@@ -286,17 +349,18 @@ export function GameReviewPanel({
 
             <EvalGraph annotations={annotations} fenHistory={fenHistory} />
 
+            <CurrentMove annotations={annotations} fenHistory={fenHistory} you={you} />
+
+            <ReviewSummary
+              annotations={annotations}
+              fenHistory={fenHistory}
+              opponentTitle={opponentTitle}
+              you={you}
+            />
+
             {coverage.complete ? (
               <RetryButton annotations={annotations} fenHistory={fenHistory} side={you} />
             ) : null}
-
-            <Scoreline annotations={annotations} fenHistory={fenHistory} side={you} title="You" />
-            <Scoreline
-              annotations={annotations}
-              fenHistory={fenHistory}
-              side={them}
-              title={opponentTitle}
-            />
           </>
         )}
       </CardBody>
