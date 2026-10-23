@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.models.game import Game
+from app.models.sparring import SparringGame
 from app.models.training import TrainingEvent
 from app.services.cache import get_shared_cache
 from app.services.game_scope import player_rating_floor
@@ -114,14 +116,44 @@ class TrainingEventIn(BaseModel):
     goal: int = training.DEFAULT_DAILY_GOAL
 
 
+async def reviewed_game_request_id(session: AsyncSession, username: str, detail: dict | None) -> str:
+    """The one request id a finished review may pay under: the game's own.
+
+    The page used to key the reward on a hash of the moves on the board, so
+    every move played off a reviewed game — already analysed, so "reviewed" at
+    once — was a new game worth 15 XP: 39 of them in two minutes, measured.
+    A review is paid once per game the player owns, imported or played
+    against the engine, and nothing else counts as a game.
+    """
+    detail = detail or {}
+    game_id = detail.get("game_id")
+    if isinstance(game_id, int) and not isinstance(game_id, bool):
+        owned = await session.scalar(
+            select(Game.id).where(Game.id == game_id, Game.username == username)
+        )
+        if owned is not None:
+            return f"review:game:{game_id}"
+    spar_id = detail.get("sparring_game_id")
+    if isinstance(spar_id, int) and not isinstance(spar_id, bool):
+        owned = await session.scalar(
+            select(SparringGame.id).where(SparringGame.id == spar_id, SparringGame.username == username)
+        )
+        if owned is not None:
+            return f"review:spar:{spar_id}"
+    raise HTTPException(status_code=422, detail="A review pays for one of your games, named by id.")
+
+
 @router.post("/events")
 async def record_event(payload: TrainingEventIn, session: AsyncSession = Depends(get_db)) -> dict:
     """Training the server did not see happen: quiz answers and finished game reviews."""
     if payload.kind not in training.CLIENT_EVENTS:
         raise HTTPException(status_code=422, detail="Unknown training event.")
+    request_id = payload.request_id
+    if payload.kind == "game_reviewed":
+        request_id = await reviewed_game_request_id(session, payload.username, payload.detail)
     before = await training.profile(session, payload.username, tz=payload.tz, goal=payload.goal)
     xp = await training.award(
-        session, payload.username, payload.kind, detail=payload.detail, request_id=payload.request_id,
+        session, payload.username, payload.kind, detail=payload.detail, request_id=request_id,
     )
     await training.settle_quests(session, payload.username, tz=payload.tz)
     await session.commit()

@@ -73,19 +73,34 @@ function hash(text: string) {
 // Shorter lines are positions studied on the board, not games.
 const REVIEWED_GAME_MIN_MOVES = 20
 
-/** A finished review is training: it earns XP once per game, however often it is reopened. */
-function useReviewReward(moves: number, complete: boolean, fenHistory: string[]) {
+/**
+ * A finished review is training: it earns XP once per game, however often it
+ * is reopened. The game is named by its id — an imported game's or a saved
+ * engine game's — never by the moves on the board: keyed on a hash of the
+ * line, every move played off a reviewed game was a fresh, already-analysed
+ * "game" worth 15 XP (39 of them in two minutes). A line that is nobody's
+ * game earns nothing, and the server checks the id is the player's.
+ */
+function useReviewReward(
+  moves: number,
+  complete: boolean,
+  gameId: number | null,
+  sparringGameId: number | null,
+) {
   const username = useAppStore((state) => state.username)
   const applyReward = useApplyReward(username)
-  const game = fenHistory.length ? hash(fenHistory.join('|')) : null
   // A retry branches off the game, which cuts the line short: not a new game.
   const retrying = useIsRetrying()
   useEffect(() => {
-    if (retrying || !username || !complete || !game || moves < REVIEWED_GAME_MIN_MOVES) return
-    void postTrainingEvent(username, 'game_reviewed', `review:${game}`).then((reward) =>
-      applyReward(reward, 'Game reviewed'),
-    )
-  }, [applyReward, complete, game, moves, retrying, username])
+    if (retrying || !username || !complete || moves < REVIEWED_GAME_MIN_MOVES) return
+    const key =
+      gameId != null ? `game:${gameId}` : sparringGameId != null ? `spar:${sparringGameId}` : null
+    if (!key) return
+    void postTrainingEvent(username, 'game_reviewed', `review:${key}`, {
+      game_id: gameId ?? undefined,
+      sparring_game_id: sparringGameId ?? undefined,
+    }).then((reward) => applyReward(reward, 'Game reviewed'))
+  }, [applyReward, complete, gameId, moves, retrying, sparringGameId, username])
 }
 
 /** Chess.com's "Retry": the player's own mistakes in this game, to find better. */
@@ -291,21 +306,27 @@ function ReviewSummary({
 export function GameReviewPanel({
   annotations,
   fenHistory,
+  gameId = null,
   opponentTitle = 'Opponent',
   reviewDepth,
+  sparringGameId = null,
   userColor,
 }: {
   annotations: ReplayMoveAnnotation[]
   fenHistory: string[]
+  /** The imported game on the board, if the line is one; the review pays once for it. */
+  gameId?: number | null
   opponentTitle?: string
   /** The depth this line is reviewed at; one line is never reviewed at two. */
   reviewDepth?: number
+  /** The saved engine game on the board, if the line is one. */
+  sparringGameId?: number | null
   userColor: 'white' | 'black' | null
 }) {
   const coverage = reviewCoverage(annotations)
   const progress = useAnalysisProgress()
   const { analyzeLine, canAnalyze } = useAnalyzeLine()
-  useReviewReward(annotations.length, coverage.complete, fenHistory)
+  useReviewReward(annotations.length, coverage.complete, gameId, sparringGameId)
   const retrying = useIsRetrying()
 
   const you = userColor ?? 'white'

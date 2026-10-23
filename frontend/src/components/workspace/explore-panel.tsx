@@ -116,6 +116,7 @@ export function ExplorePanel({
   // A retried mistake is being asked: the engine's lines are its answer.
   const drillSolving = useAppStore((state) => state.drillSolving)
   const sparReview = useSparStore((state) => state.reviewing)
+  const sparGameId = useSparStore((state) => state.savedGameId)
   const treeEpoch = useAppStore((state) => state.treeEpoch)
   // A finished game against the engine, still on the board.
   const reviewingSparGame = sparReview !== null && sparReview.epoch === treeEpoch
@@ -200,8 +201,10 @@ export function ExplorePanel({
             <GameReviewPanel
               annotations={annotations}
               fenHistory={fenHistory}
+              gameId={reviewingSparGame ? null : (workspace.activeGame?.id ?? null)}
               opponentTitle={reviewingSparGame ? 'Stockfish' : 'Opponent'}
               reviewDepth={reviewingSparGame ? QUICK_REVIEW_DEPTH : undefined}
+              sparringGameId={reviewingSparGame ? sparGameId : null}
               userColor={reviewingSparGame ? sparReview.userColor : userColor}
             />
           )

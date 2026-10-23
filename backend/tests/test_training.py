@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.base import Base
@@ -264,3 +265,44 @@ def test_the_rival_is_last_week_at_the_same_point() -> None:
     days = _days((9, 40), (8, 30), (7, 99), (2, 20), (1, 25), (0, 10))
     # Monday..Wednesday this week against Monday..Wednesday last week.
     assert rival(days, TODAY) == {"this_week": 55, "last_week_so_far": 169, "last_week": 169}
+
+
+@pytest.mark.asyncio
+async def test_a_game_review_pays_only_for_a_game_the_player_owns_once() -> None:
+    # Keyed on a hash of the moves on the board, every move played off a
+    # reviewed game was a new "game" worth 15 XP. The id has to name a game.
+    from fastapi import HTTPException
+
+    from app.models.sparring import SparringGame
+    from app.routers.training import reviewed_game_request_id
+
+    _engine, make_session = await _session()
+    async with make_session() as session:
+        session.add(
+            SparringGame(
+                username="tester",
+                user_color="white",
+                engine_rating=1600,
+                rated=True,
+                result="win",
+                reason="checkmate",
+                start_fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                moves_uci="e2e4 e7e5",
+            )
+        )
+        await session.commit()
+        spar_id = (await session.execute(select(SparringGame.id))).scalar_one()
+
+        key = await reviewed_game_request_id(session, "tester", {"sparring_game_id": spar_id})
+        assert key == f"review:spar:{spar_id}"
+        # The same key pays once: a second review of the game is a replay.
+        assert await training.award(session, "tester", "game_reviewed", request_id=key) == 15
+        assert await training.award(session, "tester", "game_reviewed", request_id=key) == 0
+
+        with pytest.raises(HTTPException):
+            await reviewed_game_request_id(session, "tester", None)
+        with pytest.raises(HTTPException):
+            await reviewed_game_request_id(session, "tester", {"game_id": 999_999})
+        with pytest.raises(HTTPException):
+            # Somebody else's game is not the player's to be paid for.
+            await reviewed_game_request_id(session, "someone-else", {"sparring_game_id": spar_id})

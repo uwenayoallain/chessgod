@@ -472,12 +472,16 @@ export function replayOfSparringGame(startFen: string, movesUci: string[]): Repl
 export function useOpenSparringGame(onBeforeOpen: () => void) {
   const { analyzeLine } = useAnalyzeLine()
   return useCallback(
-    (game: Pick<SparringHistory['games'][number], 'start_fen' | 'moves_uci' | 'user_color'>) => {
+    (
+      game: Pick<SparringHistory['games'][number], 'id' | 'start_fen' | 'moves_uci' | 'user_color'>,
+    ) => {
       onBeforeOpen()
       const app = useAppStore.getState()
       app.loadReplay(replayOfSparringGame(game.start_fen, game.moves_uci))
       app.alignBoardToUserColor(game.user_color)
-      useSparStore.getState().reviewSaved(game.user_color, useAppStore.getState().treeEpoch)
+      useSparStore
+        .getState()
+        .reviewSaved(game.user_color, useAppStore.getState().treeEpoch, game.id)
       revealSection('explore-game-review')
       void analyzeLine({ depth: QUICK_REVIEW_DEPTH })
     },

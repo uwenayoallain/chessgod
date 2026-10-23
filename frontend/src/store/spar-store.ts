@@ -67,7 +67,7 @@ type SparState = {
   recordMistakes: (count: number | 'failed') => void
   settleReview: () => void
   /** A saved game put back on the board: reviewed as You / Stockfish, never re-saved. */
-  reviewSaved: (userColor: SparColor, epoch: number) => void
+  reviewSaved: (userColor: SparColor, epoch: number, gameId: number) => void
   start: (options: {
     userColor: SparColor
     elo: number
@@ -216,7 +216,7 @@ export const useSparStore = create<SparState>((set, get) => ({
   recordSaved: (gameId) => set({ savedGameId: gameId }),
   recordMistakes: (count) => set({ mistakesPosted: count }),
   settleReview: () => set({ reviewSettled: true }),
-  reviewSaved: (userColor, epoch) =>
+  reviewSaved: (userColor, epoch, gameId) =>
     set((state) => ({
       ...stoppedClocks(state, Date.now()),
       status: 'idle',
@@ -224,8 +224,10 @@ export const useSparStore = create<SparState>((set, get) => ({
       outcome: null,
       eloChange: 0,
       reviewing: { userColor, epoch },
-      savedGameId: null,
-      mistakesPosted: null,
+      // Its id, so the review pays under the same key as it did when played;
+      // the drills were posted then, so nothing is posted again.
+      savedGameId: gameId,
+      mistakesPosted: 0,
       reviewSettled: true,
     })),
   setOverride: (elo) => set({ override: elo == null ? null : clampSparRating(elo) }),
