@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import event, select
@@ -85,6 +85,23 @@ def test_queue_skips_positions_the_evaluations_endpoint_cannot_store() -> None:
     work = _pair_work(pair, depth_by_position={}, exact_position_ids=set(), min_depth=22)
     assert [fen for fen, _ in work] == ["r3q1k1/ppp3pp/8/2Q5/8/2n4P/PPPP1PP1/R1B3K1 b - -"]
     assert all(depth == 22 for _, depth in work)
+
+
+def test_a_studied_side_is_searched_again_at_review_depth_for_the_crawler() -> None:
+    # A side studied at 34 used to make its partner a depth-34 job, which one
+    # throttled engine never finished. In the review band the studied side is
+    # searched once more at 22 instead, and its 22 row then counts as done.
+    parent = "r1bqkb1r/pppp1ppp/2n5/4p1N1/2B1n3/8/PPPP1PPP/RNBQK2R w KQkq -"
+    child = "r1bqkb1r/pppp1ppp/2n5/4p1N1/2B1N3/8/PPPP1PPP/RNBQK2R b KQkq -"
+    pair = _DecisionPairTarget(parent_position_id=1, parent_fen=parent,
+                               child_position_id=2, child_fen=child, ply=9)
+    deep = {1: 34, 2: 22}
+    assert _pair_work(pair, depth_by_position=deep, exact_position_ids=set(), min_depth=22) == [(child, 34)]
+    assert _pair_work(pair, depth_by_position=deep, exact_position_ids=set(), min_depth=22,
+                      review_band=True) == [(parent, 22)]
+    # Once the parent has its 22 row, load_depths reports it in band: done.
+    assert _pair_work(pair, depth_by_position={1: 22, 2: 22}, exact_position_ids=set(),
+                      min_depth=22, review_band=True) == []
 
 
 @pytest.fixture
@@ -1181,4 +1198,276 @@ async def test_unanalyzed_fens_reuses_its_pool_and_skips_what_was_analyzed_since
     assert pair_queries == walked, "the second request walked the library again"
     assert len(second["fens"]) == 4
     assert not set(second["fens"]) & set(first["fens"])
+    await engine.dispose()
+
+
+async def _queue_library(decisions, *, depths):
+    """An in-memory library of `(game_id, played_on, [(ply, label), ...])` games.
+
+    Every label is a position; `depths` gives the ones already searched."""
+
+    get_shared_cache()._local.clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    ids: dict[str, int] = {}
+    async with session_factory() as session:
+        for game_id, played_on, plies in decisions:
+            session.add(build_game(game_id, f"https://chess.com/game/{game_id}", "Italian Game",
+                                   datetime(2024, 1, played_on, tzinfo=UTC)))
+            for ply, label in plies:
+                if label not in ids:
+                    ids[label] = len(ids) + 1
+                    session.add(Position(id=ids[label], fen=label, total_games=1))
+                session.add(GamePosition(game_id=game_id, position_id=ids[label], ply=ply,
+                                         move_san="e4", move_uci=None if ply == 0 else "e2e4"))
+        for label, depth in depths.items():
+            session.add(AnalysisResult(position_id=ids[label], engine="stockfish-19",
+                                       engine_version="19", depth=depth, eval_cp=0,
+                                       best_move_uci="e2e4", best_move_san="e4", multipv_rank=1))
+        await session.commit()
+    return engine, session_factory
+
+
+@pytest.mark.usefixtures("symbolic_queue_fens")
+@pytest.mark.asyncio
+# The SQL exclusion of already-read pairs is an optimisation with a cap; the
+# answer must not depend on it.
+@pytest.mark.parametrize("sql_cap", [4000, 1, 0])
+async def test_already_comparable_deep_pairs_do_not_use_up_a_pages_share(monkeypatch, sql_cap) -> None:
+    monkeypatch.setattr(games_router, "_SEEN_PAIRS_IN_SQL", sql_cap)
+    """The player's main-line openings are searched to 34 on both sides.
+
+    The SQL admits them as work (a side past the review band) and Python drops
+    them, but they were ranked first in the page, so they took the opening's
+    whole share and the real work behind them in the same page was never read.
+    Measured on the live library: a 200-pair walk came back holding 11 pairs.
+    """
+
+    monkeypatch.setattr(games_router, "_MIN_RECENT_DECISIONS", 3)
+    monkeypatch.setattr(games_router, "_RECENT_DECISION_OVERFETCH", 1)
+    engine, session_factory = await _queue_library(
+        [(1, 1, [(0, "start"), (1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")])],
+        # start/a and b/c are comparable at 34: phantoms. d/e is real work, e
+        # needs 34 to match its parent.
+        depths={"start": 34, "a": 34, "b": 34, "c": 34, "d": 34, "e": 22},
+    )
+    async with session_factory() as session:
+        payload = await unanalyzed_fens(username="tester", color="both", time_class=None,
+                                        min_depth=22, limit=1, session=session)
+    assert payload["fens"] == ["e"]
+    assert payload["fen_depths"] == {"e": 34}
+    await engine.dispose()
+
+
+@pytest.mark.usefixtures("symbolic_queue_fens")
+@pytest.mark.asyncio
+# The SQL exclusion of already-read pairs is an optimisation with a cap; the
+# answer must not depend on it.
+@pytest.mark.parametrize("sql_cap", [4000, 1, 0])
+async def test_a_decision_repeated_across_games_counts_once_toward_the_walk(monkeypatch, sql_cap) -> None:
+    monkeypatch.setattr(games_router, "_SEEN_PAIRS_IN_SQL", sql_cap)
+    """Openings repeat. The same unfinished pair in the newest games filled the
+    walk's target with copies of itself, so everything older went unseen."""
+
+    monkeypatch.setattr(games_router, "_MIN_RECENT_DECISIONS", 2)
+    monkeypatch.setattr(games_router, "_RECENT_DECISION_OVERFETCH", 1)
+    monkeypatch.setattr(games_router, "_GAME_CHUNK_START", 1)
+    engine, session_factory = await _queue_library(
+        [
+            (3, 3, [(0, "p"), (1, "c")]),
+            (2, 2, [(0, "p"), (1, "c")]),
+            (1, 1, [(0, "q"), (1, "d")]),
+        ],
+        depths={"p": 30, "c": 22, "q": 30, "d": 22},
+    )
+    async with session_factory() as session:
+        payload = await unanalyzed_fens(username="tester", color="both", time_class=None,
+                                        min_depth=22, limit=2, session=session)
+    assert sorted(payload["fens"]) == ["c", "d"]
+    await engine.dispose()
+
+
+@pytest.mark.usefixtures("symbolic_queue_fens")
+@pytest.mark.asyncio
+async def test_excluded_positions_do_not_empty_the_queue(monkeypatch) -> None:
+    """The crawler excludes the searches it timed out on. The pool used to be
+    built without them and filtered afterwards, so once the newest pairs were
+    all excluded a one-engine crawler (limit 5) got nothing for thirty hours
+    while hundreds of pairs further back still needed work."""
+
+    monkeypatch.setattr(games_router, "_MIN_RECENT_DECISIONS", 1)
+    monkeypatch.setattr(games_router, "_RECENT_DECISION_OVERFETCH", 1)
+    engine, session_factory = await _queue_library(
+        [
+            (2, 2, [(0, "p1"), (1, "stuck")]),
+            (1, 1, [(0, "p2"), (1, "older")]),
+        ],
+        depths={"p1": 22, "p2": 30, "older": 22},
+    )
+    async with session_factory() as session:
+        plain = await unanalyzed_fens(username="tester", color="both", time_class=None,
+                                      min_depth=22, limit=1, session=session)
+        assert plain["fens"] == ["stuck"]
+        excluding = await unanalyzed_fens(
+            username="tester", color="both", time_class=None, min_depth=22, limit=1,
+            session=session, exclusions=AnalysisQueueExclusions(exclude_fens=["stuck"]),
+        )
+    assert excluding["fens"] == ["older"]
+    assert excluding["fen_depths"] == {"older": 30}
+    await engine.dispose()
+
+
+@pytest.mark.usefixtures("symbolic_queue_fens")
+@pytest.mark.asyncio
+async def test_the_sitting_just_played_is_searched_before_the_rotation() -> None:
+    # The Habits coach reads the newest analysed game, so a game just played
+    # must not wait its era's turn behind an old endgame.
+    get_shared_cache()._local.clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        now = datetime.now(UTC)
+        session.add_all([
+            build_game(1, "https://chess.com/game/1", "Italian Game", datetime(2024, 1, 1, tzinfo=UTC)),
+            build_game(2, "https://chess.com/game/2", "Italian Game", now - timedelta(hours=1)),
+        ])
+        labels = ("old-parent", "old-child", "fresh-parent", "fresh-child")
+        session.add_all(
+            [Position(id=index, fen=label, total_games=1) for index, label in enumerate(labels, start=1)]
+        )
+        session.add_all([
+            GamePosition(game_id=1, position_id=1, ply=62, move_uci="g8h7"),
+            GamePosition(game_id=1, position_id=2, ply=63, move_uci="g1f2"),
+            GamePosition(game_id=2, position_id=3, ply=20, move_uci="b8c6"),
+            GamePosition(game_id=2, position_id=4, ply=21, move_uci="g1f3"),
+        ])
+        await session.commit()
+
+        payload = await unanalyzed_fens(
+            username="tester", color="both", time_class="rapid_blitz",
+            min_depth=20, limit=2, session=session,
+        )
+        assert payload["fens"] == ["fresh-parent", "fresh-child"]
+        assert payload["selected_decision_pairs_by_phase"]["fresh"] == 2
+
+        # A game played a week ago is history: the rotation decides.
+        await session.execute(
+            Game.__table__.update().where(Game.id == 2).values(played_at=now - timedelta(days=7))
+        )
+        await session.commit()
+        get_shared_cache()._local.clear()
+        later = await unanalyzed_fens(
+            username="tester", color="both", time_class="rapid_blitz",
+            min_depth=20, limit=2, session=session,
+        )
+        assert "fresh" not in later["selected_decision_pairs_by_phase"]
+    await engine.dispose()
+
+
+@pytest.mark.usefixtures("symbolic_queue_fens")
+@pytest.mark.asyncio
+async def test_a_short_pool_is_not_walked_again_on_every_request(monkeypatch) -> None:
+    # A nearly analysed library leaves every pool short of work; rebuilding on
+    # each request walked the library for nothing (3-10s, every minute).
+    get_shared_cache()._local.clear()
+    monkeypatch.setattr(games_router, "_POOL_REFILL_FACTOR", 1000)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    walks: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def count_walks(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT min(games.played_at)"):
+            walks.append(statement)
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        session.add(build_game(1, "https://chess.com/game/1", "Italian Game", datetime(2024, 1, 1, tzinfo=UTC)))
+        session.add_all([Position(id=1, fen="a-parent", total_games=1), Position(id=2, fen="a-child", total_games=1)])
+        session.add_all([
+            GamePosition(game_id=1, position_id=1, ply=40, move_uci="g8h7"),
+            GamePosition(game_id=1, position_id=2, ply=41, move_uci="g1f2"),
+        ])
+        await session.commit()
+
+        async def ask() -> dict:
+            return await unanalyzed_fens(
+                username="tester", color="both", time_class="rapid_blitz",
+                min_depth=20, limit=2, session=session,
+            )
+
+        first = await ask()
+        second = await ask()
+        assert first["fens"] == second["fens"] == ["a-parent", "a-child"]
+        assert len(walks) == 1, "a short pool was walked again inside its rest"
+
+        # Once the rest is over, a short pool is walked again.
+        for key in [key for key in get_shared_cache()._local if ":rebuilt:generation:" in key]:
+            get_shared_cache()._remove_local(key)
+        await ask()
+        assert len(walks) == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unstorable_positions_cannot_hide_the_work_behind_them(monkeypatch) -> None:
+    # The newest unanalysed positions were a Chess960 game the evaluations
+    # endpoint cannot store; one fixed read window of them told the crawler
+    # the queue was empty all night.
+    get_shared_cache()._local.clear()
+    monkeypatch.setattr(games_router, "_is_storable_fen", lambda fen: not fen.startswith("960"))
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        session.add_all([
+            build_game(1, "https://chess.com/game/1", "Italian Game", datetime(2024, 1, 1, tzinfo=UTC)),
+            build_game(2, "https://chess.com/game/2", "Chess960", datetime(2024, 2, 1, tzinfo=UTC)),
+        ])
+        session.add(Position(id=1, fen="real-work", total_games=1))
+        # More frequent than the real work, so the recurrence fallback meets them first too.
+        session.add_all([Position(id=index, fen=f"960-{index}", total_games=5) for index in range(2, 32)])
+        session.add(GamePosition(game_id=1, position_id=1, ply=0))
+        session.add_all([GamePosition(game_id=2, position_id=index, ply=index) for index in range(2, 32)])
+        await session.commit()
+
+        payload = await unanalyzed_fens(
+            username="tester", color="both", time_class="rapid_blitz",
+            min_depth=20, limit=1, session=session,
+        )
+        assert payload["fens"] == ["real-work"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_chess960_games_are_left_out_of_the_queue_and_its_counts() -> None:
+    # Their castling rights cannot be stored, so they could only ever be
+    # "missing" and fill the fallback reads with positions nobody can search.
+    get_shared_cache()._local.clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        standard = build_game(1, "https://chess.com/game/1", "Italian Game", datetime(2024, 1, 1, tzinfo=UTC))
+        chess960 = build_game(2, "https://chess.com/game/2", "Chess960", datetime(2024, 2, 1, tzinfo=UTC))
+        chess960.pgn = '[Event "Live Chess - Chess960"]\n[Variant "Chess960"]\n[SetUp "1"]\n\n1. e4 *'
+        session.add_all([standard, chess960])
+        session.add_all([
+            Position(id=1, fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -", total_games=1),
+            Position(id=2, fen="rkbrqnnb/pppppppp/8/8/8/8/PPPPPPPP/RKBRQNNB w KQkq -", total_games=1),
+        ])
+        session.add_all([
+            GamePosition(game_id=1, position_id=1, ply=0),
+            GamePosition(game_id=2, position_id=2, ply=0),
+        ])
+        await session.commit()
+        payload = await unanalyzed_fens(
+            username="tester", color="both", time_class="rapid_blitz",
+            min_depth=20, limit=5, session=session,
+        )
+        assert payload["fens"] == ["rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"]
+        assert payload["candidate_count"] == 1
     await engine.dispose()

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -36,7 +37,9 @@ async def sessions(monkeypatch):
 
 
 def request(last_id=""):
-    return Request({"type": "http", "headers": [(b"last-event-id", last_id.encode())]})
+    # The import is handed the app's HTTP client, so the request carries an app.
+    app = SimpleNamespace(state=SimpleNamespace(http_client=object()))
+    return Request({"type": "http", "headers": [(b"last-event-id", last_id.encode())], "app": app})
 
 
 @pytest.mark.asyncio
@@ -151,3 +154,39 @@ async def test_summary_reports_the_rating_of_each_time_controls_latest_game(sess
         summary = await import_games.build_import_summary(session, "tester")
     # The player's own side of their newest game, not an average over history.
     assert summary.current_ratings == {"rapid": 1651, "blitz": 1358}
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_the_running_job_and_fences_the_worker(sessions):
+    async with sessions() as session:
+        job_id = await create_import_job(session, "Player")
+        await session.commit()
+
+    result = await import_games.stop_import("PLAYER")
+    assert result == {"job_id": job_id, "status": "cancelled"}
+
+    async with sessions() as session:
+        assert await session.scalar(select(ImportJob.status).where(ImportJob.id == job_id)) == "cancelled"
+        # The worker's next event append fails, which is what unwinds run_import
+        assert await append_import_event(session, job_id, {"type": "game_progress"}) is False
+        with pytest.raises(ImportJobInactive):
+            await guard_import_commit(session, job_id)
+        # The player is free to start again
+        assert await create_import_job(session, "player") is not None
+
+    with pytest.raises(HTTPException) as exc:
+        await import_games.stop_import("nobody")
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_status_stream_ends_on_the_cancelled_event(sessions):
+    async with sessions() as session:
+        job_id = await create_import_job(session, "player")
+        await session.commit()
+    await import_games.stop_import("player")
+
+    response = await import_games.import_status("player", request())
+    events = [json.loads(chunk["data"]) async for chunk in response.body_iterator]
+    assert [e["type"] for e in events] == ["cancelled"]
+    assert events[0]["message"] == "Import stopped."

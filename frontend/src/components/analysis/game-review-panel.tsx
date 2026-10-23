@@ -1,7 +1,9 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
 import { EvalGraph } from '@/components/analysis/eval-graph'
+import { Emblem, Medal } from '@/components/training/trophies'
+import { RetryMistakes, useIsRetrying, useRetryStore } from '@/components/analysis/retry-mistakes'
 import { AnnotationIcon, annotationTitle } from '@/components/ui/annotation-icon'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody } from '@/components/ui/card'
@@ -11,9 +13,12 @@ import type { ReplayMoveAnnotation } from '@/lib/analysis/replay-annotations'
 import { formatDuration } from '@/lib/analysis/progress-rate'
 import { useAnalysisProgress } from '@/hooks/use-analysis-progress'
 import { useAnalyzeLine } from '@/hooks/use-analyze-line'
+import { postTrainingEvent, useApplyReward } from '@/hooks/use-training'
 import { api } from '@/lib/api'
 import { uciToSan } from '@/lib/chess-utils'
+import { buildFullGameLine } from '@/lib/analysis/active-line'
 import { explanationRequests, type MoveExplanation } from '@/lib/analysis/move-explanations'
+import { retryItems } from '@/lib/analysis/retry'
 import { useAppStore } from '@/store/app-store'
 import { useEngineStore } from '@/store/engine-store'
 
@@ -33,7 +38,9 @@ function Scoreline({
   title: string
 }) {
   const review = useMemo(() => reviewSide(annotations, side), [annotations, side])
-  const pushPosition = useAppStore((state) => state.pushPosition)
+  // Jumping lands on the game's own node, keeping the move list, the
+  // highlight and the annotations; pushing a branch here lost all three.
+  const jumpToFen = useAppStore((state) => state.jumpToFen)
   // SAN needs a board per move; worked out once per review, not per render.
   const bestSan = useMemo(
     () =>
@@ -73,7 +80,7 @@ function Scoreline({
         <ul className="scoreline__costly">
           {shown.map((move) => (
             <li key={move.ply}>
-              <button onClick={() => pushPosition(move.fen)} type="button">
+              <button onClick={() => jumpToFen(move.fen)} type="button">
                 <AnnotationIcon label={move.label!} size={14} />
                 <span className="scoreline__move">
                   {moveNumber(move.ply)} {move.san}
@@ -136,6 +143,82 @@ function useMoveExplanations(moves: ReplayMoveAnnotation[], fenHistory: string[]
   return useMemo(() => new Map((data ?? []).map((item) => [item.ply, item])), [data])
 }
 
+function hash(text: string) {
+  let value = 5381
+  for (let i = 0; i < text.length; i += 1) value = ((value << 5) + value + text.charCodeAt(i)) | 0
+  return (value >>> 0).toString(16)
+}
+
+// Shorter lines are positions studied on the board, not games.
+const REVIEWED_GAME_MIN_MOVES = 20
+
+/** A finished review is training: it earns XP once per game, however often it is reopened. */
+function useReviewReward(moves: number, complete: boolean, fenHistory: string[]) {
+  const username = useAppStore((state) => state.username)
+  const applyReward = useApplyReward(username)
+  const game = fenHistory.length ? hash(fenHistory.join('|')) : null
+  // A retry branches off the game, which cuts the line short: not a new game.
+  const retrying = useIsRetrying()
+  useEffect(() => {
+    if (retrying || !username || !complete || !game || moves < REVIEWED_GAME_MIN_MOVES) return
+    void postTrainingEvent(username, 'game_reviewed', `review:${game}`).then((reward) =>
+      applyReward(reward, 'Game reviewed'),
+    )
+  }, [applyReward, complete, game, moves, retrying, username])
+}
+
+/** Chess.com's "Retry": the player's own mistakes in this game, to find better. */
+function RetryButton({
+  annotations,
+  fenHistory,
+  side,
+}: {
+  annotations: ReplayMoveAnnotation[]
+  fenHistory: string[]
+  side: 'white' | 'black'
+}) {
+  const start = useRetryStore((state) => state.start)
+  const items = useMemo(() => {
+    const { nodes, currentNodeId } = useAppStore.getState()
+    return retryItems(
+      annotations,
+      fenHistory,
+      buildFullGameLine(nodes, currentNodeId).nodeIds,
+      side,
+    )
+  }, [annotations, fenHistory, side])
+  // A finished review ends on a medal: gold and clean when there is nothing to
+  // retry, otherwise the mistakes waiting and the way into them.
+  return (
+    <div className="review-done" data-clean={!items.length || undefined}>
+      <Medal earned emblem="magnifier" label="Review finished" progress={1} size={40} />
+      <span className="review-done__text">
+        <strong>Review finished</strong>
+        <span className="muted">
+          {items.length
+            ? `${items.length} ${items.length === 1 ? 'mistake' : 'mistakes'} to try again.`
+            : 'A clean game. Nothing to retry.'}
+        </span>
+      </span>
+      {items.length ? (
+        <Button
+          onClick={() =>
+            start({
+              gameKey: hash(fenHistory.join('|')),
+              items,
+              returnNodeId: useAppStore.getState().currentNodeId,
+            })
+          }
+          type="button"
+          variant="primary"
+        >
+          <Emblem name="retry" size={16} /> Retry {items.length === 1 ? 'it' : 'them'}
+        </Button>
+      ) : null}
+    </div>
+  )
+}
+
 /**
  * What the engine made of the line currently on the board: a scoreline per
  * side and the moves that actually cost something, each one a link back to the
@@ -158,6 +241,8 @@ export function GameReviewPanel({
   const coverage = reviewCoverage(annotations)
   const progress = useAnalysisProgress()
   const { analyzeLine, canAnalyze } = useAnalyzeLine()
+  useReviewReward(annotations.length, coverage.complete, fenHistory)
+  const retrying = useIsRetrying()
 
   const you = userColor ?? 'white'
   const them = you === 'white' ? 'black' : 'white'
@@ -165,16 +250,18 @@ export function GameReviewPanel({
   return (
     <Card>
       <CardBody>
-        {!annotations.length ? (
+        {retrying ? (
+          <RetryMistakes />
+        ) : !annotations.length ? (
           <EmptyState
             title="Nothing to review"
-            message="Open the Library below and pick one of your games. The engine starts going through it as soon as it loads."
+            message="Pick one of your games in the Library to see every move graded."
           />
         ) : (
           <>
             {progress.active ? (
               <p className="review-progress">
-                Analyzing — {progress.completed} of {progress.total}
+                Analyzing {progress.completed} of {progress.total}
                 {progress.etaSeconds != null
                   ? `, about ${formatDuration(progress.etaSeconds)} left`
                   : null}
@@ -183,8 +270,8 @@ export function GameReviewPanel({
               <div className="review-cta">
                 <p>
                   {coverage.judged === 0
-                    ? 'The engine has not looked at this game yet.'
-                    : `${coverage.total - coverage.judged} of ${coverage.total} moves are still unjudged.`}
+                    ? "The engine hasn't looked at this game yet."
+                    : `${coverage.total - coverage.judged} of ${coverage.total} moves still to check.`}
                 </p>
                 <Button
                   disabled={!canAnalyze}
@@ -198,6 +285,10 @@ export function GameReviewPanel({
             ) : null}
 
             <EvalGraph annotations={annotations} fenHistory={fenHistory} />
+
+            {coverage.complete ? (
+              <RetryButton annotations={annotations} fenHistory={fenHistory} side={you} />
+            ) : null}
 
             <Scoreline annotations={annotations} fenHistory={fenHistory} side={you} title="You" />
             <Scoreline

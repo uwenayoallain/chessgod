@@ -23,7 +23,7 @@ describe('phase coverage', () => {
     expect(coverage.unexamined.map((row) => row.phase)).toEqual(['middlegame', 'endgame'])
     expect(describePhaseSkew(coverage)).toContain('middlegame and endgame')
     // The point of the sentence: an empty queue is not a verdict on the player.
-    expect(describePhaseSkew(coverage)).toContain('not a clean bill of health')
+    expect(describePhaseSkew(coverage)).toContain("doesn't mean it has no mistakes")
   })
 
   it('says nothing when every phase has a usable sample', () => {

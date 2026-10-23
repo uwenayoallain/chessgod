@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import chess
@@ -21,6 +21,7 @@ from app.schemas.analysis import (
     RecurringMistakeOut,
 )
 from app.services.analysis import get_analysis_for_position
+from app.services.cache import get_shared_cache
 from app.services.improvement import classify_pattern, invalidate_improvement_caches_for_positions
 from app.services.mistakes import find_mistakes_cached
 from app.utils.fen import normalize_fen
@@ -97,6 +98,46 @@ async def get_position_analysis(
         return []
     rows = await get_analysis_for_position(session, position.id, depth)
     return [AnalysisResultOut.model_validate(row, from_attributes=True) for row in rows]
+
+
+_ACTIVITY_CACHE_KEY = "analysis:activity:v1"
+_ACTIVITY_TTL_SECONDS = 30
+
+
+@router.get("/activity")
+async def analysis_activity(session: AsyncSession = Depends(get_db)) -> dict:
+    """When the engine last stored an evaluation, and how many lately.
+
+    A crawl that stops leaves no error anywhere, just a coverage number that
+    quietly stops moving, so a stalled crawl and a finished library looked the
+    same in the app. This is the audit's freshness line, served to the page.
+    Cached briefly: the max/count scan is cheap but the page polls it.
+    """
+    cache = get_shared_cache()
+    cached = await cache.get_json(_ACTIVITY_CACHE_KEY)
+    if cached is not None:
+        return cached
+    now = datetime.now(UTC)
+    newest, last_hour, last_day = (await session.execute(
+        select(
+            func.max(AnalysisResult.analyzed_at),
+            func.count().filter(AnalysisResult.analyzed_at >= now - timedelta(hours=1)),
+            func.count().filter(AnalysisResult.analyzed_at >= now - timedelta(hours=24)),
+        ).where(
+            AnalysisResult.engine == ENGINE_NAME,
+            AnalysisResult.engine_version == ENGINE_VERSION,
+        )
+    )).one()
+    if newest is not None and newest.tzinfo is None:
+        newest = newest.replace(tzinfo=UTC)
+    activity = {
+        "newest_evaluation": newest.isoformat() if newest else None,
+        "minutes_since": round((now - newest).total_seconds() / 60, 1) if newest else None,
+        "stored_last_hour": int(last_hour or 0),
+        "stored_last_24h": int(last_day or 0),
+    }
+    await cache.set_json(_ACTIVITY_CACHE_KEY, activity, ttl_seconds=_ACTIVITY_TTL_SECONDS)
+    return activity
 
 
 @router.get("/deviations")

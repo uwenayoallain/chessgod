@@ -2,10 +2,17 @@ import { useEffect, useState } from 'react'
 import { Flag, Minus, Plus, RotateCcw, Swords, Undo2 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
-import { useSparringHistory, useStartSparring, type SparringHistory } from '@/hooks/use-sparring'
+import {
+  useOpenSparringGame,
+  useSparringHistory,
+  useStartSparring,
+  type SparringHistory,
+} from '@/hooks/use-sparring'
+import { formatGameDate } from '@/lib/format-date'
 import {
   clampSparRating,
   describeOutcome,
+  describeReviewStatus,
   formatClock,
   sideToMove,
   SPAR_ELO_STEP,
@@ -49,6 +56,8 @@ export function SparringPanel({
   const setTimeControl = useSparStore((state) => state.setTimeControl)
   const savedGameId = useSparStore((state) => state.savedGameId)
   const mistakesPosted = useSparStore((state) => state.mistakesPosted)
+  const reviewSettled = useSparStore((state) => state.reviewSettled)
+  const openSavedGame = useOpenSparringGame(onBeforeNewGame)
   const { data: history } = useSparringHistory(username)
   const setOverride = useSparStore((state) => state.setOverride)
 
@@ -180,14 +189,13 @@ export function SparringPanel({
           </Button>
         ) : null}
         <p className="sparring__note muted">
-          Stockfish looks a few moves ahead and chooses the way a player at this rating does, tuned
-          to your own games — so its mistakes are missed tactics, not random blunders. It gets{' '}
-          {SPAR_ELO_STEP} stronger after each win and {SPAR_ELO_STEP} weaker after each loss. A
-          strength you pick with − / + lasts until you reset or reload, and those games are unrated,
-          like set-up positions and takebacks. The evaluation stays hidden until the game ends; then
-          the game is reviewed and its mistakes join your drills.
+          It misses tactics the way people do. Win and it gets {SPAR_ELO_STEP} points stronger; lose
+          and it drops {SPAR_ELO_STEP}. Finished games are reviewed and drilled.
+          {override != null ? ' At a hand-picked strength, games are unrated.' : ''}
         </p>
-        {history && history.summary.played > 0 ? <SparringRecord history={history} /> : null}
+        {history && history.summary.played > 0 ? (
+          <SparringRecord history={history} onOpen={openSavedGame} />
+        ) : null}
       </div>
     )
   }
@@ -207,7 +215,7 @@ export function SparringPanel({
                 : 'Stockfish is thinking…'}
           </strong>
           <span className="muted">
-            You have {userColor === 'white' ? 'White' : 'Black'} · Stockfish plays like ≈{' '}
+            You have {userColor === 'white' ? 'White' : 'Black'} · opponent around{' '}
             {gameElo.toLocaleString()}
             {rated ? '' : ' · unrated'}
           </span>
@@ -215,8 +223,7 @@ export function SparringPanel({
         <SparClocks userColor={userColor} />
         {!isLeaf ? (
           <p className="sparring__note muted">
-            Step forward to the last move to continue, or play a different move here to take the
-            game back from this point.
+            Step to the last move to carry on, or play a move here to branch the game.
           </p>
         ) : null}
         <div className="sparring__actions">
@@ -240,18 +247,12 @@ export function SparringPanel({
             ? eloChange
               ? `Next opponent: ${(gameElo + eloChange).toLocaleString()} (${eloChange > 0 ? '+' : ''}${eloChange})`
               : `Next opponent stays at ${gameElo.toLocaleString()}.`
-            : 'Unrated game — the opponent’s strength is unchanged.'}
+            : 'Unrated game.'}
         </span>
       </div>
       <SparClocks userColor={userColor} />
       <p className="sparring__review muted" aria-live="polite">
-        {savedGameId == null
-          ? 'Reviewing the game…'
-          : mistakesPosted == null
-            ? 'Reviewing the game — every move is graded on the board as it finishes…'
-            : mistakesPosted === 0
-              ? 'Reviewed: no mistakes to drill from this one.'
-              : `Reviewed: ${mistakesPosted.toLocaleString()} ${mistakesPosted === 1 ? 'mistake' : 'mistakes'} added to your drills.`}
+        {describeReviewStatus({ savedGameId, mistakesPosted, reviewSettled })}
       </p>
       <div className="sparring__actions">
         <Button onClick={() => newGame(userColor)} type="button" variant="primary">
@@ -272,11 +273,23 @@ function SparClocks({ userColor }: { userColor: SparColor }) {
   const turnStartedAt = useSparStore((state) => state.turnStartedAt)
   const [now, setNow] = useState(() => Date.now())
 
+  // Tenths only show under ten seconds; above that the display changes once a
+  // second, so it is redrawn at each second boundary rather than ten times a
+  // second for the whole game.
   useEffect(() => {
-    if (!clockSide) return
-    const timer = window.setInterval(() => setNow(Date.now()), 100)
-    return () => window.clearInterval(timer)
-  }, [clockSide])
+    if (!clockSide || !clocks) return
+    let timer: number | undefined
+    const tick = () => {
+      const current = Date.now()
+      setNow(current)
+      const left = clockRemaining({ clocks, clockSide, turnStartedAt }, clockSide, current) ?? 0
+      if (left <= 0) return
+      const delay = left < 10_000 ? 100 : ((left - 1) % 1000) + 1
+      timer = window.setTimeout(tick, delay)
+    }
+    tick()
+    return () => window.clearTimeout(timer)
+  }, [clockSide, clocks, turnStartedAt])
 
   if (!clocks) return null
   const state = { clocks, clockSide, turnStartedAt }
@@ -307,7 +320,13 @@ function SparClocks({ userColor }: { userColor: SparColor }) {
 const RESULT_MARK = { win: 'W', draw: 'D', loss: 'L' } as const
 
 /** The record against the engine, and the strength it has settled on. */
-function SparringRecord({ history }: { history: SparringHistory }) {
+function SparringRecord({
+  history,
+  onOpen,
+}: {
+  history: SparringHistory
+  onOpen: (game: SparringHistory['games'][number]) => void
+}) {
   const { summary, games } = history
   const moved =
     summary.first_rating != null &&
@@ -330,21 +349,31 @@ function SparringRecord({ history }: { history: SparringHistory }) {
       </div>
       <ol className="sparring__games">
         {games.map((game) => (
-          <li className="sparring__game" key={game.id}>
-            <span className="sparring__result" data-result={game.result}>
-              {RESULT_MARK[game.result]}
-            </span>
-            <span>
-              {game.user_color === 'white' ? 'White' : 'Black'} vs{' '}
-              {game.engine_rating.toLocaleString()}
-              {game.rated ? '' : ' · unrated'}
-            </span>
-            <span className="muted">
-              {Math.ceil(game.moves / 2).toLocaleString()} moves ·{' '}
-              {game.mistakes === 0
-                ? 'no drills'
-                : `${game.mistakes.toLocaleString()} ${game.mistakes === 1 ? 'drill' : 'drills'}`}
-            </span>
+          <li key={game.id}>
+            {/* Every game is kept: a row puts it back on the board with its review. */}
+            <button
+              aria-label={`Open the game as ${game.user_color} against ${game.engine_rating}, ${formatGameDate(game.played_at)}`}
+              className="sparring__game"
+              disabled={!game.moves_uci.length}
+              onClick={() => onOpen(game)}
+              type="button"
+            >
+              <span className="sparring__result" data-result={game.result}>
+                {RESULT_MARK[game.result]}
+              </span>
+              <span>
+                {game.user_color === 'white' ? 'White' : 'Black'} vs{' '}
+                {game.engine_rating.toLocaleString()}
+                {game.rated ? '' : ' · unrated'}
+              </span>
+              <span className="muted">
+                {formatGameDate(game.played_at)} · {Math.ceil(game.moves / 2).toLocaleString()}{' '}
+                moves ·{' '}
+                {game.mistakes === 0
+                  ? 'no drills'
+                  : `${game.mistakes.toLocaleString()} ${game.mistakes === 1 ? 'drill' : 'drills'}`}
+              </span>
+            </button>
           </li>
         ))}
       </ol>

@@ -66,5 +66,5 @@ export function buildBookMarkers({
 export function bookMarkerTitle(marker: BookMarker): string {
   const percent =
     marker.share >= 0.01 ? Math.round(marker.share * 100) : (marker.share * 100).toFixed(1)
-  return `${marker.san} — ${percent}% of master games (${marker.gameCount.toLocaleString()})`
+  return `${marker.san}: ${percent}% of master games (${marker.gameCount.toLocaleString()})`
 }

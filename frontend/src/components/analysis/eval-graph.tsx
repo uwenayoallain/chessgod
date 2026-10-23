@@ -39,7 +39,8 @@ export function EvalGraph({
   annotations: ReplayMoveAnnotation[]
   fenHistory: string[]
 }) {
-  const pushPosition = useAppStore((state) => state.pushPosition)
+  // The graph plots the loaded game, so a click jumps to that game's node.
+  const jumpToFen = useAppStore((state) => state.jumpToFen)
   const currentFen = useAppStore((state) => state.currentFen)
   const version = useEngineStore((state) => state.analysisVersion)
 
@@ -130,7 +131,7 @@ export function EvalGraph({
             aria-label={index === 0 ? 'Starting position' : `Move ${Math.ceil(index / 2)}`}
             className={`eval-graph__hit${index === currentIndex ? ' eval-graph__hit--active' : ''}`}
             key={`${fen}-${index}`}
-            onClick={() => pushPosition(fen)}
+            onClick={() => jumpToFen(fen)}
             type="button"
           />
         ))}

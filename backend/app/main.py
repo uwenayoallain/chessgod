@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import psutil
@@ -16,16 +16,16 @@ from starlette.requests import Request
 
 from app.config import settings
 from app.database import async_session_factory, engine, pool_stats
-from app.routers import analysis, games, health, import_games, improvement, sparring, theory, tree
+from app.routers import analysis, games, health, import_games, improvement, sparring, theory, training, tree
 from sqlalchemy import select
 
 from app.models.game import Game
 from app.routers.theory import family_summaries_bulk
+from app.services import auto_sync
 from app.services.cache import get_shared_cache
 from app.services.common_book import load_common_book_index
 from app.services.mistakes import find_mistakes_cached
 from app.routers.improvement import improvement_plan as improvement_plan_route
-from app.services.game_scope import DEFAULT_MIN_USER_RATING
 from app.services.improvement import DEFAULT_TIME_CLASS
 from app.services.opening_families import load_family_tree
 from app.services.repertoire import derive_repertoire
@@ -44,15 +44,22 @@ logger = logging.getLogger(__name__)
 
 async def maintain_master_openings(http_client: httpx.AsyncClient, stop_event: asyncio.Event) -> None:
     store = get_observability_store()
+    # The bundled book only changes with a deploy, so it is seeded once per
+    # process. Seeding on every wake cost ~2s a minute through a Lichess
+    # cooldown, when the loop wakes every sixty seconds.
+    book_seeded = False
     while not stop_event.is_set():
         started_at = datetime.now(UTC)
         error: str | None = None
         meta: dict[str, int] = {}
         try:
             async with async_session_factory() as session:
-                seeded = await seed_opening_book(session)
-                seeded_families = await seed_opening_families(session)
-                await session.commit()
+                seeded = seeded_families = 0
+                if not book_seeded:
+                    seeded = await seed_opening_book(session)
+                    seeded_families = await seed_opening_families(session)
+                    await session.commit()
+                    book_seeded = True
                 refreshed = await sync_stale_master_data(
                     session,
                     LichessExplorerClient(http_client),
@@ -160,7 +167,7 @@ async def _cache_warmup_worker(stop_event: asyncio.Event) -> None:
                     # one background rebuild when it is stale.
                     await improvement_plan_route(
                         username=username, color="both", time_class=DEFAULT_TIME_CLASS,
-                        threshold_cp=80, limit=20, min_user_rating=DEFAULT_MIN_USER_RATING,
+                        threshold_cp=80, limit=20, min_user_rating=None,
                         pattern_key=None, session=session,
                     )
                     for color in ("white", "black"):
@@ -245,9 +252,73 @@ async def flush_observability_events(*, max_items: int = 1000) -> int:
             return 0
 
 
+async def _auto_sync_worker(http_client: httpx.AsyncClient, stop_event: asyncio.Event) -> None:
+    """Fetch new games while somebody is here (`services/auto_sync.py`).
+
+    Presence is the warmup's rule: no interactive request in
+    `cache_warmup_idle_after_seconds` and nothing is fetched. The first visit
+    after a quiet spell syncs within a minute or so.
+    """
+    from app.routers.import_games import run_import
+    from app.services.import_jobs import create_import_job
+
+    store = get_observability_store()
+    interval = timedelta(seconds=settings.auto_sync_interval_seconds)
+    last: dict[str, tuple[datetime, bool]] = {}
+    with suppress(TimeoutError):
+        await asyncio.wait_for(stop_event.wait(), timeout=60)
+    while not stop_event.is_set() and settings.auto_sync_interval_seconds > 0:
+        if store.seconds_since_interactive_request() <= settings.cache_warmup_idle_after_seconds:
+            now = datetime.now(UTC)
+            try:
+                async with async_session_factory() as session:
+                    players = await auto_sync.sync_candidates(session, now)
+                for username in players:
+                    if not auto_sync.due(last.get(username), now, interval):
+                        continue
+                    started_at = datetime.now(UTC)
+                    async with async_session_factory() as session:
+                        job_id = await create_import_job(session, username)
+                        await session.commit()
+                    if job_id is None:
+                        # Somebody is importing this player already.
+                        continue
+                    new_games = await run_import(username, http_client, job_id=job_id)
+                    last[username] = (now, new_games is not None)
+                    store.record_background_task(
+                        "auto_sync",
+                        started_at=started_at,
+                        finished_at=datetime.now(UTC),
+                        error=None if new_games is not None else "import failed",
+                        meta={"username": username, "new_games": new_games},
+                    )
+            except Exception:
+                logger.exception("Automatic game sync failed")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=120)
+        except TimeoutError:
+            continue
+
+
+_PURGE_EVERY_SECONDS = 24 * 60 * 60
+
+
 async def _observability_persistence_worker(stop_event: asyncio.Event) -> None:
+    # Old events are purged once a day here; the purge used to run only when
+    # someone opened the admin panel, so nothing was ever deleted.
+    # None, not 0.0: monotonic time counts from boot, so a 0.0 start held the
+    # first purge back until the machine had been up for a whole day.
+    last_purge: float | None = None
     while not stop_event.is_set():
         await flush_observability_events()
+        if last_purge is None or time.monotonic() - last_purge >= _PURGE_EVERY_SECONDS:
+            last_purge = time.monotonic()
+            try:
+                async with async_session_factory() as session:
+                    await get_observability_store().purge_expired_events(session)
+                    await session.commit()
+            except Exception:
+                logger.exception("Could not purge old observability events")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=5.0)
             return
@@ -304,6 +375,9 @@ async def lifespan(app: FastAPI):
     app.state.cache_warmup_task = asyncio.create_task(
         _cache_warmup_worker(app.state.samplers_stop)
     )
+    app.state.auto_sync_task = asyncio.create_task(
+        _auto_sync_worker(app.state.http_client, app.state.samplers_stop)
+    )
     app.state.lag_task = asyncio.create_task(_event_loop_lag_sampler(app.state.samplers_stop))
     app.state.process_task = asyncio.create_task(_process_metrics_sampler(app.state.samplers_stop))
     app.state.observability_persistence_task = asyncio.create_task(
@@ -316,6 +390,7 @@ async def lifespan(app: FastAPI):
         app.state.book_warmup_task,
         app.state.master_openings_task,
         app.state.cache_warmup_task,
+        app.state.auto_sync_task,
         app.state.lag_task,
         app.state.process_task,
         app.state.observability_persistence_task,
@@ -375,3 +450,4 @@ app.include_router(theory.router, prefix="/api/theory", tags=["theory"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(improvement.router, prefix="/api/improvement", tags=["improvement"])
 app.include_router(sparring.router, prefix="/api/sparring", tags=["sparring"])
+app.include_router(training.router, prefix="/api/training", tags=["training"])

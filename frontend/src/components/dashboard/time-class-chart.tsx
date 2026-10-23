@@ -12,7 +12,7 @@ export function TimeClassChart({ byTimeClass }: { byTimeClass: Record<string, Ti
   return (
     <Card className="stats-panel">
       <CardHeader>
-        <h2>Time Controls</h2>
+        <h2>Time controls</h2>
       </CardHeader>
       <CardBody className="stats-panel__body stats-panel__body--list">
         {entries.map(([timeClass, results]) => {

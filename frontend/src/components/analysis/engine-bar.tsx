@@ -24,7 +24,8 @@ export function EngineBar() {
           className={`engine-bar__signal${isAnalyzing ? ' engine-bar__signal--active' : ''}`}
           aria-hidden="true"
         />
-        <strong>{isAnalyzing ? 'Analyzing' : 'Engine'}</strong>
+        {/* The toggle beside it already says "Engine"; this says what it is doing. */}
+        <strong>{isAnalyzing ? 'Analyzing' : topLine ? 'Done' : 'Ready'}</strong>
       </div>
       <div className="engine-bar__meta">
         <div className="mono engine-bar__score" aria-label={`Evaluation ${label}`}>

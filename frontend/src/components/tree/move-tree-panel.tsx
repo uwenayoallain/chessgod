@@ -1,5 +1,6 @@
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/empty-state'
+import { PanelError } from '@/components/ui/panel-error'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { MoveRow } from '@/components/tree/move-row'
 import { StatsBar } from '@/components/tree/stats-bar'
@@ -20,7 +21,7 @@ export function MoveTreePanel() {
   return (
     <Card>
       <CardHeader>
-        <h2>From this position</h2>
+        <h2>Your games from here</h2>
         <div className="panel-header__meta">
           {isRefreshing ? <span className="refresh-badge">Updating</span> : null}
           <span className="muted">{(data?.total_games ?? 0).toLocaleString()} games</span>
@@ -39,7 +40,7 @@ export function MoveTreePanel() {
           <PanelSkeleton label="Loading moves from this position" rowHeight={56} rows={8} />
         ) : null}
 
-        {error ? <EmptyState title="Could not load" message={error.message} /> : null}
+        {error ? <PanelError error={error} what="your games from this position" /> : null}
 
         {!isLoading && !error && data?.moves?.length === 0 ? (
           <EmptyState

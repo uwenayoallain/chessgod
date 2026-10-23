@@ -78,6 +78,6 @@ describe('buildBookMarkers', () => {
       masterMoves: [move('e4', 'e2e4', 48), move('d4', 'd2d4', 52)],
     })
 
-    expect(bookMarkerTitle(markers.e4)).toBe('e4 — 48% of master games (48)')
+    expect(bookMarkerTitle(markers.e4)).toBe('e4: 48% of master games (48)')
   })
 })

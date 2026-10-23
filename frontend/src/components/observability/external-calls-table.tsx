@@ -29,7 +29,7 @@ export function ExternalCallsTable({ calls, state }: Props) {
   return (
     <Card>
       <CardHeader>
-        <h2>External Services</h2>
+        <h2>External services</h2>
       </CardHeader>
       <CardBody className="column admin-observability__summary-body">
         {Object.entries(state).map(([name, value]) => (

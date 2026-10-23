@@ -4,6 +4,7 @@ import { Chess } from 'chess.js'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { getPvPrefixToMove } from '@/lib/analysis/pv-actions'
 import { scoreToWhitePerspective } from '@/lib/stockfish/eval'
+import { useEngineView } from '@/hooks/use-engine'
 import type { UCIInfo } from '@/lib/stockfish/uci'
 import { useAppStore } from '@/store/app-store'
 import { useEngineStore } from '@/store/engine-store'
@@ -65,13 +66,15 @@ function scoreLabel(score: UCIInfo['score'], fen: string): { text: string; white
 
 export function EngineLines({
   hidden = false,
-  lines,
-  isAnalyzing,
+  hiddenReason = 'Hidden until the game ends.',
 }: {
   hidden?: boolean
-  lines: UCIInfo[]
-  isAnalyzing?: boolean
+  /** Why the lines are hidden, said where they would be. */
+  hiddenReason?: string
 }) {
+  // Read here rather than passed down: every line the engine reports changes
+  // these, and the workspace that used to hold them redrew with each one.
+  const { isAnalyzing, lines } = useEngineView()
   const currentFen = useAppStore((state) => state.currentFen)
   const currentNodeId = useAppStore((state) => state.currentNodeId)
   const nodes = useAppStore((state) => state.nodes)
@@ -104,11 +107,10 @@ export function EngineLines({
       <CardHeader>
         <div className="engine-lines__title">
           <h2>Best lines</h2>
-          <span>Live</span>
         </div>
         <label
           className="engine-lines__performance"
-          title="Use a 1GB hash table for deeper analysis. This restarts the engine."
+          title="Give the engine more memory. Analysis in progress starts over."
         >
           <input
             type="checkbox"
@@ -120,9 +122,7 @@ export function EngineLines({
       </CardHeader>
       <CardBody className="column" style={{ minHeight: 120 }}>
         {hidden ? (
-          <div className="muted engine-lines__empty">
-            Hidden while you play the engine — it returns when the game ends.
-          </div>
+          <div className="muted engine-lines__empty">{hiddenReason}</div>
         ) : !parsed.length ? (
           <div className="muted engine-lines__empty">
             {isAnalyzing

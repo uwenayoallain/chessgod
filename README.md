@@ -22,7 +22,7 @@ From the repo root:
 make run
 ```
 
-That starts PostgreSQL, the FastAPI backend on `http://localhost:8000`, and the Vite frontend on `http://localhost:5173`.
+That starts PostgreSQL on host port `15432`, the FastAPI backend on `http://localhost:18000`, and the Vite frontend on `http://localhost:15173`. Set `POSTGRES_PORT`, `BACKEND_PORT`, or `FRONTEND_PORT` to override the host bindings.
 
 ## Development
 

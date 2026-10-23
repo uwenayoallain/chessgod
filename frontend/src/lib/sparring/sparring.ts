@@ -278,5 +278,32 @@ export function describeOutcome(outcome: SparOutcome) {
   if (outcome.result === 'loss') {
     return outcome.reason === 'resignation' ? 'You resigned.' : `You lost by ${outcome.reason}.`
   }
+  if (outcome.reason === 'timeout vs insufficient material') {
+    return 'Draw: the flag fell, but the other side cannot mate.'
+  }
   return `Draw by ${outcome.reason}.`
+}
+
+/**
+ * The Play panel's line about the review of a finished game. It must end when
+ * the review does: "Reviewing…" used to hold until the drills were posted,
+ * and never changed if that post failed.
+ */
+export function describeReviewStatus({
+  savedGameId,
+  mistakesPosted,
+  reviewSettled,
+}: {
+  savedGameId: number | null
+  mistakesPosted: number | 'failed' | null
+  reviewSettled: boolean
+}): string {
+  if (mistakesPosted === 'failed') return 'Reviewed. The drills could not be saved this time.'
+  if (typeof mistakesPosted === 'number') {
+    return mistakesPosted === 0
+      ? 'Reviewed. No mistakes to drill from this one.'
+      : `Reviewed: ${mistakesPosted.toLocaleString()} ${mistakesPosted === 1 ? 'mistake' : 'mistakes'} added to your drills.`
+  }
+  if (reviewSettled && savedGameId != null) return 'Reviewed. Adding the drills…'
+  return 'Reviewing the game…'
 }

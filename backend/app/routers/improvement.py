@@ -8,9 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_factory, get_db
 from app.services.cache import get_shared_cache
-from app.schemas.improvement import DrillAttemptIn, DrillAttemptOut, ImprovementPlanOut
-from app.services.game_scope import DEFAULT_MIN_USER_RATING
+from app.schemas.improvement import (
+    DrillAttemptIn,
+    DrillAttemptOut,
+    ImprovementPlanOut,
+    PointsLostOut,
+)
+from app.services.game_scope import player_rating_floor
 from app.services.improvement import DEFAULT_TIME_CLASS, build_improvement_plan, record_drill_attempt
+from app.services.points_lost import build_points_lost
+from app.services.swr import stale_while_revalidate
+from app.services import training
 
 
 router = APIRouter()
@@ -77,10 +85,13 @@ async def improvement_plan(
     time_class: str = Query(DEFAULT_TIME_CLASS, pattern="^(rapid_blitz|rapid|blitz)$"),
     threshold_cp: int = Query(80, ge=50, le=500),
     limit: int = Query(20, ge=1, le=50),
-    min_user_rating: int = Query(DEFAULT_MIN_USER_RATING, ge=100, le=4000),
+    # Omitted, it follows the player (`player_rating_floor`).
+    min_user_rating: int | None = Query(None, ge=100, le=4000),
     pattern_key: str | None = Query(None, min_length=1, max_length=64),
     session: AsyncSession = Depends(get_db),
 ) -> ImprovementPlanOut:
+    if min_user_rating is None:
+        min_user_rating = await player_rating_floor(session, username)
     params = {
         "color": color,
         "time_class": time_class,
@@ -101,6 +112,38 @@ async def improvement_plan(
     return await _build_and_store(session, username, params)
 
 
+@router.get("/where-points-go", response_model=PointsLostOut)
+async def where_points_go(
+    username: str = Query(..., min_length=1, max_length=64),
+    color: str = Query("both", pattern="^(white|black|both)$"),
+    time_class: str = Query(DEFAULT_TIME_CLASS, pattern="^(rapid_blitz|rapid|blitz)$"),
+    session: AsyncSession = Depends(get_db),
+) -> PointsLostOut:
+    """Which phase and which kind of move the player's winning chances go to."""
+    min_user_rating = await player_rating_floor(session, username)
+    # v2: adds how each colour comes out of the opening.
+    suffix = f"{username}:v2:{color}:{time_class}:{min_user_rating}"
+
+    async def compute(db: AsyncSession) -> dict:
+        result = await build_points_lost(
+            db, username=username, color=color, time_class=time_class,
+            min_user_rating=min_user_rating,
+        )
+        return result.model_dump(mode="json")
+
+    # ~1s over a 90k-decision library, and it moves only as evidence arrives:
+    # the fresh copy follows the evidence generation (`invalidate_improvement_caches`),
+    # the last-known one sits outside that prefix so a stale read is instant.
+    payload = await stale_while_revalidate(
+        session,
+        fresh_base=f"improvement:losses:{suffix}",
+        last_key=f"improvement:losseslast:{suffix}",
+        compute=compute,
+        fresh_ttl=1_800.0,
+    )
+    return PointsLostOut.model_validate(payload)
+
+
 @router.post("/attempts", response_model=DrillAttemptOut)
 async def improvement_attempt(
     payload: DrillAttemptIn,
@@ -110,6 +153,13 @@ async def improvement_attempt(
         result = await record_drill_attempt(session, payload)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    solved = result.correct and result.follow_up_correct is not False
+    result.xp_gained = await training.award(
+        session, payload.username, "drill_correct" if solved else "drill_wrong",
+        detail={"position_id": payload.position_id, "pattern": payload.pattern_key},
+        request_id=f"drill:{payload.request_id}" if payload.request_id else None,
+    )
+    await training.settle_quests(session, payload.username, tz=payload.tz)
     await session.commit()
     # Progress is part of the plan: an answer must show on the next read.
     await invalidate_plan(payload.username)

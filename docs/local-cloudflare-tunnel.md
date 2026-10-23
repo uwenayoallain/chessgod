@@ -47,6 +47,6 @@ make tunnel-down
 
 - Public visitors must use `https://chess.uwe.rw`.
 - The frontend uses same-origin `/api` in tunnel mode, so remote browsers do not try to call `localhost`.
-- Do not expose port `8000` directly to the internet. The tunnel should point only at the frontend service.
+- Do not expose host port `18000` directly to the internet. The tunnel should point only at the frontend service.
 - Change `POSTGRES_PASSWORD` and `OBSERVABILITY_ADMIN_PASSPHRASE_SHA256` before using this with other people.
 - If this PC sleeps, shuts down, loses internet, or Docker stops, the site goes offline.

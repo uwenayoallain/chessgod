@@ -167,12 +167,21 @@ def build_seeded_deviation(
     }
 
 
-def cache_is_stale(last_fetched: datetime | None) -> bool:
+def cache_is_stale(last_fetched: datetime | None, master_total: int | None = None) -> bool:
     if last_fetched is None:
         return True
     if last_fetched.tzinfo is None:
         last_fetched = last_fetched.replace(tzinfo=UTC)
-    return datetime.now(UTC) - last_fetched > timedelta(days=settings.lichess_cache_ttl_days)
+    # A position fetched and found to have no master games stays that way: the
+    # masters database grows by curation, not by play, so 86% of this library's
+    # fetches came back empty and re-asking monthly would spend the whole quota
+    # re-confirming nothing. Empty answers keep their own, much longer TTL.
+    ttl_days = (
+        settings.lichess_empty_ttl_days
+        if master_total == 0
+        else settings.lichess_cache_ttl_days
+    )
+    return datetime.now(UTC) - last_fetched > timedelta(days=ttl_days)
 
 
 def master_data_state(position: Position, moves: list[PositionMove]) -> str:

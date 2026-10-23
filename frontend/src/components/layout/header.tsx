@@ -3,6 +3,7 @@ import { useState, useRef, useEffect } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { ResyncButton } from '@/components/dashboard/resync-button'
+import { TrainingChip } from '@/components/training/training-widgets'
 import { useTheme } from '@/components/layout/theme-provider'
 import { useImportSummary } from '@/hooks/use-import-summary'
 import { useAppStore } from '@/store/app-store'
@@ -96,7 +97,7 @@ export function Header() {
   return (
     <header className="header">
       <div className="header__brand">
-        <img alt="ChessGod" className="header__logo" height={512} src="/logo.png" width={512} />
+        <img alt="ChessGod" className="header__logo" height={512} src="/logo.webp" width={512} />
       </div>
 
       <div className="header__actions">
@@ -106,6 +107,7 @@ export function Header() {
               <span className="header__user-dot" aria-hidden="true" />
               <span>{username}</span>
             </div>
+            <TrainingChip username={username} />
             <ResyncButton username={username} />
             <Button
               variant="ghost"

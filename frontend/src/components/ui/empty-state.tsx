@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react'
 
+import { Emblem } from '@/components/training/trophies'
+
 /** Says what is missing and what fills it, in one line each. */
 export function EmptyState({
-  glyph = '♟',
+  glyph = <Emblem name="pawn" size={34} />,
   title,
   message,
   hint,

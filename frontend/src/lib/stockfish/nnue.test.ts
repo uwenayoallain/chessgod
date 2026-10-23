@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
 
-import { fetchNnueBuffer, resolveNnueLoads } from './nnue'
+import { fetchNnueBuffer, resolveNnueLoads, verifiedMarker } from './nnue'
 
 const BIG = 'nn-1a298aa575a0.nnue'
 const SMALL = 'nn-37f18f62d772.nnue'
@@ -18,6 +18,49 @@ describe('verified NNUE loading', () => {
     vi.stubGlobal('caches', { open: vi.fn().mockResolvedValue({ match: async () => valid() }) })
     expect(await fetchNnueBuffer(url, filename)).toEqual(new Uint8Array([1, 2, 3]))
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('trusts a copy it marked as verified, without hashing it again', async () => {
+    const digest = vi.spyOn(crypto.subtle, 'digest')
+    const marked = () =>
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'x-chessgod-verified': verifiedMarker(filename, 3) },
+      })
+    vi.stubGlobal('fetch', vi.fn())
+    vi.stubGlobal('caches', { open: vi.fn().mockResolvedValue({ match: async () => marked() }) })
+    expect(await fetchNnueBuffer(url, filename)).toEqual(new Uint8Array([1, 2, 3]))
+    expect(digest).not.toHaveBeenCalled()
+    digest.mockRestore()
+  })
+
+  it('hashes a marked copy whose length no longer matches, and replaces it if it is bad', async () => {
+    const truncated = () =>
+      new Response(new Uint8Array([1, 2]), {
+        headers: { 'x-chessgod-verified': verifiedMarker(filename, 3) },
+      })
+    const cache = {
+      match: async () => truncated(),
+      delete: vi.fn().mockResolvedValue(true),
+      put: vi.fn().mockResolvedValue(undefined),
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => valid()),
+    )
+    vi.stubGlobal('caches', { open: vi.fn().mockResolvedValue(cache) })
+    expect(await fetchNnueBuffer(url, filename)).toEqual(new Uint8Array([1, 2, 3]))
+    expect(cache.delete).toHaveBeenCalledWith(url)
+  })
+
+  it('marks a copy cached before the marker existed, once it has been hashed', async () => {
+    const put = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('fetch', vi.fn())
+    vi.stubGlobal('caches', {
+      open: vi.fn().mockResolvedValue({ match: async () => valid(), put }),
+    })
+    expect(await fetchNnueBuffer(url, filename)).toEqual(new Uint8Array([1, 2, 3]))
+    const stored = put.mock.calls[0]?.[1] as Response
+    expect(stored.headers.get('x-chessgod-verified')).toBe(verifiedMarker(filename, 3))
   })
 
   it('replaces a corrupted cache entry with verified bytes', async () => {

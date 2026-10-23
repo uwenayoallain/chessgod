@@ -167,11 +167,14 @@ describe('ImprovementTrainer', () => {
     )
     fireEvent.click(screen.getByRole('button', { name: 'Choose Missed capture' }))
     fireEvent.click(screen.getByRole('button', { name: 'Train 2 positions · ~1 min' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Show hint & solution' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Show solution' }))
     fireEvent.click(screen.getByRole('button', { name: 'Next position' }))
     expect(screen.getByLabelText('Position 2 of 2')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Show hint & solution' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Show solution' }))
     fireEvent.click(screen.getByRole('button', { name: 'Finish session' }))
+    // Two positions given up on: nothing solved first time.
+    expect(screen.getByText('0')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the lessons' }))
 
     planState.current = planState.makePlan()
     planState.current.drills[0] = {
@@ -262,7 +265,7 @@ describe('ImprovementTrainer', () => {
       fireEvent.click(screen.getByRole('button', { name: 'End drill session' }))
       fireEvent.click(screen.getByRole('button', { name: /Train \d positions? ·/ }))
     } else {
-      fireEvent.click(screen.getByRole('button', { name: 'Show hint & solution' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Show solution' }))
       fireEvent.click(
         screen.getByRole('button', {
           name: transition === 'next' ? 'Next position' : 'Try again',
@@ -276,7 +279,7 @@ describe('ImprovementTrainer', () => {
       else oldCallbacks.onError(new Error('Old answer failed'))
     })
     expect(screen.queryByText('Found it.')).toBeNull()
-    expect(screen.queryByText('That move could not be saved.')).toBeNull()
+    expect(screen.queryByText("Couldn't save that move.")).toBeNull()
     expect(screen.queryByText('Old answer feedback')).toBeNull()
     expect(useAppStore.getState().drillSolving).toBe(true)
 
@@ -299,9 +302,9 @@ describe('ImprovementTrainer', () => {
     render(<ImprovementTrainer color="both" timeClass="rapid_blitz" username="tester" />)
 
     // The scope is stated as one plain line rather than a boxed callout.
-    expect(screen.getByText(/Rapid and Blitz games at rating\s*1000\+/)).toBeTruthy()
-    expect(screen.getByText('Pick a lesson')).toBeTruthy()
-    expect(screen.getByText(/In progress · 0\/1 learned · 1 ready/)).toBeTruthy()
+    expect(screen.getByText(/rapid and blitz games rated\s*1000\+/)).toBeTruthy()
+    expect(screen.getByText('Drills')).toBeTruthy()
+    expect(screen.getByText(/0\/1 learned · 1 ready/)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Choose Missed capture' }))
     fireEvent.click(screen.getByRole('button', { name: 'Train 1 position · ~1 min' }))
@@ -343,6 +346,9 @@ describe('ImprovementTrainer', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Finish session' }))
     expect(refetch).toHaveBeenCalledOnce()
+    // The set ends on its result before going back to the lessons.
+    expect(screen.getByText('Every position solved on the first try.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the lessons' }))
     expect(screen.getByRole('button', { name: 'Train 1 position · ~1 min' })).toBeTruthy()
   })
 

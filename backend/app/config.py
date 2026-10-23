@@ -9,16 +9,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+asyncpg://chessgod:chessgod@localhost:5432/chessgod"
+    database_url: str = "postgresql+asyncpg://chessgod:chessgod@localhost:15432/chessgod"
     db_pool_size: int = Field(default=10, ge=1)
     db_max_overflow: int = Field(default=20, ge=0)
     db_pool_recycle_seconds: int = Field(default=1800, ge=60)
-    cors_origins: list[str] = ["http://localhost:5173"]
+    cors_origins: list[str] = ["http://localhost:15173"]
     # Politeness delay between serial chess.com requests. The client retries 429s
     # with exponential backoff, so a small delay is enough; 0.5s added ~70s of
     # pure sleep for accounts with 100+ monthly archives.
     chesscom_request_delay: float = Field(default=0.25, ge=0.0)
     lichess_cache_ttl_days: int = 30
+    # TTL for a position fetched and found to have zero master games. 86% of
+    # fetched positions are past master play entirely and will never gain games,
+    # so re-asking them on the 30-day clock would spend the whole sync quota
+    # re-confirming empty answers before any new position is reached.
+    lichess_empty_ttl_days: int = Field(default=365, ge=1)
     lichess_explorer_url: str = "https://explorer.lichess.org"
     lichess_api_token: str | None = None
     # Lichess asks for one request at a time and, on a 429, a full minute before
@@ -28,7 +33,11 @@ class Settings(BaseSettings):
     # positions and then stopped. One request a second is both what they ask for
     # and far more throughput, because it does not spend the run getting banned.
     lichess_request_delay: float = Field(default=3.0, ge=0.0)
-    lichess_sync_min_position_games: int = Field(default=1, ge=0)
+    # Positions seen in one game found master games 1.2% of the time (164k
+    # fetched), against 37.5% at two games and 67.6% at three; at 1 the backlog
+    # of 2.4M one-off positions kept the sync running around the clock. A
+    # one-off position is still fetched on demand when the board reaches it.
+    lichess_sync_min_position_games: int = Field(default=2, ge=0)
     # Per-run cap on explorer fetches. Staleness is filtered in SQL, so capped
     # runs still walk the whole corpus over successive cycles; the cap keeps a
     # single run from loading an unbounded ORM result (millions of positions
@@ -54,6 +63,9 @@ class Settings(BaseSettings):
     # Set it very high to restore the old always-warm behaviour, at the cost
     # measured in `_cache_warmup_worker`.
     cache_warmup_idle_after_seconds: float = Field(default=600.0, ge=0)
+    # New games are fetched on their own while somebody uses the app, at most
+    # this often per player (services/auto_sync.py); 0 turns it off.
+    auto_sync_interval_seconds: float = Field(default=3 * 3600.0, ge=0)
     # Shared response cache. When unset, caching falls back to a per-process
     # dict — fine for tests and single-worker dev, but set REDIS_URL when
     # running more than one uvicorn worker so all of them share one cache.

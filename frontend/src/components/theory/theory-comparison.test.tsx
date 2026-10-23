@@ -20,7 +20,7 @@ describe('TheoryComparison', () => {
       />,
     )
 
-    expect(screen.getByText('Seeded book')).toBeTruthy()
+    expect(screen.getByText('Built-in book')).toBeTruthy()
     expect(screen.getByText('12 games')).toBeTruthy()
     expect(screen.getByText('42%')).toBeTruthy()
     expect(screen.getByText('15k games')).toBeTruthy()

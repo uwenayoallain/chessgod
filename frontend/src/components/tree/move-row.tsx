@@ -13,14 +13,16 @@ export function MoveRow({ move, onSelect }: MoveRowProps) {
       <button onClick={() => onSelect(move)} type="button">
         <div className="toolbar" style={{ justifyContent: 'space-between' }}>
           <strong className="san">{move.san}</strong>
+          {/* Badge first, so the counts keep the right edge and line up down
+              the list whether or not a row is a book move. */}
           <div className="toolbar" style={{ gap: 6 }}>
-            <span className="muted">
+            {move.is_book_move ? <Badge>Book</Badge> : null}
+            <span className="muted move-row__count">
               {move.game_count.toLocaleString()}
               <span className="faint" style={{ fontSize: 11, marginLeft: 3 }}>
                 ({move.white_wins}W-{move.draws}D-{move.black_wins}L)
               </span>
             </span>
-            {move.is_book_move ? <Badge>Book</Badge> : null}
           </div>
         </div>
         <div style={{ marginTop: 6 }}>

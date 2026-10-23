@@ -37,7 +37,7 @@ export function gradeQuizMove(position: OpeningQuizPosition, uci: string): QuizV
     const move = position.book_moves[0]
     return {
       kind: 'main',
-      headline: `${move.san} is the main line — ${percent(move.share)} of master games.`,
+      headline: `${move.san} is the main line, played in ${percent(move.share)} of master games.`,
       share: move.share,
     }
   }
@@ -45,14 +45,14 @@ export function gradeQuizMove(position: OpeningQuizPosition, uci: string): QuizV
     const move = position.book_moves[index]
     return {
       kind: 'book',
-      headline: `${move.san} is book — ${percent(move.share)} of master games. The main line is ${position.book_moves[0].san}.`,
+      headline: `${move.san} is book, played in ${percent(move.share)} of master games. The main line is ${position.book_moves[0].san}.`,
       share: move.share,
     }
   }
   const main = position.book_moves[0]
   return {
     kind: 'off-book',
-    headline: `Off book — masters play ${main.san} here (${percent(main.share)}), and this move in under 3% of games, if ever.`,
+    headline: `Off book. Masters play ${main.san} here (${percent(main.share)}) and this move in under 3% of games.`,
     share: null,
   }
 }
@@ -63,7 +63,7 @@ export function describeUsualMove(position: OpeningQuizPosition) {
   if (!usual) return null
   const times = `${usual.count.toLocaleString()} of ${position.occurrences.toLocaleString()} games`
   return position.usual_move_in_book
-    ? `You usually play ${usual.san} here (${times}) — that is book.`
+    ? `You usually play ${usual.san} here (${times}), and that is book.`
     : `You usually play ${usual.san} here (${times}), which masters rarely play.`
 }
 

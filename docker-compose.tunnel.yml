@@ -1,7 +1,7 @@
 services:
   backend:
     environment:
-      CORS_ORIGINS: ${CORS_ORIGINS:-["https://chess.uwe.rw","http://localhost:5173"]}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["https://chess.uwe.rw","http://localhost:15173"]}
 
   frontend:
     environment:

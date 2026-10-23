@@ -2,31 +2,40 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { BookOpen, GraduationCap } from 'lucide-react'
 
 import { BoardRail } from '@/components/board/board-rail'
+import { Medal } from '@/components/training/trophies'
+import type { EmblemName } from '@/lib/training/emblem-art'
 import { ChessBoard } from '@/components/board/chess-board'
 import { WorkspaceTabs } from '@/components/board/workspace-tabs'
 import { EvaluationProgress } from '@/components/analysis/evaluation-progress'
 import { ImportProgress } from '@/components/import/import-progress'
 import { UsernameForm } from '@/components/import/username-form'
 import { Button } from '@/components/ui/button'
-import { readSectionOpen } from '@/components/ui/collapsible-section'
+import { revealSection } from '@/components/ui/collapsible-section'
 import { ExplorePanel } from '@/components/workspace/explore-panel'
 import { ReviewPanel } from '@/components/workspace/review-panel'
 import { useBoardWorkspace } from '@/hooks/use-board-workspace'
-import { useEngine } from '@/hooks/use-engine'
+import { useAutoAnalysis } from '@/hooks/use-engine'
 import { useEngineEvalSync } from '@/hooks/use-engine-eval-sync'
 import { useImportSummary } from '@/hooks/use-import-summary'
 import { useGameLine } from '@/hooks/use-game-line'
 import { useMoveAnnotations } from '@/hooks/use-move-annotations'
 import { useSparringController, useSparringRecorder, useStartSparring } from '@/hooks/use-sparring'
+import { useSyncOnReturn } from '@/hooks/use-sync-on-return'
 import { isServerUnreachable } from '@/lib/api-errors'
 import { getAppAccessState } from '@/lib/app-access'
 import {
   getDashboardLayoutStorage,
   readDashboardLayout,
   writeDashboardLayout,
+  RAIL_MAX,
+  RAIL_MIN,
+  SIDEBAR_MAX,
+  SIDEBAR_MIN,
 } from '@/lib/dashboard-layout'
+import { useRetryStore } from '@/components/analysis/retry-mistakes'
 import { useAppStore } from '@/store/app-store'
 import { useIsSparring } from '@/store/spar-store'
+import { Celebrations, OPEN_TODAY_EVENT } from '@/components/training/training-widgets'
 
 export default function Dashboard() {
   const username = useAppStore((state) => state.username)
@@ -70,10 +79,10 @@ function Unreachable({ isRetrying, onRetry }: { isRetrying: boolean; onRetry: ()
   return (
     <div className="page landing">
       <div className="landing__inner">
-        <img alt="ChessGod" className="landing__mark" height={512} src="/logo.png" width={512} />
+        <img alt="ChessGod" className="landing__mark" height={512} src="/logo.webp" width={512} />
         <p className="landing__lede">
-          Can&rsquo;t reach the ChessGod server. Your games are still stored &mdash; nothing has
-          been lost. Check the backend is running, then try again.
+          Can&rsquo;t reach the ChessGod server. Your games are safe. Check the backend is running,
+          then try again.
         </p>
         <div className="landing__actions">
           <Button disabled={isRetrying} onClick={onRetry} type="button" variant="primary">
@@ -88,6 +97,24 @@ function Unreachable({ isRetrying, onRetry }: { isRetrying: boolean; onRetry: ()
   )
 }
 
+const LANDING_PROMISES: { emblem: EmblemName; title: string; detail: string }[] = [
+  {
+    emblem: 'eye',
+    title: 'Spot your blunders',
+    detail: 'Positions from your own games where one move cost you.',
+  },
+  {
+    emblem: 'shield',
+    title: 'Fix your openings',
+    detail: 'A repertoire built from what you already play. Only the moves that cost you change.',
+  },
+  {
+    emblem: 'crown',
+    title: 'Pawn to King',
+    detail: 'Quests, streaks and promotions for ten minutes a day.',
+  },
+]
+
 /** First screen. One job: get a Chess.com username into the box. */
 function Landing({ isLoading }: { isLoading: boolean }) {
   const importStatus = useAppStore((state) => state.importStatus)
@@ -95,19 +122,31 @@ function Landing({ isLoading }: { isLoading: boolean }) {
   return (
     <div className="page landing">
       <div className="landing__inner">
-        <img alt="ChessGod" className="landing__mark" height={512} src="/logo.png" width={512} />
+        <img alt="ChessGod" className="landing__mark" height={512} src="/logo.webp" width={512} />
 
         {isLoading ? (
           <div className="landing__loading">Checking your library…</div>
         ) : (
           <>
             <p className="landing__lede">
-              Import your Chess.com games, then drill the mistakes you keep repeating.
+              Import your Chess.com games. ChessGod turns your own mistakes into ten minutes of
+              training a day.
             </p>
 
             <UsernameForm />
 
             {importStatus === 'running' ? <ImportProgress /> : null}
+
+            {/* What the games become, in the training's own medals. */}
+            <ul aria-label="What you get" className="landing__promise">
+              {LANDING_PROMISES.map((item) => (
+                <li key={item.emblem}>
+                  <Medal earned emblem={item.emblem} label={item.title} progress={1} size={52} />
+                  <strong>{item.title}</strong>
+                  <span className="muted">{item.detail}</span>
+                </li>
+              ))}
+            </ul>
           </>
         )}
       </div>
@@ -123,14 +162,28 @@ function Workspace({ username }: { username: string }) {
   const workspace = useBoardWorkspace({ username, color: colorFilter, timeClass: timeClassFilter })
   const [initialLayout] = useState(() => readDashboardLayout(getDashboardLayoutStorage()))
   const [activeTab, setActiveTab] = useState(initialLayout.activeTab)
-  const [engineOpen, setEngineOpen] = useState(() => readSectionOpen('explore-engine', true))
+  // Off until Explore reports which page is showing; only its Engine page turns it on.
+  const [engineOpen, setEngineOpen] = useState(false)
+  // The header's training chip opens Review at the Today card.
+  useEffect(() => {
+    function openToday() {
+      setActiveTab('review')
+      // The panel mounts on the next render, so the reveal goes out after it:
+      // revealSection switches the Review view and page to Today and scrolls.
+      // Scrolling for .today-card directly only worked when Review was already
+      // open on the Today page.
+      window.setTimeout(() => revealSection('review-today'), 60)
+    }
+    window.addEventListener(OPEN_TODAY_EVENT, openToday)
+    return () => window.removeEventListener(OPEN_TODAY_EVENT, openToday)
+  }, [])
   // Auto-analysis only runs while the Engine section is visible — avoids burning
   // CPU on every FEN change when the user is looking at anything else.
   // Nor while a sparring game is in progress: the evaluation is the answer.
   const sparring = useIsSparring()
-  const { isAnalyzing, lines } = useEngine({
-    autoAnalyze: activeTab === 'explore' && engineOpen && !sparring,
-  })
+  // Nor while a position is being asked (a retried mistake): the search is its answer.
+  const drillSolving = useAppStore((state) => state.drillSolving)
+  useAutoAnalysis(activeTab === 'explore' && engineOpen && !sparring && !drillSolving)
   // Persist browser engine evals no matter which section produced them.
   useEngineEvalSync()
   // Owned here, not by the panel, so a game keeps moving whichever tab or
@@ -142,6 +195,8 @@ function Workspace({ username }: { username: string }) {
   const gameAnnotations = useMoveAnnotations(gameLine)
   // Saves a finished engine game and sends its reviewed mistakes to drills.
   useSparringRecorder(gameAnnotations, gameLine)
+  // Games played on Chess.com since the last look arrive on coming back.
+  useSyncOnReturn(username)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialLayout.sidebarCollapsed)
   const [sidebarWidth, setSidebarWidth] = useState(initialLayout.sidebarWidth)
   const [railWidth, setRailWidth] = useState(initialLayout.railWidth)
@@ -166,7 +221,7 @@ function Workspace({ username }: { username: string }) {
       if (!isResizing.current) return
       const delta = ev.clientX - lastX
       lastX = ev.clientX
-      setRailWidth((prev) => Math.min(400, Math.max(190, prev - delta)))
+      setRailWidth((prev) => Math.min(RAIL_MAX, Math.max(RAIL_MIN, prev - delta)))
     }
 
     function onMouseUp() {
@@ -192,7 +247,7 @@ function Workspace({ username }: { username: string }) {
       if (!isResizing.current) return
       const delta = ev.clientX - lastX
       lastX = ev.clientX
-      setSidebarWidth((prev) => Math.min(800, Math.max(320, prev - delta)))
+      setSidebarWidth((prev) => Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, prev - delta)))
     }
 
     function onMouseUp() {
@@ -210,16 +265,30 @@ function Workspace({ username }: { username: string }) {
   }, [])
 
   const loadedContextLabel = workspace.activeGame
-    ? 'Clear Game'
+    ? 'Clear game'
     : workspace.selectedOpening
-      ? 'Clear Opening'
-      : null
+      ? 'Clear opening'
+      : 'Clear board'
+  // One way out of any state: a fresh board at the start position. Clearing
+  // the line bumps the tree epoch, which ends a game against the engine and
+  // tells every trainer its line is gone; the retry, arrows and hint ring are
+  // the pieces that live beside the tree, so they go here.
+  const resetBoard = useCallback(() => {
+    workspace.clearLoadedContext()
+    useRetryStore.getState().end()
+    const store = useAppStore.getState()
+    store.setTrainerArrows([])
+    store.setHintSquare(null)
+  }, [workspace])
 
-  const effectiveSidebarWidth = sidebarCollapsed ? '108px' : `${Math.max(320, sidebarWidth)}px`
-  const effectiveRailWidth = Math.max(190, railWidth)
+  const effectiveSidebarWidth = sidebarCollapsed
+    ? '108px'
+    : `${Math.max(SIDEBAR_MIN, sidebarWidth)}px`
+  const effectiveRailWidth = Math.max(RAIL_MIN, railWidth)
 
   return (
     <div className="page">
+      <Celebrations />
       <div
         className="workspace"
         data-active-tab={activeTab}
@@ -243,7 +312,7 @@ function Workspace({ username }: { username: string }) {
           <div className="resize-handle" onMouseDown={handleRailResizeStart} />
           <BoardRail
             loadedContextLabel={loadedContextLabel}
-            onClearLoadedContext={workspace.clearLoadedContext}
+            onClearLoadedContext={resetBoard}
             showColorFilter
             showTimeClassFilter
           />
@@ -271,9 +340,7 @@ function Workspace({ username }: { username: string }) {
                         ? 'white'
                         : null
                   }
-                  engineLines={lines}
                   engineOpen={engineOpen}
-                  isAnalyzing={isAnalyzing}
                   onEngineOpenChange={setEngineOpen}
                   timeClass={timeClassFilter}
                   username={username}
@@ -294,6 +361,16 @@ function Workspace({ username }: { username: string }) {
                     // The game's controls and move list live on Explore.
                     setActiveTab('explore')
                     playOut(position)
+                  }}
+                  onOpenGame={(game) => {
+                    setActiveTab('explore')
+                    workspace.loadGame(game)
+                    window.setTimeout(() => revealSection('explore-game-review'), 60)
+                  }}
+                  onOpenExplore={(section) => {
+                    setActiveTab('explore')
+                    // The tab mounts its sections on the next render.
+                    window.setTimeout(() => revealSection(section), 60)
                   }}
                   timeClass={timeClassFilter}
                   username={username}

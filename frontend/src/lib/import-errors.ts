@@ -14,12 +14,12 @@ export function describeImportError(message: string, username: string): string {
   if (/\/pub\/player\//i.test(text) && /\b404\b/.test(text)) {
     const name = username.trim()
     return name
-      ? `Chess.com has no account called “${name}”. Check the spelling — this is your Chess.com username, not your email address.`
+      ? `Chess.com has no account called “${name}”. Check the spelling, and use your Chess.com username, not your email address.`
       : 'Chess.com has no account with that name. Check the spelling.'
   }
 
   if (/\b429\b/.test(text) || /rate.?limit/i.test(text)) {
-    return 'Chess.com is rate-limiting these requests. Wait a minute, then try again.'
+    return 'Chess.com is limiting requests right now. Wait a minute and try again.'
   }
 
   if (/\b(500|502|503|504)\b/.test(text) && /chess\.com/i.test(text)) {

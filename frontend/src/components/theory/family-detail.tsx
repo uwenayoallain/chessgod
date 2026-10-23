@@ -23,19 +23,19 @@ export function FamilyDetail({
   timeClass: string | null
   username: string | null
 }) {
-  const pushPosition = useAppStore((state) => state.pushPosition)
+  const loadPosition = useAppStore((state) => state.loadPosition)
   const detail = useFamilyDetail({ familyId, username, color, timeClass })
 
   if (!familyId) {
     return (
       <Card>
         <CardHeader>
-          <h2>Family Detail</h2>
+          <h2>Opening</h2>
         </CardHeader>
         <CardBody>
           <EmptyState
-            title="No family selected"
-            message="Choose an opening on the left to see its line, your games in it, and your mistakes."
+            title="Nothing selected"
+            message="Pick an opening to see its moves, games and mistakes."
           />
         </CardBody>
       </Card>
@@ -46,10 +46,10 @@ export function FamilyDetail({
     return (
       <Card>
         <CardHeader>
-          <h2>Family Detail</h2>
+          <h2>Opening</h2>
         </CardHeader>
         <CardBody>
-          <PanelError error={detail.error} what="this family" />
+          <PanelError error={detail.error} what="this opening" />
         </CardBody>
       </Card>
     )
@@ -59,10 +59,10 @@ export function FamilyDetail({
     return (
       <Card>
         <CardHeader>
-          <h2>Family Detail</h2>
+          <h2>Opening</h2>
         </CardHeader>
         <CardBody>
-          <PanelSkeleton label="Loading this family" rows={6} />
+          <PanelSkeleton label="Loading this opening" rows={6} />
         </CardBody>
       </Card>
     )
@@ -77,19 +77,17 @@ export function FamilyDetail({
           <h2>{family.display_name}</h2>
           <div className="panel-header__meta">
             {detail.isRefreshing ? <span className="refresh-badge">Updating</span> : null}
-            <span className="muted">
-              {ancestors.map((item) => item.display_name).join(' / ') || 'Root family'}
-            </span>
+            <span className="muted">{ancestors.map((item) => item.display_name).join(' / ')}</span>
           </div>
         </CardHeader>
         <CardBody className="column">
           <button
             className="move-row move-row--button"
-            onClick={() => pushPosition(family.root_fen)}
+            onClick={() => loadPosition(family.root_fen)}
             type="button"
           >
             <div className="workspace-list__title">
-              <strong>Jump to family position</strong>
+              <strong>Show this opening on the board</strong>
               {family.eco ? <span className="badge">{family.eco}</span> : null}
             </div>
             <div className="workspace-list__meta">
@@ -103,7 +101,7 @@ export function FamilyDetail({
 
       <Card>
         <CardHeader>
-          <h2>Position Tree</h2>
+          <h2>Your moves from here</h2>
           <span className="muted">{tree.total_games.toLocaleString()} games</span>
         </CardHeader>
         <CardBody className="column">
@@ -114,13 +112,11 @@ export function FamilyDetail({
             <MoveRow
               key={`${move.uci}-${move.resulting_fen}`}
               move={move}
-              onSelect={(selected) =>
-                pushPosition(selected.resulting_fen, selected.san, selected.uci)
-              }
+              onSelect={(selected) => loadPosition(selected.resulting_fen, selected.uci)}
             />
           ))}
           {!tree.moves.length ? (
-            <div className="muted">No local continuations for this position.</div>
+            <div className="muted">None of your games go on from this position.</div>
           ) : null}
         </CardBody>
       </Card>
@@ -128,7 +124,7 @@ export function FamilyDetail({
       <MistakeReview
         isRefreshing={detail.isRefreshing}
         mistakes={top_mistakes}
-        emptyHint="No persisted engine mistakes for this scope yet."
+        emptyHint="No analyzed mistakes in this opening yet."
       />
     </div>
   )

@@ -725,7 +725,7 @@ button {
 }
 
 .board-frame__player-role--user {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .board-frame__context {
@@ -832,7 +832,7 @@ button {
 }
 
 .import-bar__done {
-  color: var(--accent);
+  color: var(--accent-text);
   flex: none;
 }
 
@@ -1496,7 +1496,7 @@ button {
 }
 
 .theme-selector__option--active {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--surface-2);
 }
 
@@ -1750,7 +1750,7 @@ button {
 
 .engine-line__move-btn:hover {
   background: var(--surface-3);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* Board move markers — annotation icons on squares */
@@ -1811,7 +1811,7 @@ button {
 
 .board-frame__player-result--loss {
   background: rgba(155, 85, 74, 0.18);
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .board-frame__player-result--draw {
@@ -1859,7 +1859,7 @@ button {
 
 .move-btn--active {
   background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -1893,7 +1893,7 @@ button {
 
 .training-status--incorrect {
   background: rgba(155, 85, 74, 0.18);
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .admin-observability-page {
@@ -1948,7 +1948,7 @@ button {
 }
 
 .admin-observability__danger-text {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .admin-observability__truncate-cell,
@@ -2003,11 +2003,11 @@ button {
 
 .admin-observability__severity--error {
   background: rgba(239, 68, 68, 0.16);
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .admin-observability__error {
-  color: var(--danger);
+  color: var(--danger-text);
   font-size: 13px;
 }
 
@@ -2078,7 +2078,7 @@ button {
 
 .callout--error {
   background: rgba(239, 68, 68, 0.12);
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 /* Theory tab — segmented control */
@@ -2120,7 +2120,7 @@ button {
 }
 
 .move-row--main-line {
-  border-left: 2px solid var(--accent);
+  --tone: var(--accent);
   padding-left: 10px;
   font-weight: 600;
 }
@@ -2136,7 +2136,7 @@ button {
 }
 
 .severity--major {
-  color: var(--danger);
+  color: var(--danger-text);
   font-weight: 600;
 }
 
@@ -2500,7 +2500,7 @@ button {
 }
 
 .training-scope {
-  border-left: 3px solid var(--warning);
+  --tone: var(--warning);
   display: flex;
   flex-direction: column;
   font-size: 14px;
@@ -2758,7 +2758,7 @@ button {
 .coaching-signal {
   align-items: flex-start;
   background: color-mix(in srgb, var(--warning) 9%, var(--surface-2));
-  border-left: 3px solid var(--warning);
+  --tone: var(--warning);
   display: flex;
   gap: 9px;
   padding: 9px 10px;
@@ -2854,7 +2854,7 @@ button {
 }
 
 .improvement-empty--error {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .drill-card {
@@ -2937,7 +2937,7 @@ button {
 }
 
 .drill-feedback {
-  border-left: 3px solid var(--warning);
+  --tone: var(--warning);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2945,7 +2945,7 @@ button {
 }
 
 .drill-feedback--correct {
-  border-left-color: var(--success);
+  --tone: var(--success);
 }
 
 .drill-feedback__title {
@@ -3137,7 +3137,7 @@ button {
 
 .drill-motif--allowed {
   border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .drill-motif--missed {
@@ -3158,7 +3158,7 @@ button {
 
 .severity--blunder {
   border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .severity--mistake {
@@ -3483,7 +3483,7 @@ button {
 
 .workspace-sidebar__tabs .button--primary:not(.workspace-sidebar__collapse-btn),
 .workspace-sidebar__tabs .button--primary:not(.workspace-sidebar__collapse-btn):hover {
-  color: var(--accent);
+  color: var(--accent-text);
   border-bottom-color: var(--accent);
   background: var(--accent-soft);
   box-shadow: inset 0 -2px 0 var(--accent);
@@ -3808,7 +3808,7 @@ button {
   position: relative;
   padding: 10px 11px 10px 15px;
   border: 1px solid color-mix(in srgb, var(--warning) 24%, var(--border));
-  border-left: 4px solid var(--warning);
+  --tone: var(--warning);
   border-radius: 10px;
   background: color-mix(in srgb, var(--warning) 6%, var(--surface-2));
 }
@@ -5381,7 +5381,7 @@ body {
 
 .scoreline__cost {
   font-variant-numeric: tabular-nums;
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .scoreline__better {
@@ -5416,14 +5416,14 @@ body {
   gap: 10px;
   padding: 12px;
   border-radius: var(--radius);
-  border-left: 3px solid var(--danger);
+  --tone: var(--danger);
   background: var(--surface-2);
 }
 
 .panel-error > svg {
   flex: none;
   margin-top: 1px;
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .panel-error > div {
@@ -5606,7 +5606,7 @@ body {
 }
 
 .improvement-empty--error {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 /* Scope is reference information, not a callout: one quiet line, no box. */
@@ -5677,7 +5677,7 @@ body {
 
 .training-topic--selected {
   padding-left: 5px;
-  border-left: 3px solid var(--accent);
+  --tone: var(--accent);
   background: var(--surface-2);
 }
 
@@ -5744,7 +5744,6 @@ body {
 
 .drill-feedback {
   border-radius: var(--radius);
-  border-left-width: 3px;
 }
 
 .drill-feedback--correct {
@@ -5776,11 +5775,10 @@ body {
 }
 
 .callout {
-  border-left-width: 3px;
 }
 
 .link-button {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .key-hint {
@@ -5964,7 +5962,7 @@ body {
   gap: 7px;
   padding: 8px 10px;
   border: 0;
-  border-left: 3px solid var(--danger);
+  --tone: var(--danger);
   border-radius: var(--radius);
   background: var(--surface-2);
   color: var(--text);
@@ -5974,7 +5972,7 @@ body {
 }
 
 .form-error--hint {
-  border-left-color: var(--accent);
+  --tone: var(--accent);
   background: var(--surface-2);
 }
 
@@ -6021,7 +6019,7 @@ body {
    section was open, and the only signal that it was open was the content. */
 .section--open .section__chevron {
   transform: rotate(90deg);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .section__content-wrapper {
@@ -6056,7 +6054,7 @@ body {
 
 .move-btn--active {
   background: var(--surface-3);
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 700;
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
 }
@@ -6132,7 +6130,7 @@ body {
 }
 
 .opening-winrate-badge--positive {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .game-card {
@@ -6188,7 +6186,7 @@ body {
 
 .game-result-pill--active {
   background: var(--surface-3);
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: var(--accent);
   font-weight: 600;
 }
@@ -6260,7 +6258,7 @@ body {
 .quick-pick-pill:hover {
   background: var(--surface-3);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
   transform: translateY(-1px);
 }
 
@@ -6803,7 +6801,7 @@ body {
 }
 
 .sparring__clock[data-running][data-low] strong {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .sparring__review {
@@ -6903,18 +6901,18 @@ body {
   gap: 0.5rem;
   padding: 0.6rem 0.7rem;
   border: 1px solid var(--border);
-  border-left: 3px solid var(--text-faint);
+  --tone: var(--text-faint);
   border-radius: var(--radius);
   background: var(--surface-2);
 }
 
 .opening-quiz__answer[data-kind='main'],
 .opening-quiz__answer[data-kind='book'] {
-  border-left-color: var(--accent);
+  --tone: var(--accent);
 }
 
 .opening-quiz__answer[data-kind='off-book'] {
-  border-left-color: var(--danger);
+  --tone: var(--danger);
 }
 
 .opening-quiz__verdict {
@@ -6973,4 +6971,4744 @@ body {
 .opening-quiz__actions {
   display: flex;
   gap: 0.5rem;
+}
+
+/* Where your points go — the "is it worth studying openings?" card. */
+.points-lost {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.points-lost__headline {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.points-lost__text,
+.points-lost__habit,
+.points-lost__note {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.points-lost__note {
+  font-size: 0.74rem;
+}
+
+.points-lost__subhead {
+  margin: 0.3rem 0 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.points-lost__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.points-lost__rows li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.15rem 0.5rem;
+}
+
+.points-lost__rows li strong {
+  text-align: right;
+}
+
+.points-lost__rows .points-lost__bar {
+  grid-column: 1 / -1;
+}
+
+.points-lost__bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.points-lost__bar span {
+  display: block;
+  height: 100%;
+  background: var(--text-faint);
+}
+
+.points-lost__bar[data-strong] span {
+  background: var(--text-muted);
+}
+
+/* The one action on the card: green means "do this". */
+.points-lost__habit {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  --tone: var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.points-lost__fixes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.points-lost__fix {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.points-lost__fix:hover,
+.points-lost__fix:focus-visible {
+  border-color: var(--text-faint);
+  background: var(--surface-2);
+}
+
+.points-lost__fix-moves {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.points-lost__fix-moves s {
+  color: var(--danger-text);
+}
+
+.points-lost__fix-moves strong {
+  color: var(--accent-text);
+}
+
+.points-lost__fix-text {
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.points-lost__fix-text strong {
+  color: var(--text);
+}
+
+.points-lost__fix-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.points-lost__fix-show {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+}
+
+.points-lost__fix:hover .points-lost__fix-show,
+.points-lost__fix:focus-visible .points-lost__fix-show {
+  color: var(--text-muted);
+}
+
+/* ── Training: course, line trainer, today, achievements, celebrations ── */
+.course-bar {
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.course-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 400ms ease;
+}
+
+.course {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.course-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.25rem;
+  padding: 0.2rem;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.course-tabs__tab {
+  padding: 0.45rem 0.5rem;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.course-tabs__tab[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.course-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.course-summary__headline {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.course-summary__count {
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.course-summary__actions,
+.course-session__next {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.2rem;
+}
+
+.course-engine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.course-engine > div {
+  display: flex;
+  min-width: 12rem;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.course-line__moves span[data-trap] {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+.course-engine__error {
+  color: var(--danger-text);
+}
+
+.course-chapter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.course-chapter__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.course-chapter__head h3 {
+  margin: 0;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.course-chapter__head .muted {
+  font-size: 0.74rem;
+}
+
+.course-chapter__count {
+  font-size: 0.76rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.course-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.course-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.course-line[data-status='due'] {
+  --tone: var(--accent);
+}
+
+.course-line__main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.course-line__status {
+  align-self: flex-start;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.course-line__status[data-status='due'] {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.course-line__status[data-status='mastered'] {
+  color: var(--accent-text);
+}
+
+.course-line__title {
+  font-size: 0.86rem;
+}
+
+.course-line__moves {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.course-line__moves s {
+  color: var(--danger-text);
+}
+
+.course-line__moves b {
+  color: var(--accent-text);
+}
+
+.course-line__stakes {
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.course-session__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+}
+
+.course-session__back,
+.line-trainer__restart {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.course-session__back:hover,
+.line-trainer__restart:hover {
+  color: var(--text);
+}
+
+.line-trainer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.line-trainer__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.line-trainer__mode {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--surface);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.line-trainer[data-mode='learn'] .line-trainer__mode {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.line-trainer__title {
+  font-size: 0.9rem;
+}
+
+.line-trainer__dots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.line-trainer__dots li {
+  width: 0.8rem;
+  height: 0.8rem;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.line-trainer__dots li span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.line-trainer__dots li[data-state='current'] {
+  border-color: var(--text);
+}
+
+.line-trainer__dots li[data-state='right'] {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.line-trainer__dots li[data-state='missed'] {
+  border-color: var(--danger);
+  background: var(--danger);
+}
+
+.line-trainer__prompt,
+.line-trainer__finish {
+  display: flex;
+  min-height: 5.5rem;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.line-trainer__ask,
+.line-trainer__why,
+.line-trainer__trap,
+.line-trainer__verdict,
+.line-trainer__next,
+.line-trainer__feedback {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.line-trainer__ask {
+  font-size: 0.9rem;
+}
+
+.line-trainer__verdict {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.line-trainer__trap {
+  padding: 0.4rem 0.55rem;
+  border-radius: var(--radius);
+  background: var(--surface);
+  --tone: var(--warning);
+}
+
+.line-trainer__feedback {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+}
+
+.line-trainer__feedback[data-kind='right'] {
+  color: var(--accent-text);
+}
+
+.line-trainer__feedback[data-kind='wrong'] {
+  color: var(--danger-text);
+}
+
+.line-trainer__count {
+  display: flex;
+  justify-content: space-between;
+  margin: 0;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Header chip: streak, level, today's goal. */
+.training-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.training-chip__streak {
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+
+.training-chip__streak[data-alive] {
+  filter: none;
+  opacity: 1;
+}
+
+.training-chip__bar {
+  width: 3rem;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.training-chip__bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+/* Today. */
+.today-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.today-card__top {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.goal-ring {
+  width: 76px;
+  height: 76px;
+}
+
+.goal-ring circle {
+  fill: none;
+  stroke-width: 7;
+}
+
+.goal-ring__track {
+  stroke: var(--border);
+}
+
+.goal-ring__fill {
+  stroke: var(--text-muted);
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  transition: stroke-dashoffset 600ms ease;
+}
+
+.goal-ring__fill[data-met] {
+  stroke: var(--accent);
+}
+
+.goal-ring__value {
+  fill: var(--text);
+  font-size: 17px;
+  font-weight: 700;
+  text-anchor: middle;
+}
+
+.goal-ring__label {
+  fill: var(--text-muted);
+  font-size: 9px;
+  text-anchor: middle;
+}
+
+.today-card__status {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.today-card__streak {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.today-card__message {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.today-card__stakes {
+  display: flex;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  --tone: var(--danger);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.today-card__stakes svg {
+  flex: none;
+  margin-top: 0.15rem;
+}
+
+.today-card__goal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+}
+
+.today-card__goal-option {
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.today-card__goal-option[aria-pressed='true'] {
+  border-color: var(--text);
+  color: var(--text);
+  font-weight: 700;
+}
+
+/* Daily quests, inside the Today card. */
+.quests {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.quests__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.82rem;
+}
+
+.quests__chest {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.quests__chest[data-open] {
+  color: var(--accent-text);
+}
+
+.quests__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quest {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto 3.4rem;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.1rem;
+  font-size: 0.76rem;
+}
+
+.quest__icon {
+  display: grid;
+  width: 1.6rem;
+  height: 1.6rem;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.quest[data-done] .quest__icon {
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+
+.quest__body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.quest__title {
+  line-height: 1.3;
+}
+
+.quest[data-done] .quest__title {
+  color: var(--text-muted);
+}
+
+.quest__bar {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.quest__bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--text-muted);
+  transition: width 400ms ease;
+}
+
+.quest[data-done] .quest__bar > span {
+  background: var(--accent);
+}
+
+.quest__count {
+  font-variant-numeric: tabular-nums;
+}
+
+.quest__xp {
+  color: var(--accent-text);
+  font-weight: 700;
+  text-align: center;
+}
+
+.quest > .button,
+.quest > button {
+  justify-self: stretch;
+}
+
+.quests__summary {
+  margin: 0;
+  font-size: 0.72rem;
+}
+
+/* Achievements. */
+.achievements {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.achievements__count {
+  margin: 0;
+  font-size: 0.76rem;
+}
+
+.achievements__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.achievement {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 0.78rem;
+}
+
+.achievement[data-unlocked] {
+  border-color: var(--accent-edge, var(--accent));
+}
+
+.achievement__text {
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.achievement__done {
+  color: var(--accent-text);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.achievement__progress {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Celebrations: brief, above everything, never in the way of the board. */
+/* Top centre, over the header's empty middle: in view, never over a tab or the board. */
+.celebrations {
+  position: fixed;
+  z-index: 60;
+  top: 0.5rem;
+  left: 50%;
+  display: flex;
+  width: min(20rem, calc(100vw - 2rem));
+  flex-direction: column;
+  align-items: stretch;
+  transform: translateX(-50%);
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  pointer-events: none;
+}
+
+.celebration {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+  animation: celebration-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+
+.celebration[data-kind='xp'] {
+  align-self: center;
+  width: auto;
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-size: 0.85rem;
+}
+
+.celebration[data-kind='level'],
+.celebration[data-kind='achievement'],
+.celebration[data-kind='goal'],
+.celebration[data-kind='quest'] {
+  --tone: var(--accent);
+}
+
+.celebration__text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.celebration__text span {
+  color: var(--text-muted);
+}
+
+.celebration[data-kind='xp'] .celebration__text span {
+  display: none;
+}
+
+.celebration__close {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+@keyframes celebration-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .celebration {
+    animation: none;
+  }
+  .course-bar > span,
+  .goal-ring__fill {
+    transition: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .celebrations {
+    top: auto;
+    bottom: 1rem;
+  }
+  .training-chip__bar {
+    display: none;
+  }
+}
+
+.points-lost__delivered {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.points-lost__delivered li {
+  padding: 0.4rem 0.55rem;
+  --tone: var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.points-lost__delivered li[data-leaking] {
+  --tone: var(--danger);
+}
+
+/* Opening Rush. */
+.rush {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.rush__intro {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.rush__intro > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.rush__intro strong {
+  font-size: 0.92rem;
+}
+
+.rush__icon {
+  color: var(--text-muted);
+}
+
+.rush--running {
+  border-color: var(--text-muted);
+}
+
+.rush__hud {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.rush__score {
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.rush__lives {
+  display: inline-flex;
+  gap: 0.2rem;
+  color: var(--danger-text);
+}
+
+.rush__time {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.rush__prompt,
+.rush__flash,
+.rush__verdict,
+.rush__note {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.rush__flash {
+  min-height: 1.4em;
+  font-weight: 700;
+}
+
+.rush__flash[data-kind='right'] {
+  color: var(--accent-text);
+}
+
+.rush__flash[data-kind='wrong'] {
+  color: var(--danger-text);
+}
+
+.rush__result {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 800;
+}
+
+.rush__result svg {
+  color: var(--reward);
+}
+
+.rush__best-badge {
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: var(--reward);
+  color: var(--reward-ink);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.rush__missed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.78rem;
+}
+
+.rush__missed li {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Rival race, freezes, repertoire check. */
+.today-card__freezes {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.today-card__freeze-note {
+  margin: -0.3rem 0 0;
+  font-size: 0.72rem;
+}
+
+.rival__message {
+  margin: 0;
+  font-size: 0.74rem;
+}
+
+.repertoire-check {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  --tone: var(--warning);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.repertoire-check[data-clean] {
+  --tone: var(--accent);
+}
+
+.repertoire-check__summary {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.repertoire-check__summary svg {
+  flex: none;
+  margin-top: 0.15rem;
+}
+
+.repertoire-check__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.repertoire-check__list a {
+  color: var(--text);
+}
+
+/* Blunder Check. */
+.blunder-check {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.55rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.blunder-check--running {
+  --tone: var(--danger);
+}
+
+.blunder-check__icon {
+  color: var(--danger-text);
+}
+
+.blunder-check__meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.blunder-check__meta span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 700;
+}
+
+.blunder-check__prompt,
+.blunder-check__lesson,
+.blunder-check__summary {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.blunder-check__prompt {
+  font-weight: 700;
+}
+
+.blunder-check__lesson {
+  min-height: 2.9em;
+}
+
+.blunder-check__lesson[data-correct='true'] {
+  color: var(--accent-text);
+}
+
+.blunder-check__lesson[data-correct='false'] {
+  color: var(--danger-text);
+}
+
+.blunder-check__result {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.blunder-check__result svg {
+  color: var(--text-muted);
+}
+
+.blunder-check > button {
+  align-self: flex-start;
+}
+
+/* Are you improving? */
+.progress-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-tile__label {
+  font-size: 0.7rem;
+  line-height: 1.3;
+}
+
+.progress-tile__value {
+  font-size: 1.35rem;
+  line-height: 1.15;
+}
+
+.progress-tile__change {
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.progress-tile__change[data-good='true'] {
+  color: var(--accent-text);
+}
+
+.progress-tile__change[data-good='false'] {
+  color: var(--danger-text);
+}
+
+.sr-only-inline {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.progress-trend {
+  margin: 0;
+}
+
+.progress-trend svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.progress-trend__base {
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.progress-trend__marker {
+  stroke: var(--text-faint);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.progress-trend__line {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.progress-trend__dot {
+  fill: var(--text);
+  stroke: var(--surface);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.progress-trend__hit {
+  fill: transparent;
+}
+
+.progress-trend__hit:hover {
+  fill: var(--surface-2);
+  fill-opacity: 0.6;
+}
+
+.progress-trend__caption {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Your clock (Review). */
+.clock-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+  font-size: 0.74rem;
+}
+
+.clock-bars ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.clock-bars li {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.clock-bars__track {
+  display: block;
+  height: 10px;
+  border-radius: 0 4px 4px 0;
+  background: var(--surface-2);
+}
+
+.clock-bars__track > span {
+  display: block;
+  height: 100%;
+  border-radius: 0 4px 4px 0;
+  background: var(--text-muted);
+}
+
+.clock-bars__value {
+  min-width: 7.5rem;
+  text-align: right;
+}
+
+/* Weekly challenges from real games, inside the Today card. */
+.challenges {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+.challenges__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.challenges__stale {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.challenge__description {
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.quest__xp[data-pending] {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.challenges__stale .link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Retry your mistakes (game review). */
+.retry {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.7rem 0.8rem;
+  --tone: var(--text-muted);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.retry[data-state='found'] {
+  --tone: var(--accent);
+}
+
+.retry[data-state='missed'] {
+  --tone: var(--danger);
+}
+
+.retry__head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.74rem;
+}
+
+.retry__close {
+  display: grid;
+  place-items: center;
+  padding: 0.2rem;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.retry__title {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.retry__text {
+  min-height: 2.6em;
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.blunder-check__again {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+/* Rating goal (Review). */
+.rating-goal__stepper {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.rating-goal__stepper button {
+  display: grid;
+  width: 1.7rem;
+  height: 1.7rem;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.rating-line {
+  margin: 0;
+  font-size: 0.7rem;
+}
+
+.rating-line svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.rating-line__path {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.rating-line__goal {
+  stroke: var(--accent);
+  stroke-dasharray: 4 3;
+  stroke-width: 1.5;
+}
+
+.rating-line__goal-label {
+  fill: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  text-anchor: end;
+}
+
+.rating-line__peak {
+  fill: var(--surface);
+  stroke: var(--text-muted);
+  stroke-width: 2;
+}
+
+.rating-line__now {
+  fill: var(--text);
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.rating-line__hit {
+  fill: transparent;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TROPHY ROOM — the training layer's identity
+   ---------------------------------------------------------------------------
+   Board Room keeps one accent, green, meaning "do this". Training adds one
+   more, gold, meaning "earned": XP, levels, badges, a finished quest. Nothing
+   else is gold, so a glance at the page says what the player has won.
+
+   It is chess-native rather than generic game chrome: a level is the board's
+   own piece standing on a dark square inside a progress ring, a new title is
+   a promotion, and the week is a rank of board squares with a pawn on every
+   day the goal was met. Badges are medallions with one icon each — earned in
+   gold, locked as a dashed outline — instead of emoji.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Validated with the dataviz palette checker against the green accent and the
+   danger red: gold and yellow-green collapse under protanopia whatever the hue,
+   so they are separated by lightness — paler than green on dark (ΔE 18.7
+   normal, 11.7 protan), deeper than green on light (19.5 normal, 15.7 deutan). */
+:root,
+.dark {
+  --reward: #f7d16b;
+  --reward-edge: #c9a13f;
+  --reward-ink: #2a2208;
+  --reward-soft: rgba(247, 209, 107, 0.14);
+}
+
+.light {
+  --reward: #8d5c05;
+  --reward-edge: #6f4803;
+  --reward-ink: #ffffff;
+  --reward-soft: rgba(141, 92, 5, 0.1);
+}
+
+/* Text and focus tokens that pass WCAG AA on every surface, and a warning
+   pushed to orange so it can never be read as gold (validated: ΔE 21 dark,
+   17.5 light). Fills keep --accent and --danger. */
+:root,
+.dark {
+  --accent-text: #81b64c;
+  --danger-text: #f2766b;
+  --focus-ring: #81b64c;
+  --text-faint: #a19d98;
+  --warning: #e07b39;
+}
+
+.light {
+  --accent-text: #4e7a2b;
+  --danger-text: #c0392b;
+  --focus-ring: #4e7a2b;
+  --text-faint: #716e6a;
+  --warning: #e0782a;
+  --analysis: #2a6fa6;
+}
+
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible,
+.button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* The level crest: piece on a dark square, ringed by progress. */
+.crest {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+}
+
+.title-piece {
+  width: 78%;
+  height: 78%;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+
+.crest__level {
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  min-width: 1.15rem;
+  padding: 0 0.25rem;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--reward);
+  color: var(--reward-ink);
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Badges. */
+/* Header chip. */
+.training-chip {
+  gap: 0.55rem;
+  padding: 0.15rem 0.6rem 0.15rem 0.2rem;
+}
+
+.training-chip__streak {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  filter: none;
+  opacity: 1;
+  color: var(--text-faint);
+}
+
+.training-chip__streak[data-alive] {
+  color: var(--reward);
+}
+
+.training-chip__level {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.training-chip__bar > span {
+  background: var(--reward);
+}
+
+/* Today. */
+.goal-ring__fill {
+  stroke: var(--text-muted);
+}
+
+.goal-ring__fill[data-met] {
+  stroke: var(--reward);
+}
+
+.today-card__streak {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.today-card__flame {
+  color: var(--text-faint);
+}
+
+.today-card__streak[data-alive] .today-card__flame {
+  color: var(--reward);
+}
+
+.today-card__freezes {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  margin-left: 0.3rem;
+  color: var(--analysis);
+  font-size: 0.8rem;
+}
+
+/* The week as a rank of the board. */
+.week-rank {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.week-rank li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.week-rank__square {
+  display: grid;
+  width: 100%;
+  max-width: 3rem;
+  aspect-ratio: 1;
+  place-items: center;
+  color: var(--analysis);
+}
+
+.week-rank li[data-shade='light'] .week-rank__square {
+  background: var(--board-light);
+}
+
+.week-rank li[data-shade='dark'] .week-rank__square {
+  background: var(--board-dark);
+}
+
+.week-rank li:first-child .week-rank__square {
+  border-radius: 4px 0 0 4px;
+}
+
+.week-rank li:last-child .week-rank__square {
+  border-radius: 0 4px 4px 0;
+}
+
+.week-rank li[data-today] .week-rank__square {
+  outline: 2px solid var(--reward);
+  outline-offset: -2px;
+}
+
+.week-rank__square .title-piece {
+  width: 72%;
+  height: 72%;
+}
+
+.week-rank li[data-met] .title-piece {
+  animation: piece-land 420ms cubic-bezier(0.2, 0.9, 0.3, 1.25);
+}
+
+.week-rank__dot {
+  width: 22%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.week-rank__day {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.week-rank li[data-today] .week-rank__day {
+  color: var(--reward);
+  font-weight: 800;
+}
+
+/* Quests and challenges: gold once done. */
+.quests[data-cleared] {
+  border-color: var(--reward);
+}
+
+.quest[data-done] .quest__icon {
+  background: var(--reward);
+  color: var(--reward-ink);
+}
+
+.quest[data-done] .quest__bar > span {
+  background: var(--reward);
+}
+
+.quest__xp {
+  color: var(--reward);
+}
+
+.quests__chest[data-open] {
+  color: var(--reward);
+}
+
+/* Achievements: medallion beside the words. */
+.achievement {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  column-gap: 0.6rem;
+  row-gap: 0.15rem;
+}
+
+.achievement > .medallion {
+  grid-row: span 4;
+}
+
+.achievement[data-unlocked] {
+  border-color: var(--reward-edge);
+  background: linear-gradient(135deg, var(--reward-soft), transparent 55%) var(--surface);
+}
+
+.achievement__done {
+  color: var(--reward);
+}
+
+/* Celebrations. */
+.celebration[data-kind='xp'] {
+  border-color: var(--reward);
+  background: var(--surface);
+  color: var(--reward);
+  font-weight: 800;
+  animation: xp-rise 1.8s ease-out forwards;
+}
+
+.celebration[data-kind='level'],
+.celebration[data-kind='achievement'],
+.celebration[data-kind='goal'],
+.celebration[data-kind='quest'] {
+  --tone: var(--reward);
+  background: linear-gradient(90deg, var(--reward-soft), transparent 60%) var(--surface);
+}
+
+.celebration[data-kind='level'] .crest,
+.celebration[data-kind='achievement'] .medallion {
+  animation: crest-pop 620ms cubic-bezier(0.2, 0.9, 0.3, 1.35);
+}
+
+.celebration[data-kind='level'] .celebration__text strong {
+  color: var(--reward);
+}
+
+.celebration__icon {
+  display: grid;
+  width: 2.3rem;
+  height: 2.3rem;
+  flex: none;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--reward-soft);
+  color: var(--reward);
+}
+
+@keyframes crest-pop {
+  0% {
+    transform: scale(0.4) rotate(-12deg);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.12) rotate(4deg);
+    opacity: 1;
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes piece-land {
+  0% {
+    transform: translateY(-40%) scale(0.8);
+    opacity: 0;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes xp-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.9);
+  }
+  15% {
+    opacity: 1;
+    transform: none;
+  }
+  80% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .celebration,
+  .celebration[data-kind='xp'],
+  .celebration .crest,
+  .celebration .medallion,
+  .week-rank .title-piece,
+  .quests__chest[data-open] {
+    animation: none;
+  }
+}
+
+/* One card grammar for every training card: a title row, a headline that
+   says the finding, detail, tiles, a note, and a callout for the advice. */
+.train-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.train-card__title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.train-card__headline {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+
+.train-card__headline--icon {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.train-card__headline--icon svg {
+  flex: none;
+  margin-top: 0.15rem;
+}
+
+.train-card__detail {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.train-card__note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.train-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  gap: 0.4rem;
+}
+
+.progress-tile__note {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.train-callout {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.45rem;
+  padding: 0.55rem 0.7rem;
+  --tone: var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.train-callout[data-tone='warn'] {
+  --tone: var(--warning);
+}
+
+.train-callout[data-tone='bad'] {
+  --tone: var(--danger);
+}
+
+.train-callout p {
+  margin: 0;
+}
+
+/* Today, as one composition: the day on the left, the career on the right,
+   the week as a rank of the board beneath them. */
+.today-card__top {
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+}
+
+.today-card__rank {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  min-width: 4.5rem;
+  text-align: center;
+}
+
+.today-card__rank-title {
+  margin-top: 0.2rem;
+  color: var(--reward);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.today-card__rank-next {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.week-rank-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.week-rank__caption {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.week-rank-figure[data-promoted] .week-rank__caption {
+  color: var(--reward);
+  font-weight: 700;
+}
+
+.week-rank-figure[data-promoted] .week-rank li[data-today] .week-rank__square {
+  box-shadow:
+    inset 0 0 0 4px var(--piece-black),
+    0 0 12px var(--reward-soft);
+}
+
+.week-rank-figure[data-promoted] .week-rank li[data-today] .title-piece {
+  animation: promote 900ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.today-card__step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.6rem;
+  font-size: 0.74rem;
+}
+
+.latest-game {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.latest-game__text {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 12rem;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.latest-game__text > span:first-child {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.latest-game[data-result='win'] {
+  --tone: var(--success);
+}
+
+.latest-game[data-result='loss'] {
+  --tone: var(--danger);
+}
+
+.latest-game[data-result='draw'] {
+  --tone: var(--draw);
+}
+
+.today-card__stakes > span {
+  display: inline;
+}
+
+.today-card__stakes svg {
+  vertical-align: -2px;
+}
+
+.today-card__more {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 0.5rem;
+}
+
+.today-card__more > summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.today-card__more[open] > summary {
+  margin-bottom: 0.55rem;
+}
+
+.today-card__more > :not(summary) + :not(summary) {
+  margin-top: 0.55rem;
+}
+
+@keyframes promote {
+  0% {
+    transform: translateY(0) scale(0.6);
+    opacity: 0;
+  }
+  60% {
+    transform: translateY(-12%) scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@container (max-width: 26rem) {
+  .today-card__top {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .today-card__top .goal-ring {
+    width: 64px;
+    height: 64px;
+  }
+
+  .today-card__rank {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 0.5rem;
+  }
+
+  .today-card__rank-title {
+    margin-top: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .week-rank-figure .title-piece {
+    animation: none;
+  }
+}
+
+/* Review fixes: lives as kings, week coordinates, quieter gold, badges that
+   show how close they are, and narrow columns. */
+.rush__lives {
+  align-items: center;
+}
+
+.rush__life {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+}
+
+.rush__life .title-piece {
+  width: 100%;
+  height: 100%;
+  transition:
+    transform 260ms ease,
+    opacity 260ms ease;
+}
+
+.rush__life[data-lost] .title-piece {
+  opacity: 0.35;
+  transform: rotate(90deg) translateX(15%);
+}
+
+.course-line__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.3rem;
+}
+
+.week-rank {
+  max-width: 22rem;
+}
+
+.week-rank li {
+  gap: 0;
+}
+
+.week-rank__square {
+  position: relative;
+  max-width: none;
+}
+
+.week-rank__day {
+  position: absolute;
+  bottom: 1px;
+  left: 3px;
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.week-rank li[data-shade='light'] .week-rank__day {
+  color: var(--board-dark);
+}
+
+.week-rank li[data-shade='dark'] .week-rank__day {
+  color: var(--board-light);
+}
+
+.week-rank li[data-today] .week-rank__day {
+  color: inherit;
+  font-weight: 800;
+}
+
+.week-rank li[data-shade='light'][data-today] .week-rank__day {
+  color: var(--piece-black);
+}
+
+.week-rank li[data-frozen] .week-rank__square,
+.week-rank li[data-shade] .week-rank__square {
+  color: var(--piece-black);
+}
+
+.week-rank__dot {
+  background: var(--piece-black);
+  opacity: 0.55;
+}
+
+/* Today is outlined like a selected square: in the black pieces' colour
+   until it is earned, then gold with a black keyline so it holds on both
+   board shades (the board does not change with the theme). */
+.week-rank li[data-today] .week-rank__square {
+  outline: 2px solid var(--piece-black);
+  outline-offset: -2px;
+}
+
+.week-rank li[data-today][data-met] .week-rank__square {
+  outline-color: var(--reward);
+  box-shadow: inset 0 0 0 4px var(--piece-black);
+}
+
+/* Only a pawn landing today moves; the week's older pawns stay put. */
+.week-rank li[data-met] .title-piece {
+  animation: none;
+}
+
+.week-rank li[data-today][data-met] .title-piece {
+  animation: piece-land 420ms cubic-bezier(0.2, 0.9, 0.3, 1.25);
+}
+
+/* Less gold once a list is finished: the icon and the XP say it. */
+.quest[data-done] .quest__bar {
+  visibility: hidden;
+}
+
+.training-chip__bar > span {
+  background: var(--text-muted);
+}
+
+.training-chip__bar[data-met] > span {
+  background: var(--reward);
+}
+
+/* A locked badge shows how close it is as an arc around it. */
+.achievements__grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
+}
+
+.achievement > .medallion {
+  grid-row: span 3;
+}
+
+.theory-stack {
+  container-type: inline-size;
+}
+
+.clock-bars__label {
+  white-space: nowrap;
+}
+
+.clock-bars__value {
+  min-width: 0;
+}
+
+@container (max-width: 340px) {
+  .clock-bars__value .muted {
+    display: none;
+  }
+}
+
+.progress-tile {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.progress-tile__value {
+  align-self: end;
+}
+
+.rating-goal__stepper button:hover {
+  background: var(--surface-2);
+}
+
+@media (pointer: coarse) {
+  .rating-goal__stepper button {
+    width: 2.4rem;
+    height: 2.4rem;
+  }
+}
+
+.celebration__close,
+.retry__close {
+  min-width: 24px;
+  min-height: 24px;
+}
+
+.celebration[data-leaving]:not([data-kind='xp']) {
+  animation: celebration-out 160ms ease-in forwards;
+}
+
+@keyframes celebration-out {
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .celebration[data-leaving],
+  .rush__life .title-piece,
+  .quest__bar > span {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Guidelines pass: every control answers hover and tap, SVG rotates about its
+   own centre, links look like links. */
+button,
+.button,
+a,
+summary,
+.today-card__goal-option {
+  touch-action: manipulation;
+}
+
+.goal-ring__fill {
+  transform-box: fill-box;
+}
+
+.link-button:hover,
+.repertoire-check__list a:hover {
+  color: var(--text);
+}
+
+.repertoire-check__list a {
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 2px;
+}
+
+.today-card__more > summary:hover,
+.course-tabs__tab:hover {
+  color: var(--text);
+}
+
+.today-card__goal-option:hover {
+  border-color: var(--text-muted);
+  color: var(--text);
+}
+
+.celebration__close:hover,
+.retry__close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.rating-goal__stepper button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* The emblem set (lib/training/emblem-art.ts): inline SVG drawn in the
+   board's piece style. The art carries its own rims, faces and arcs. */
+.emblem,
+.medallion,
+.crest__art {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+}
+
+.emblem svg,
+.medallion svg,
+.crest__art svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.crest__art {
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+
+.medallion {
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.3));
+}
+
+/* A quest's emblem waits dimmed, like a locked medal, and lights up once done. */
+.quest__icon {
+  width: 1.9rem;
+  height: 1.9rem;
+  background: none;
+}
+
+.quest[data-done] .quest__icon {
+  background: none;
+}
+
+.quest:not([data-done]) .quest__icon .emblem {
+  opacity: 0.5;
+  filter: grayscale(0.6);
+}
+
+.celebration__icon {
+  width: auto;
+  height: auto;
+  background: none;
+}
+
+.today-card__freezes .emblem,
+.training-chip__streak .emblem {
+  vertical-align: -3px;
+}
+
+.training-chip__streak:not([data-alive]) .emblem,
+.today-card__streak:not([data-alive]) .today-card__flame {
+  opacity: 0.45;
+  filter: grayscale(1);
+}
+
+/* Drill themes: the theme's emblem standing on a dark board square. */
+.training-topic__glyph {
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 4px;
+  background: radial-gradient(circle at 35% 30%, var(--board-dark), #4f6b37);
+  box-shadow: inset 0 -2px 3px rgba(0, 0, 0, 0.25);
+}
+
+.empty-state__icon .emblem {
+  opacity: 0.8;
+}
+
+/* Promotion: a new title, played as chess plays it. */
+.promotion {
+  --sq: 32px;
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(20, 19, 17, 0.55);
+  animation: promotion-fade 220ms ease-out;
+  cursor: pointer;
+}
+
+.promotion__card {
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  padding: 1.4rem 1.8rem 1.4rem 1.4rem;
+  border: 1px solid var(--reward-edge);
+  border-radius: calc(var(--radius) * 2);
+  background: linear-gradient(160deg, var(--reward-soft), transparent 55%) var(--surface);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  animation: promotion-card 420ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.promotion__file {
+  position: relative;
+  display: grid;
+  width: var(--sq);
+  grid-template-rows: repeat(8, var(--sq));
+  overflow: visible;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.promotion__file > span[data-shade='light'] {
+  background: var(--board-light);
+}
+
+.promotion__file > span[data-shade='dark'] {
+  background: var(--board-dark);
+}
+
+.promotion__file > span[data-shade]:first-child {
+  border-radius: 4px 4px 0 0;
+}
+
+.promotion__file > span[data-shade]:nth-child(8) {
+  border-radius: 0 0 4px 4px;
+}
+
+.promotion__from,
+.promotion__to,
+.promotion__burst {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--sq);
+  height: var(--sq);
+}
+
+.promotion__from .title-piece,
+.promotion__to .title-piece {
+  width: 100%;
+  height: 100%;
+}
+
+/* The old piece starts on the second rank and walks to the last. */
+.promotion__from {
+  animation:
+    promotion-march 1050ms cubic-bezier(0.45, 0, 0.25, 1) 300ms both,
+    promotion-leave 220ms ease-in 1350ms both;
+}
+
+.promotion__to {
+  animation: promotion-arrive 480ms cubic-bezier(0.2, 0.9, 0.3, 1.35) 1400ms both;
+}
+
+.promotion__burst {
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px var(--reward);
+  animation: promotion-burst 700ms ease-out 1400ms both;
+}
+
+.promotion__words {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  animation: promotion-words 360ms ease-out 1550ms both;
+}
+
+.promotion__eyebrow {
+  color: var(--reward);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.promotion__words strong {
+  font-size: 2.2rem;
+  font-weight: 800;
+  line-height: 1.05;
+}
+
+@keyframes promotion-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes promotion-card {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.94);
+  }
+}
+
+@keyframes promotion-march {
+  from {
+    transform: translateY(calc(var(--sq) * 6));
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes promotion-leave {
+  to {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+
+@keyframes promotion-arrive {
+  from {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes promotion-burst {
+  from {
+    opacity: 1;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 0;
+    transform: scale(2.4);
+  }
+}
+
+@keyframes promotion-words {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .promotion,
+  .promotion__card,
+  .promotion__to,
+  .promotion__words {
+    animation: none;
+  }
+
+  .promotion__from,
+  .promotion__burst {
+    display: none;
+  }
+}
+
+/* The titles on one rank: Pawn to King. */
+.title-ladder {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.title-ladder__rank {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  max-width: 21rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.title-ladder__rank li {
+  position: relative;
+  display: grid;
+  aspect-ratio: 1;
+  place-items: center;
+}
+
+.title-ladder__rank li:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.title-ladder__rank li:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.title-ladder__rank li[data-shade='light'] {
+  background: var(--board-light);
+}
+
+.title-ladder__rank li[data-shade='dark'] {
+  background: var(--board-dark);
+}
+
+.title-ladder__rank .title-piece {
+  width: 78%;
+  height: 78%;
+}
+
+/* Titles not yet reached wait as silhouettes. */
+.title-ladder__rank li[data-state='locked'] .title-piece,
+.title-ladder__rank li[data-state='next'] .title-piece {
+  opacity: 0.28;
+  filter: grayscale(1) brightness(0.2);
+}
+
+.title-ladder__rank li[data-state='next'] {
+  outline: 2px dashed var(--reward-edge);
+  outline-offset: -3px;
+}
+
+.title-ladder__rank li[data-state='current'] {
+  outline: 2px solid var(--reward);
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 4px var(--piece-black);
+}
+
+.title-ladder__level {
+  position: absolute;
+  bottom: 1px;
+  left: 3px;
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.title-ladder__rank li[data-shade='light'] .title-ladder__level {
+  color: var(--board-dark);
+}
+
+.title-ladder__rank li[data-shade='dark'] .title-ladder__level {
+  color: var(--board-light);
+}
+
+.title-ladder__caption {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.title-ladder__play {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.title-ladder__play:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.title-ladder__rank li:hover .title-piece {
+  transform: translateY(-6%);
+  transition: transform 160ms ease;
+}
+
+.sound-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: fit-content;
+}
+
+/* The rival race: two ranks, two pawns, a queen waiting at the end. */
+.race {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.race__lane {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.race__label {
+  display: flex;
+  flex-direction: column;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.25;
+}
+
+.race__label strong {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.race__rank {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  max-width: 18rem;
+}
+
+.race__rank > span[data-shade] {
+  aspect-ratio: 1;
+}
+
+.race__rank > span[data-shade='light'] {
+  background: var(--board-light);
+}
+
+.race__rank > span[data-shade='dark'] {
+  background: var(--board-dark);
+}
+
+.race__rank > span[data-shade]:first-child {
+  border-radius: 3px 0 0 3px;
+}
+
+.race__rank > span[data-shade]:nth-child(8) {
+  border-radius: 0 3px 3px 0;
+}
+
+.race__piece,
+.race__goal {
+  position: absolute;
+  top: 0;
+  width: 12.5%;
+  height: 100%;
+}
+
+.race__piece {
+  transition: left 700ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+.race__goal {
+  right: 0;
+  opacity: 0.25;
+  filter: grayscale(1) brightness(0.3);
+}
+
+.race[data-promoted] .race__goal {
+  display: none;
+}
+
+.race__piece .title-piece,
+.race__goal .title-piece {
+  width: 100%;
+  height: 100%;
+}
+
+.race[data-promoted] .race__lane[data-who='you'] .race__rank > span[data-shade]:nth-child(8) {
+  box-shadow:
+    inset 0 0 0 2px var(--reward),
+    inset 0 0 0 4px var(--piece-black);
+}
+
+/* Your week, as a scoresheet. */
+.scoresheet__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+}
+
+.scoresheet__eyebrow {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.scoresheet__weeks {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.scoresheet__best {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  color: var(--reward);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.scoresheet__lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.scoresheet__lines li {
+  display: grid;
+  grid-template-columns: 1.6rem 0.8rem 2.6rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.5rem;
+  padding: 0.25rem 0.2rem;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.scoresheet__lines li[data-best] {
+  background: linear-gradient(90deg, var(--reward-soft), transparent 70%);
+}
+
+.scoresheet__number {
+  color: var(--text-faint);
+  font-weight: 700;
+  text-align: right;
+}
+
+/* Which side you had, as the square a king would stand on. */
+.scoresheet__side {
+  width: 0.8rem;
+  height: 0.8rem;
+  border: 1px solid var(--piece-black);
+  border-radius: 2px;
+}
+
+.scoresheet__side[data-color='white'] {
+  background: var(--piece-white);
+}
+
+.scoresheet__side[data-color='black'] {
+  background: var(--piece-black);
+}
+
+.scoresheet__result {
+  color: var(--text);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.scoresheet__lines li[data-result='win'] .scoresheet__result {
+  color: var(--accent-text);
+}
+
+.scoresheet__lines li[data-result='loss'] .scoresheet__result {
+  color: var(--danger-text);
+}
+
+.scoresheet__result:hover {
+  text-decoration: underline;
+}
+
+.scoresheet__who {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.scoresheet__who > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scoresheet__opening {
+  font-size: 0.7rem;
+}
+
+.scoresheet__marks {
+  display: inline-flex;
+  gap: 0.2rem;
+}
+
+.scoresheet__side[data-color='black'] {
+  border-color: var(--text-faint);
+}
+
+/* Course rows and the course header wear medals from the set. */
+.course-line {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.course-line[data-status='mastered'] {
+  border-color: var(--reward-edge);
+}
+
+.course-line[data-status='due'] .course-line__status {
+  color: var(--accent-text);
+}
+
+.course-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0.8rem;
+  row-gap: 0.3rem;
+}
+
+.course-summary > .medallion {
+  grid-row: span 3;
+}
+
+.course-summary__actions {
+  grid-column: 1 / -1;
+}
+
+@container (max-width: 22rem) {
+  .course-line {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .course-line__actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+  }
+}
+
+.course-line__status[data-status='mastered'] {
+  color: var(--reward);
+}
+
+/* Result screens: the session's medal beside the score, and for Blunder
+   Check one board square per position, a pawn on each one found. */
+.result-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.result-hero > .medallion {
+  animation: crest-pop 620ms cubic-bezier(0.2, 0.9, 0.3, 1.35);
+}
+
+.result-hero__text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.result-hero__score {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 2.1rem;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.result-hero__score .muted {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.result-rank {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  max-width: 24rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.result-rank li {
+  display: grid;
+  aspect-ratio: 1;
+  place-items: center;
+}
+
+.result-rank li[data-shade='light'] {
+  background: var(--board-light);
+}
+
+.result-rank li[data-shade='dark'] {
+  background: var(--board-dark);
+}
+
+.result-rank li:first-child {
+  border-radius: 3px 0 0 3px;
+}
+
+.result-rank li:last-child {
+  border-radius: 0 3px 3px 0;
+}
+
+.result-rank .title-piece {
+  width: 80%;
+  height: 80%;
+  animation: piece-land 380ms cubic-bezier(0.2, 0.9, 0.3, 1.25) both;
+}
+
+.result-rank li:nth-child(2) .title-piece {
+  animation-delay: 60ms;
+}
+.result-rank li:nth-child(3) .title-piece {
+  animation-delay: 120ms;
+}
+.result-rank li:nth-child(4) .title-piece {
+  animation-delay: 180ms;
+}
+.result-rank li:nth-child(5) .title-piece {
+  animation-delay: 240ms;
+}
+.result-rank li:nth-child(6) .title-piece {
+  animation-delay: 300ms;
+}
+.result-rank li:nth-child(7) .title-piece {
+  animation-delay: 360ms;
+}
+.result-rank li:nth-child(8) .title-piece {
+  animation-delay: 420ms;
+}
+.result-rank li:nth-child(9) .title-piece {
+  animation-delay: 480ms;
+}
+.result-rank li:nth-child(10) .title-piece {
+  animation-delay: 540ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .result-hero > .medallion,
+  .result-rank .title-piece {
+    animation: none;
+  }
+}
+
+/* XP banked: a gold token flies from the toast into the header chip. */
+.xp-flight {
+  position: fixed;
+  z-index: 90;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--reward);
+  color: var(--reward-ink);
+  font-size: 0.72rem;
+  font-weight: 800;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: xp-flight 700ms cubic-bezier(0.55, 0, 0.35, 1) forwards;
+}
+
+@keyframes xp-flight {
+  0% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(0.4);
+    opacity: 0.2;
+  }
+}
+
+.training-chip[data-bump='0'] {
+  animation: chip-bump-a 420ms cubic-bezier(0.2, 0.9, 0.3, 1.4);
+}
+
+.training-chip[data-bump='1'] {
+  animation: chip-bump-b 420ms cubic-bezier(0.2, 0.9, 0.3, 1.4);
+}
+
+@keyframes chip-bump-a {
+  40% {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 3px var(--reward-soft);
+  }
+}
+
+@keyframes chip-bump-b {
+  40% {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 3px var(--reward-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .training-chip[data-bump] {
+    animation: none;
+  }
+}
+
+.drill-finish {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.8rem;
+}
+
+.drill-finish .result-rank {
+  grid-template-columns: repeat(auto-fill, minmax(1.9rem, 1fr));
+  width: 100%;
+}
+
+/* Landing: what the games become, in the training's own medals. */
+.landing__inner:has(.landing__promise) {
+  max-width: 460px;
+}
+
+.landing__promise {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 1rem;
+  width: 100%;
+  margin: 0.5rem 0 0;
+  padding: 1rem 0 0;
+  border-top: 1px solid var(--border-soft);
+  list-style: none;
+}
+
+.landing__promise li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  text-align: center;
+}
+
+.landing__promise strong {
+  font-size: 0.82rem;
+}
+
+.landing__promise span.muted {
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.landing__promise li:nth-child(1) .medallion {
+  animation: crest-pop 620ms 120ms both;
+}
+.landing__promise li:nth-child(2) .medallion {
+  animation: crest-pop 620ms 220ms both;
+}
+.landing__promise li:nth-child(3) .medallion {
+  animation: crest-pop 620ms 320ms both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing__promise .medallion {
+    animation: none;
+  }
+}
+
+/* The chip is a button now: a door to today's training. */
+button.training-chip {
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+
+button.training-chip:hover {
+  border-color: var(--reward-edge);
+  background: var(--surface-2);
+}
+
+/* Badges by family, with the closest to earning first. */
+.achievements__family {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.achievements__family-title {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.achievements__family[data-next] .achievements__family-title {
+  color: var(--reward);
+}
+
+.achievements__family[data-next] .achievement {
+  border-color: var(--reward-edge);
+  border-style: dashed;
+}
+
+.achievement__count {
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Streak at risk: the flame flickers in the evening until the goal is met. */
+.training-chip[data-risk] .training-chip__streak .emblem,
+.today-card__streak[data-alive] .today-card__flame {
+  transform-origin: 50% 90%;
+}
+
+.training-chip[data-risk] .training-chip__streak .emblem {
+  animation: flame-flicker 1.6s ease-in-out infinite;
+}
+
+.today-card__message--risk {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+@keyframes flame-flicker {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+  30% {
+    transform: scale(1.08, 0.94) rotate(-4deg);
+    opacity: 0.85;
+  }
+  60% {
+    transform: scale(0.95, 1.06) rotate(3deg);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .training-chip[data-risk] .training-chip__streak .emblem {
+    animation: none;
+  }
+}
+
+.week-teaser {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 0.8rem;
+}
+
+.week-teaser__text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+/* Rush's clock: twelve board squares, spent ones fade to the felt. */
+.rush__rank {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  height: 0.8rem;
+  overflow: hidden;
+  border-radius: 3px;
+}
+
+.rush__rank > span {
+  background: var(--surface-3);
+  transition: background-color 300ms ease;
+}
+
+.rush__rank > span[data-lit][data-shade='light'] {
+  background: var(--board-light);
+}
+
+.rush__rank > span[data-lit][data-shade='dark'] {
+  background: var(--board-dark);
+}
+
+/* The last fifteen seconds: the square still standing pulses. */
+.rush__rank > span[data-lit][data-last] {
+  animation: rush-last 700ms ease-in-out infinite alternate;
+}
+
+@keyframes rush-last {
+  to {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rush__rank > span {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Retry and line results: up to eight squares, sized to the set. */
+.retry .result-rank,
+.line-trainer__finish .result-rank {
+  grid-template-columns: repeat(8, minmax(0, 1.7rem));
+  max-width: none;
+}
+
+.line-trainer__finish .result-hero {
+  margin-bottom: 0.3rem;
+}
+
+/* Weekly challenges wear medals: the arc is real games toward the target. */
+.quest--medal .quest__bar {
+  display: none;
+}
+
+.quest--medal {
+  min-height: 2.6rem;
+}
+
+/* A finished game review: a medal, what is left to retry, and the way in. */
+.review-done {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--reward-edge);
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--reward-soft), transparent 60%) var(--surface);
+}
+
+.review-done__text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.review-done .emblem {
+  margin-right: 0.15rem;
+}
+
+/* Before any training: one clear first step. */
+.first-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.first-step__text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+@container (max-width: 24rem) {
+  .first-step {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .first-step > .button,
+  .first-step > button {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Blunder Check's rank during the set. */
+.result-rank--live li[data-current] {
+  outline: 2px solid var(--piece-black);
+  outline-offset: -2px;
+}
+
+.result-rank--live li[data-missed] {
+  opacity: 0.4;
+}
+
+/* Game cards print the result between the players, like a database. */
+.game-card__vs {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The Review tab's three views: Train, Progress, Reference. One purpose on
+   screen at a time instead of seventeen stacked sections. */
+.review-views {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.review-views__switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.review-views__button {
+  min-height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.review-views__button:hover {
+  color: var(--text);
+}
+
+.review-views__button--active,
+.review-views__button--active:hover {
+  color: #fff;
+  background: var(--accent);
+  box-shadow: none;
+}
+
+/* One chip per page, one page on screen. The active chip plus the caption
+   below it say exactly what you are looking at. */
+.review-pages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-pages__chip {
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.review-pages__chip:hover {
+  color: var(--text);
+}
+
+.review-pages__chip--active,
+.review-pages__chip--active:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.review-pages__caption {
+  font-size: 12px;
+  margin-top: -6px;
+}
+
+/* Where a Blunder Check position comes from: the game and what the move cost. */
+.blunder-check__context {
+  margin: 0;
+  font-size: 12px;
+}
+
+.blunder-check__context a {
+  color: var(--accent-text);
+}
+
+/* The reason this line is being learned travels into the session. */
+.line-trainer__stakes {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* --- Data alignment: numbers read as columns, not as trailing text. --- */
+.badge,
+.workspace-list__meta,
+.family-row__meta,
+.game-card__meta,
+.training-topic__meta,
+.stats-time-row__meta,
+.move-row__count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Counts form a right-hand column beside the names instead of landing at a
+   different x on every row. */
+.mistake-review .workspace-list__title,
+.theory-move-list .workspace-list__title {
+  justify-content: space-between;
+}
+
+.mistake-review .workspace-list__meta > span:last-child {
+  margin-left: auto;
+}
+
+/* Ranks and move numbers line up on the digit. */
+.stats-opening-row__rank {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table .table__num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A tile's value sits directly under its label, so a tile without a note
+   cannot sink its number below its neighbours'. */
+.progress-tile {
+  grid-template-rows: auto auto 1fr;
+}
+
+.progress-tile__value {
+  align-self: start;
+}
+
+.progress-tile__change {
+  align-self: end;
+}
+
+/* Long opening names truncate; the full name is in the title. Keeps the
+   deviation table inside the sidebar instead of scrolling sideways. */
+.table .table__truncate {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The last figure in a meta row keeps the right edge, so dates and game
+   counts form a column instead of drifting with the text before them. */
+.workspace-list__date {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "3. e4" and "12. Nxe5" take different widths; a fixed move column keeps the
+   costs lined up down the list. */
+.scoreline__move {
+  min-width: 64px;
+}
+
+/* Whether the background engine is still working: a stalled crawl and a
+   finished library otherwise look the same. */
+.engine-activity {
+  margin: 0;
+  min-height: 1.4em;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.engine-activity[data-tone='good'] {
+  color: var(--accent-text);
+}
+
+.engine-activity[data-tone='bad'] {
+  color: var(--danger-text);
+}
+
+/* Habits: what the player does wrong over the board (training/habits-card.tsx). */
+.habits {
+  gap: 0.75rem;
+}
+
+.habits__game {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.habits__moments,
+.habits__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.habits__moment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.habits__moment:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.habits__moment:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.habits__moment:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.habits__habit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.55rem 0.7rem;
+  --tone: var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.habits__habit[data-shows] {
+  --tone: var(--warning);
+}
+
+.habits__title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.habits__line,
+.habits__advice,
+.habits__recent {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.habits__advice {
+  color: var(--text-muted);
+}
+
+.habits__recent {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.habits__recent[data-tone='good'] {
+  color: var(--accent-text);
+}
+
+.habits__recent[data-tone='bad'] {
+  color: var(--danger-text);
+}
+
+/* A launch card in a narrow sidebar: the button drops under the text rather
+   than squeezing it into a column one word wide. */
+.rush__intro {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.rush__intro > div {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.rush__intro > button {
+  margin-left: auto;
+}
+
+/* ── No squeezed text ───────────────────────────────────────────────────────
+   Measured across every Review and Explore page in a 295px sidebar: rows of
+   icon | text | button gave the text 57-125px, so a sentence stood one or two
+   words to a line. In a narrow sidebar the link goes under the text, the
+   fixed columns shrink, and long opening names stop at two lines (the full
+   name is in the title). */
+.quest {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 0.45rem;
+}
+
+.quest > .button {
+  padding-inline: 0.55rem;
+}
+
+.train-tiles {
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+}
+
+.course-line__title,
+.workspace-list__title strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+@container (max-width: 26rem) {
+  .week-teaser,
+  .review-done {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .week-teaser > :last-child,
+  .review-done > :last-child {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+/* Deviations in a narrow sidebar: five columns were 466px inside 269, so the
+   table scrolled sideways and "Nc3 · 50%" broke over two lines. Each row
+   becomes two lines instead: the moves and severity, then the opening. */
+.table td > .button {
+  white-space: nowrap;
+}
+
+@container (max-width: 26rem) {
+  .deviation-table thead tr,
+  .deviation-table tbody tr {
+    display: grid;
+    grid-template-columns: 2.2rem minmax(0, 1fr) minmax(0, 1fr) auto;
+    align-items: center;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .deviation-table th,
+  .deviation-table td {
+    padding: 4px 6px;
+    border-bottom: 0;
+  }
+
+  .deviation-table td > .button {
+    padding-inline: 4px;
+  }
+
+  /* The opening runs under the moves, the full width of the row. */
+  .deviation-table td:nth-child(4) {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    max-width: none;
+    padding-top: 0;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .deviation-table th:nth-child(4),
+  .deviation-table td:nth-child(4):empty {
+    display: none;
+  }
+
+  .deviation-table td:nth-child(5),
+  .deviation-table th:nth-child(5) {
+    grid-column: 4;
+    grid-row: 1;
+  }
+}
+
+/* Quests and challenges in a narrow sidebar: the count goes under the title,
+   so the title has the row's width instead of 119px of it. */
+@container (max-width: 26rem) {
+  .quest {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    row-gap: 0.1rem;
+  }
+
+  .quest > :first-child {
+    grid-row: 1 / span 2;
+  }
+
+  .quest > .quest__body {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .quest > .quest__count {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
+
+  .quest > :last-child {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+}
+
+/* Your moves beside master moves: two ~135px columns. The game count and the
+   book share each keep their own line rather than breaking word by word. */
+.move-row--stacked .workspace-list__meta {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+.move-row--stacked .workspace-list__meta > span {
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   Tone borders. Callouts, errors, result rows and the like used to carry their
+   tone as a 3-4px left accent on a rounded box, which curves into a wedge at
+   both corners. The tone now tints the whole 1px border and a hint of the
+   background, set per state through `--tone`, so corners stay clean and a box
+   never changes width with its state. */
+.coaching-signal,
+.drill-feedback,
+.panel-error,
+.training-topic--selected,
+.callout,
+.form-error,
+.opening-quiz__answer,
+.points-lost__habit,
+.course-line[data-status='due'],
+.line-trainer__trap,
+.today-card__stakes,
+.celebration[data-kind='quest'],
+.points-lost__delivered li,
+.repertoire-check,
+.blunder-check--running,
+.retry,
+.train-callout,
+.latest-game[data-result],
+.habits__habit,
+.move-row--main-line {
+  border: 1px solid color-mix(in srgb, var(--tone, var(--border)) 45%, var(--border));
+}
+
+.coaching-signal,
+.drill-feedback,
+.panel-error,
+.form-error,
+.opening-quiz__answer,
+.points-lost__habit,
+.line-trainer__trap,
+.today-card__stakes,
+.points-lost__delivered li,
+.repertoire-check,
+.retry,
+.train-callout,
+.habits__habit {
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--tone, transparent) 7%, transparent),
+    color-mix(in srgb, var(--tone, transparent) 7%, transparent)
+  );
+}
+
+.move-row--main-line {
+  padding-left: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   Hints. Every trainer offers the same small hint: the kind of move, then the
+   piece to look at. The line keeps its height so taking a hint moves nothing,
+   and the ring on the board sits under the piece it points at. Blue, like the
+   trainers' "play this" arrow: the squares are green, so green vanishes there
+   and every mark on the board contrasts with the squares, not the theme. */
+.hint-control {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+}
+
+.hint-control__line {
+  margin: 0;
+  min-height: 1.3em;
+  font-size: 0.8rem;
+  line-height: 1.3;
+  color: var(--text-muted);
+}
+
+.hint-control__line[data-level] {
+  color: var(--text);
+}
+
+.board-hint-square {
+  position: absolute;
+  inset: 0;
+  /* A gradient, never a translucent background-color: the square's own colour
+     is a background-color and would be replaced rather than layered over. */
+  background-image: linear-gradient(rgba(36, 98, 214, 0.55), rgba(36, 98, 214, 0.55));
+  box-shadow: inset 0 0 0 3px rgba(36, 98, 214, 0.95);
+  pointer-events: none;
+  animation: hint-square 1.4s ease-in-out infinite;
+}
+
+@keyframes hint-square {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .board-hint-square {
+    animation: none;
+  }
+}
+
+.line-trainer__help,
+.drill-card__actions--help {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/* Board arrows get a halo. react-chessboard draws each arrow as one stroked
+   path with a marker head, in whatever colour it was given; on cream and green
+   squares alike a flat stroke sinks into whichever square is closest to its
+   hue. A thin light halo inside a soft dark one lifts every arrow off both.
+   The arrows layer carries no class, but it is the one SVG whose direct
+   children are markers. */
+.board-frame__board svg:has(> marker) > path {
+  filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.9)) drop-shadow(0 0 2px rgba(0, 0, 0, 0.5));
+}
+
+/* ---------------------------------------------------------------------------
+   PROMOTION — the moment a title changes, staged like the rule it comes from.
+   A file of the board, the old piece hopping a square at a time on the knocks
+   of the promotion sound (six, 170ms apart from 300ms, in lib/sound.ts — the
+   march below is stepped to land on them), the new piece arriving on the
+   last rank in gold rays and sparks, the words beside it. Gold throughout:
+   it is the one thing on screen that means "earned". */
+.promotion {
+  --sq: 54px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(247, 209, 107, 0.16), transparent 38%),
+    rgba(14, 13, 12, 0.76);
+  backdrop-filter: blur(3px);
+}
+
+.promotion__stage {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 1.8rem;
+  width: min(92vw, 34rem);
+  padding: 1.6rem 1.9rem 1.6rem 1.5rem;
+  border: 1px solid var(--reward-edge);
+  border-radius: 20px;
+  background: linear-gradient(165deg, rgba(247, 209, 107, 0.14), transparent 48%), var(--surface);
+  box-shadow:
+    inset 0 0 0 1px rgba(247, 209, 107, 0.22),
+    0 24px 70px rgba(0, 0, 0, 0.55);
+  animation: promotion-card 420ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.promotion__board {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.35rem;
+  align-items: start;
+}
+
+.promotion__ranks {
+  display: grid;
+  grid-template-rows: repeat(8, var(--sq));
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.promotion__ranks > span {
+  display: grid;
+  place-items: center;
+}
+
+.promotion__file {
+  position: relative;
+  display: grid;
+  width: var(--sq);
+  grid-template-rows: repeat(8, var(--sq));
+  overflow: visible;
+  border-radius: 6px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+.promotion__file > span[data-shade='light'] {
+  background: var(--board-light);
+}
+
+.promotion__file > span[data-shade='dark'] {
+  background: var(--board-dark);
+}
+
+.promotion__file > span[data-shade]:first-child {
+  border-radius: 6px 6px 0 0;
+  /* The last rank lights gold as the new piece lands. */
+  animation: promotion-last 900ms ease-out 1400ms both;
+}
+
+.promotion__file > span[data-shade]:nth-child(8) {
+  border-radius: 0 0 6px 6px;
+}
+
+.promotion__from,
+.promotion__to,
+.promotion__rays,
+.promotion__sparks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--sq);
+  height: var(--sq);
+}
+
+.promotion__from .title-piece,
+.promotion__to .title-piece {
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.4));
+}
+
+/* Six hops from the second rank to the last, one per knock. */
+.promotion__from {
+  animation:
+    promotion-march 1020ms steps(6, jump-start) 300ms both,
+    promotion-leave 200ms ease-in 1380ms both;
+}
+
+.promotion__to {
+  animation: promotion-arrive 520ms cubic-bezier(0.2, 0.9, 0.3, 1.4) 1400ms both;
+}
+
+.promotion__rays {
+  width: calc(var(--sq) * 4);
+  height: calc(var(--sq) * 4);
+  top: calc(var(--sq) * -1.5);
+  left: calc(var(--sq) * -1.5);
+  border-radius: 50%;
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgba(247, 209, 107, 0.55) 0 5deg,
+    transparent 5deg 24deg
+  );
+  mask-image: radial-gradient(circle, #000 12%, transparent 62%);
+  -webkit-mask-image: radial-gradient(circle, #000 12%, transparent 62%);
+  pointer-events: none;
+  animation: promotion-rays 1500ms ease-out 1400ms both;
+}
+
+.promotion__sparks {
+  pointer-events: none;
+}
+
+.promotion__sparks > i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  background: var(--reward);
+  box-shadow: 0 0 0 1px var(--piece-black);
+  transform: rotate(var(--a)) translateY(0) rotate(45deg) scale(0);
+  /* forwards, not both: with both the first keyframe shows before the delay,
+     a ring of dots sitting on the last rank while the pawn is still walking. */
+  animation: promotion-spark 900ms cubic-bezier(0.1, 0.8, 0.3, 1) 1420ms forwards;
+}
+
+.promotion__sparks > i:nth-child(even) {
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  animation-duration: 1100ms;
+  animation-delay: 1500ms;
+}
+
+.promotion__words {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  min-width: 0;
+  animation: promotion-words 420ms ease-out 1550ms both;
+}
+
+.promotion__eyebrow {
+  color: var(--reward);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.promotion__title {
+  font-size: clamp(2.4rem, 8vw, 3.2rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  background: linear-gradient(170deg, #fbe7a6 10%, var(--reward) 55%, #c9a13f 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 2px 0 rgba(0, 0, 0, 0.35));
+}
+
+.promotion__line {
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.promotion__next {
+  font-size: 0.78rem;
+}
+
+.promotion__continue {
+  margin-top: 0.6rem;
+}
+
+.promotion__stage[data-preview] .promotion__title {
+  background: linear-gradient(170deg, var(--text) 10%, var(--text-muted) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+@keyframes promotion-last {
+  from {
+    box-shadow: inset 0 0 0 0 rgba(247, 209, 107, 0);
+  }
+  30% {
+    box-shadow: inset 0 0 0 6px rgba(247, 209, 107, 0.95);
+  }
+  to {
+    box-shadow: inset 0 0 0 3px rgba(247, 209, 107, 0.85);
+  }
+}
+
+@keyframes promotion-rays {
+  from {
+    opacity: 0;
+    transform: rotate(0deg) scale(0.4);
+  }
+  25% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: rotate(40deg) scale(1.15);
+  }
+}
+
+@keyframes promotion-spark {
+  from {
+    opacity: 1;
+    transform: rotate(var(--a)) translateY(calc(var(--sq) * -0.2)) rotate(45deg) scale(0.4);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: rotate(var(--a)) translateY(calc(var(--sq) * -1.6)) rotate(45deg) scale(1);
+  }
+}
+
+@media (max-width: 480px) {
+  .promotion__stage {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    text-align: center;
+  }
+
+  .promotion__words {
+    align-items: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .promotion__stage,
+  .promotion__to,
+  .promotion__words,
+  .promotion__file > span[data-shade]:first-child {
+    animation: none;
+  }
+
+  .promotion__file > span[data-shade]:first-child {
+    box-shadow: inset 0 0 0 3px rgba(247, 209, 107, 0.85);
+  }
+
+  .promotion__from,
+  .promotion__rays,
+  .promotion__sparks {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   ACHIEVEMENTS — the numbers as tiles, a gold bar from title to title, and
+   badge cards that say when they were earned or how far along they are. */
+.achievements__tiles {
+  margin-top: 0.2rem;
+}
+
+.title-ladder__bar {
+  display: block;
+  height: 5px;
+  margin: 0.45rem 0 0.1rem;
+  border-radius: 999px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+  overflow: hidden;
+}
+
+.title-ladder__bar::after {
+  content: '';
+  display: block;
+  height: 100%;
+  width: var(--share, 0%);
+  border-radius: inherit;
+  background: linear-gradient(90deg, #c9a13f, var(--reward));
+  transition: width 600ms ease-out;
+}
+
+.achievement {
+  padding: 0.6rem 0.7rem;
+  column-gap: 0.7rem;
+}
+
+.achievement > .medallion {
+  grid-row: span 3;
+  align-self: center;
+}
+
+.achievement[data-featured] {
+  padding: 0.75rem 0.8rem;
+}
+
+.achievement[data-featured] strong {
+  font-size: 0.86rem;
+}
+
+.achievement__count {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.achievement__bar {
+  display: block;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+  overflow: hidden;
+}
+
+.achievement__bar::after {
+  content: '';
+  display: block;
+  height: 100%;
+  width: var(--share, 0%);
+  border-radius: inherit;
+  background: linear-gradient(90deg, #c9a13f, var(--reward));
+}
+
+.achievement[data-unlocked] {
+  border-color: var(--reward-edge);
+  background: linear-gradient(135deg, rgba(247, 209, 107, 0.16), transparent 60%), var(--surface);
+}
+
+.achievement__done {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.15rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--reward-soft);
+  color: var(--reward);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+/* ---------------------------------------------------------------------------
+   TROPHY ROOM — the achievements page as a case of medals, not a list. The
+   crest and title first, the ladder, the three closest badges as rows with
+   their text, then each family as a shelf of medals: three to a row, the
+   name under each, the date in gold or a thin bar. A medal opens its caption
+   under the shelf, so the tiles stay clean. */
+.trophy-room {
+  gap: 0.8rem;
+}
+
+.trophy-room__hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--reward-edge);
+  border-radius: calc(var(--radius) * 1.5);
+  background:
+    radial-gradient(circle at 18% 50%, rgba(247, 209, 107, 0.18), transparent 55%), var(--surface);
+}
+
+.trophy-room__hero-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  font-size: 0.78rem;
+}
+
+.trophy-room__eyebrow {
+  color: var(--reward);
+  font-size: 0.64rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.trophy-room__title {
+  font-size: 1.6rem;
+  font-weight: 800;
+  line-height: 1.05;
+  background: linear-gradient(170deg, #fbe7a6 10%, var(--reward) 60%, #c9a13f 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.trophy-case__rank {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 2px;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+.trophy-case__rank > span {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.trophy-case__rank > span[data-earned] {
+  background: var(--reward);
+  box-shadow: inset 0 0 0 1px var(--reward-edge);
+}
+
+.trophy-case {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trophy-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  min-height: 7.6rem;
+  padding: 0.7rem 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.trophy-tile:hover,
+.trophy-tile[aria-expanded='true'] {
+  transform: translateY(-2px);
+  border-color: var(--text-faint);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+}
+
+.trophy-tile:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.trophy-tile[data-unlocked] {
+  border-color: var(--reward-edge);
+  background:
+    radial-gradient(circle at 50% 28%, rgba(247, 209, 107, 0.22), transparent 60%), var(--surface);
+  box-shadow: inset 0 0 0 1px rgba(247, 209, 107, 0.18);
+}
+
+.trophy-tile[data-unlocked]:hover,
+.trophy-tile[data-unlocked][aria-expanded='true'] {
+  box-shadow:
+    inset 0 0 0 1px rgba(247, 209, 107, 0.3),
+    0 6px 18px rgba(0, 0, 0, 0.25),
+    0 0 18px rgba(247, 209, 107, 0.18);
+}
+
+.trophy-tile:not([data-unlocked]) .medallion {
+  opacity: 0.78;
+}
+
+.trophy-tile__title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.trophy-tile__earned {
+  padding: 0.08rem 0.45rem;
+  border-radius: 999px;
+  background: var(--reward-soft);
+  color: var(--reward);
+  font-size: 0.64rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.trophy-tile__progress {
+  display: grid;
+  width: 100%;
+  gap: 0.2rem;
+  font-size: 0.64rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.trophy-case__caption {
+  margin: 0;
+  min-height: 2.6em;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius);
+  font-size: 0.74rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.trophy-case__caption[data-open] {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trophy-tile {
+    transition: none;
+  }
+
+  .trophy-tile:hover,
+  .trophy-tile[aria-expanded='true'] {
+    transform: none;
+  }
+}
+
+/* The drill card, decluttered: the hint line above its buttons, the "what did
+   you check?" chips folded behind one line, the scope note a plain caption. */
+.hint-control--line-first {
+  width: 100%;
+  flex-direction: column-reverse;
+}
+
+.hint-control--line-first .hint-control__line {
+  min-height: 1.5em;
+  font-size: 0.86rem;
+}
+
+.hint-control__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.drill-intents__fold {
+  font-size: 0.78rem;
+}
+
+.drill-intents__fold > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  list-style: none;
+}
+
+.drill-intents__fold > summary::before {
+  content: '+ ';
+  color: var(--text-faint);
+}
+
+.drill-intents__fold[open] > summary::before {
+  content: '− ';
+}
+
+.drill-intents__fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.drill-intents__fold .drill-intents {
+  margin-top: 0.4rem;
+}
+
+.training-scope {
+  border: 0;
+  background: none;
+  padding: 0;
+}
+
+/* The improvement chart's dates: games run left to right in order, so the
+   ticks are what say whether the span is a week or a year. */
+.progress-trend__tick {
+  fill: var(--text-faint);
+  font-size: 8.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-trend__marker-label {
+  fill: var(--text-muted);
+  font-size: 8.5px;
+  font-weight: 700;
+}
+
+/* A past game against the engine is a row that opens it, so it carries the
+   list row's look as a button. */
+button.sparring__game {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+button.sparring__game:hover {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+button.sparring__game:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+button.sparring__game:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* ---------------------------------------------------------------------------
+   The strip under the board is one fixed-height band shared by every status
+   bar — the evaluation progress on the left, an import's result on the right.
+   Both overlay the band the board already reserves (`--evaluation-bar-height`),
+   so a sync result appearing or clearing moves nothing. The landing page keeps
+   the import bar inline under the form; this applies to the workspace only. */
+.page > .import-bar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  z-index: 21;
+  box-sizing: border-box;
+  height: var(--evaluation-bar-height);
+  max-width: min(60%, 36rem);
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.page > .import-bar--complete {
+  border-top-color: var(--accent);
+}
+
+.page > .import-bar .import-bar__info {
+  flex: none;
+}
+
+.page > .import-bar .import-bar__detail {
+  min-width: 0;
+}
+
+.page > .import-bar .import-bar__detail::before {
+  content: '· ';
+  color: var(--text-faint);
+}
+
+.page > .import-bar .progress {
+  width: 7rem;
+  flex: none;
 }

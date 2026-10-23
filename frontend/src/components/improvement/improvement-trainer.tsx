@@ -12,11 +12,16 @@ import {
 import { useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { Emblem, Medal, TitlePiece } from '@/components/training/trophies'
+import type { EmblemName } from '@/lib/training/emblem-art'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { getTrainingTimeClass, useImprovementPlan, type DrillCard } from '@/hooks/use-improvement'
 import { DrillContinuation } from '@/components/improvement/drill-continuation'
+import { HintControl } from '@/components/training/hint-control'
+import { useHint } from '@/hooks/use-hint'
 import { drillLine, drillStep, drillStepLabel } from '@/lib/drills/drill-steps'
+import { recommendedTheme } from '@/lib/drills/recommended'
 import {
   describeAccuracy,
   describeCoverage,
@@ -25,26 +30,52 @@ import {
 import { getLessonAvailability, readyCountInView } from '@/lib/lesson-availability'
 import { useAppStore } from '@/store/app-store'
 
+const TRAINED_TODAY_KEY = 'chessgod.drills.trainedToday'
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function readTrainedToday(): string | null {
+  try {
+    const raw = window.localStorage.getItem(TRAINED_TODAY_KEY)
+    if (!raw) return null
+    const [day, key] = raw.split(':', 2)
+    return day === todayKey() && key ? key : null
+  } catch {
+    return null
+  }
+}
+
+function writeTrainedToday(key: string) {
+  try {
+    window.localStorage.setItem(TRAINED_TODAY_KEY, `${todayKey()}:${key}`)
+  } catch {
+    // A per-viewer convenience; the themes still list without it.
+  }
+}
+
 const RECURRENCE_LABEL = {
-  habit: 'repeated habit',
+  habit: 'habit',
   repeated: 'same position again',
   one_off: 'one-off',
 } as const
 
-const TRAINING_GLYPHS: Record<string, string> = {
-  advantage_conversion: '♛',
-  fork: '♞',
-  skewer: '♜',
-  opening_decision: '♙',
-  hanging_material: '♟',
-  pin: '♝',
-  missed_capture: '×',
-  king_safety: '♚',
-  calculation: '∞',
-  allowed_mate: '!',
-  missed_mate: '#',
-  removing_the_defender: '◇',
-  defensive_resource: '↶',
+// Each theme's emblem from the set: the piece that does it where one does.
+const TRAINING_EMBLEMS: Record<string, EmblemName> = {
+  advantage_conversion: 'queen',
+  fork: 'knight',
+  skewer: 'rook',
+  opening_decision: 'book',
+  hanging_material: 'pawn',
+  pin: 'bishop',
+  missed_capture: 'crosshair',
+  king_safety: 'king',
+  calculation: 'magnifier',
+  allowed_mate: 'king',
+  missed_mate: 'crown',
+  removing_the_defender: 'swords',
+  defensive_resource: 'shield',
 }
 
 type DrillStatus =
@@ -84,6 +115,8 @@ function ScopedImprovementTrainer({
   onPlayOut,
 }: ImprovementTrainerProps) {
   const [selectedPattern, setSelectedPattern] = useState<string | null>(null)
+  // The theme trained most recently today: recommended moves past it.
+  const [trainedToday, setTrainedToday] = useState<string | null>(() => readTrainedToday())
   const plan = useImprovementPlan({ username, color, timeClass, patternKey: selectedPattern })
   const loadPosition = useAppStore((state) => state.loadPosition)
   const clearLoadedLine = useAppStore((state) => state.clearLoadedLine)
@@ -92,6 +125,11 @@ function ScopedImprovementTrainer({
   const currentNodeId = useAppStore((state) => state.currentNodeId)
   const nodes = useAppStore((state) => state.nodes)
   const [sessionActive, setSessionActive] = useState(false)
+  // Each card's outcome as it resolves, and the finish screen once the set ends.
+  const outcomes = useRef<Map<number, boolean>>(new Map())
+  const [finished, setFinished] = useState<{ results: boolean[]; theme: string | null } | null>(
+    null,
+  )
   const [sessionDrills, setSessionDrills] = useState<DrillCard[]>([])
   const [index, setIndex] = useState(0)
   const [status, setStatus] = useState<DrillStatus>('idle')
@@ -113,6 +151,14 @@ function ScopedImprovementTrainer({
   const drills = sessionActive ? sessionDrills : availableDrills
   const card = drills[index] ?? null
   const step = card ? drillStep(card, status === 'follow-up' ? 'follow-up' : 'solving') : null
+  // Rooted at the ply being asked: the follow-up position for a second step.
+  const askedFen = status === 'follow-up' && card?.follow_up ? card.follow_up.fen : card?.fen
+  const hints = useHint(
+    (status === 'solving' || status === 'follow-up') && card && step && askedFen
+      ? { fen: askedFen, uci: step.answerUci }
+      : null,
+    card && step ? `${card.position_id}:${step.index}` : null,
+  )
   const stepLabel = step ? drillStepLabel(step) : null
   // What to name as the best move once revealed: the move for the step actually
   // being asked, which for a two-move drill is not the one already played.
@@ -141,6 +187,8 @@ function ScopedImprovementTrainer({
     if (!firstCard) return
     onBeginDrill?.()
     setSessionDrills([...availableDrills])
+    outcomes.current = new Map()
+    setFinished(null)
     setSessionActive(true)
     loadCard(firstCard, 0)
   }
@@ -155,6 +203,15 @@ function ScopedImprovementTrainer({
   function nextCard() {
     if (!drills.length) return
     if (index >= drills.length - 1) {
+      // The set is over: show what it came to before going back to the themes.
+      setFinished({
+        results: drills.map((_, at) => outcomes.current.get(at) ?? false),
+        theme: drills[0]?.pattern_key ?? null,
+      })
+      if (drills[0]?.pattern_key) {
+        writeTrainedToday(drills[0].pattern_key)
+        setTrainedToday(drills[0].pattern_key)
+      }
       stopSession()
       void plan.refetch()
       return
@@ -162,6 +219,13 @@ function ScopedImprovementTrainer({
     const nextIndex = index + 1
     loadCard(drills[nextIndex], nextIndex)
   }
+
+  // A card's first resolution is its outcome; a retry after a miss does not rewrite it.
+  useEffect(() => {
+    if (!sessionActive) return
+    if (status !== 'correct' && status !== 'incorrect' && status !== 'revealed') return
+    if (!outcomes.current.has(index)) outcomes.current.set(index, status === 'correct')
+  }, [index, sessionActive, status])
 
   // Keep the board honest: no engine arrows or annotations while a card is open.
   useEffect(() => {
@@ -259,13 +323,17 @@ function ScopedImprovementTrainer({
   if (!plan.data) {
     return (
       <div className="improvement-empty improvement-empty--error">
-        The training queue did not load. Check that the backend is running, then try again.
+        Your lessons didn't load. Try again in a moment.
       </div>
     )
   }
 
   const summary = plan.data.summary
   const patterns = summary.patterns
+  // What to drill next: the first theme with positions ready that was not the
+  // one just trained today, so a finished set never comes back as the
+  // recommendation the moment it ends.
+  const recommendedKey = recommendedTheme(patterns, trainedToday)
   const selectedSummary = patterns.find((pattern) => pattern.key === selectedPattern) ?? null
   // The plan is fetched per theme, so `drills` is theme-scoped while
   // `due_positions` counts everything. Badge and body must agree.
@@ -291,7 +359,7 @@ function ScopedImprovementTrainer({
     <Card className="improvement-trainer">
       <CardHeader className="improvement-trainer__header">
         <div>
-          <h2>{sessionActive ? (card?.pattern_label ?? 'Training') : 'Pick a lesson'}</h2>
+          <h2>{sessionActive ? (card?.pattern_label ?? 'Training') : 'Drills'}</h2>
         </div>
         {sessionActive ? (
           <Button
@@ -307,14 +375,57 @@ function ScopedImprovementTrainer({
         )}
       </CardHeader>
       <CardBody className="improvement-trainer__body">
-        {availability.kind === 'theme-clear' ? (
+        {finished && !sessionActive ? (
+          <div className="drill-finish">
+            <div className="result-hero">
+              <Medal
+                earned={finished.results.every(Boolean)}
+                emblem={TRAINING_EMBLEMS[finished.theme ?? ''] ?? 'crosshair'}
+                label={`${finished.results.filter(Boolean).length} of ${finished.results.length} solved`}
+                progress={
+                  finished.results.length
+                    ? finished.results.filter(Boolean).length / finished.results.length
+                    : 0
+                }
+                size={72}
+              />
+              <div className="result-hero__text">
+                <span className="result-hero__score">
+                  {finished.results.filter(Boolean).length}
+                  <span className="muted"> / {finished.results.length}</span>
+                </span>
+                <span className="muted">
+                  {finished.results.every(Boolean)
+                    ? 'Every position solved on the first try.'
+                    : 'Solved on the first try. Misses come back sooner.'}
+                </span>
+              </div>
+            </div>
+            <ol aria-label="Positions" className="result-rank">
+              {finished.results.map((solved, at) => (
+                <li
+                  data-found={solved || undefined}
+                  data-shade={at % 2 ? 'dark' : 'light'}
+                  key={at}
+                >
+                  {solved ? <TitlePiece title="Pawn" /> : null}
+                  <span className="sr-only-inline">
+                    Position {at + 1}: {solved ? 'solved' : 'missed'}
+                  </span>
+                </li>
+              ))}
+            </ol>
+            <Button onClick={() => setFinished(null)} type="button" variant="primary">
+              Back to the lessons
+            </Button>
+          </div>
+        ) : availability.kind === 'theme-clear' ? (
           <div className="improvement-empty">
             <Target size={20} />
             <strong>{selectedSummary?.label ?? 'This theme'} is clear</strong>
             <span>
-              You have drilled every position in it. {availability.elsewhere}{' '}
-              {availability.elsewhere === 1 ? 'lesson is' : 'lessons are'} ready in other themes,
-              and these come back later for review.
+              You've drilled every position in it. {availability.elsewhere}{' '}
+              {availability.elsewhere === 1 ? 'lesson is' : 'lessons are'} ready in other themes.
             </span>
             <Button onClick={() => setSelectedPattern(null)} type="button" variant="primary">
               Show all lessons
@@ -325,9 +436,8 @@ function ScopedImprovementTrainer({
             <Target size={20} />
             <strong>No lessons yet</strong>
             <span>
-              Open Analysis Coverage below and set the engine on your games — or analyze a single
-              line from Explore. Every mistake it finds in your Rapid and Blitz games at rating{' '}
-              {plan.data.min_user_rating}+ turns up here as a lesson.
+              Analyze your games in Analysis coverage below, or review one in Explore. Each mistake
+              becomes a lesson.
             </span>
           </div>
         ) : sessionActive && card ? (
@@ -341,8 +451,8 @@ function ScopedImprovementTrainer({
               <span className="drill-card__clock-divider">/</span>
               <span>{String(drills.length).padStart(2, '0')}</span>
             </div>
+            {/* The theme is already the panel heading while a session runs. */}
             <div className="drill-card__meta">
-              <strong>{card.pattern_label}</strong>
               <span className="drill-card__phase">{card.phase}</span>
               <span className={`recurrence recurrence--${card.recurrence}`}>
                 {RECURRENCE_LABEL[card.recurrence]}
@@ -355,42 +465,43 @@ function ScopedImprovementTrainer({
                   <strong>
                     Right so far. The opponent answers {card.follow_up.opponent_reply_san}.
                   </strong>
-                  <span>Play the move you had calculated next.</span>
+                  <span>Play the follow-up you calculated.</span>
                 </>
               ) : (
                 <>
                   <strong>{card.side_to_move === 'white' ? 'White' : 'Black'} to move.</strong>
-                  <span>
-                    {card.follow_up
-                      ? 'Play the move you would choose, then the follow-up it depends on.'
-                      : 'Play the move you would choose in a game.'}
-                  </span>
+                  {card.follow_up ? <span>Two moves: yours, then the follow-up.</span> : null}
                 </>
               )}
             </div>
 
             {status === 'solving' ? (
-              <fieldset className="drill-intents">
-                <legend>What are you checking? (optional)</legend>
-                {plan.data.intents.map((option) => (
-                  <button
-                    aria-pressed={intent === option.key}
-                    className={`drill-intents__option${
-                      intent === option.key ? ' drill-intents__option--on' : ''
-                    }`}
-                    key={option.key}
-                    onClick={() => setIntent(intent === option.key ? null : option.key)}
-                    title={option.prompt}
-                    type="button"
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </fieldset>
+              // Folded away: six chips were most of the card, and the hint and
+              // the board are what the player is here for.
+              <details className="drill-intents__fold">
+                <summary>What did you check?</summary>
+                <fieldset className="drill-intents">
+                  <legend className="sr-only-inline">What did you check before moving?</legend>
+                  {plan.data.intents.map((option) => (
+                    <button
+                      aria-pressed={intent === option.key}
+                      className={`drill-intents__option${
+                        intent === option.key ? ' drill-intents__option--on' : ''
+                      }`}
+                      key={option.key}
+                      onClick={() => setIntent(intent === option.key ? null : option.key)}
+                      title={option.prompt}
+                      type="button"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </fieldset>
+              </details>
             ) : null}
 
             {status === 'solving' || status === 'follow-up' ? (
-              <div className="drill-card__actions">
+              <HintControl hints={hints} lineFirst>
                 <Button
                   onClick={() => {
                     // Capture the step being given up on; 'revealed' alone cannot
@@ -400,9 +511,9 @@ function ScopedImprovementTrainer({
                   }}
                   type="button"
                 >
-                  Show hint &amp; solution
+                  Show solution
                 </Button>
-              </div>
+              </HintControl>
             ) : null}
 
             {status !== 'solving' && status !== 'follow-up' ? (
@@ -416,14 +527,14 @@ function ScopedImprovementTrainer({
                     {status === 'correct'
                       ? 'Found it.'
                       : status === 'save-error'
-                        ? 'That move could not be saved.'
+                        ? "Couldn't save that move."
                         : status === 'incorrect'
-                          ? `${playedMove ?? 'That move'} misses the point.`
+                          ? `${playedMove ?? 'That move'} isn't it.`
                           : `Best move: ${revealedAnswerSan}`}
                   </strong>
                 </div>
                 {status === 'save-error' ? (
-                  <p>Check the connection, then reset this position and play the move again.</p>
+                  <p>Check your connection, then reset the position and play the move again.</p>
                 ) : (
                   <>
                     <div className="drill-card__actions drill-card__actions--primary">
@@ -520,7 +631,7 @@ function ScopedImprovementTrainer({
         ) : (
           <>
             <p className="training-scope">
-              Lessons come from your Rapid and Blitz games at rating {plan.data.min_user_rating}+.
+              From your rapid and blitz games rated {plan.data.min_user_rating}+.
             </p>
             <div className="improvement-summary" aria-label="Training progress">
               <div>
@@ -541,13 +652,13 @@ function ScopedImprovementTrainer({
             </div>
             <div className="training-library">
               <div className="training-library__heading">
-                <strong>Your weaknesses</strong>
-                <span>{patterns.length} themes</span>
+                <strong>Themes</strong>
+                <span>{patterns.length}</span>
               </div>
               {selectedSummary ? (
                 <div className="training-selection" role="status">
                   <div>
-                    <span>Selected lesson</span>
+                    <span>Selected theme</span>
                     <strong>{selectedSummary.label}</strong>
                     <small>
                       {describeCoverage(selectedSummary)} · {describeAccuracy(selectedSummary)}
@@ -575,21 +686,13 @@ function ScopedImprovementTrainer({
                   </div>
                 </div>
               ) : (
-                <p className="training-library__instruction">
-                  Pick one to drill. Mastered positions come back later for review.
-                </p>
+                <p className="training-library__instruction">Pick a theme to drill.</p>
               )}
               <div className="training-library__list">
-                {patterns.map((pattern, patternIndex) => {
+                {patterns.map((pattern) => {
                   const progress = pattern.positions
                     ? Math.round((pattern.learned_positions / pattern.positions) * 100)
                     : 0
-                  const state =
-                    pattern.learned_positions === pattern.positions
-                      ? 'Learned'
-                      : pattern.drill_attempts > 0
-                        ? 'In progress'
-                        : 'Not started'
                   return (
                     <button
                       aria-label={`Choose ${pattern.label}`}
@@ -602,15 +705,17 @@ function ScopedImprovementTrainer({
                       type="button"
                     >
                       <span className="training-topic__glyph" aria-hidden="true">
-                        {TRAINING_GLYPHS[pattern.key] ?? '•'}
+                        <Emblem name={TRAINING_EMBLEMS[pattern.key] ?? 'pawn'} size={30} />
                       </span>
                       <span className="training-topic__main">
                         <span className="training-topic__title">
                           <strong>{pattern.label}</strong>
-                          {patternIndex === 0 ? <em>Recommended</em> : null}
+                          {pattern.key === recommendedKey ? <em>Recommended</em> : null}
                         </span>
+                        {/* The bar below carries the state; naming it too said
+                            the same thing twice. */}
                         <span className="training-topic__meta">
-                          {state} · {pattern.learned_positions.toLocaleString()}/
+                          {pattern.learned_positions.toLocaleString()}/
                           {pattern.positions.toLocaleString()} learned ·{' '}
                           {pattern.due_positions.toLocaleString()} ready
                         </span>

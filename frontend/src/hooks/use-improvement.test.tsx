@@ -205,8 +205,12 @@ it.each([undefined, 503, 409, 422])('retries only transient answer errors: %s', 
     })
     expect(post).toHaveBeenCalledTimes(transient ? 2 : 1)
     for (const call of post.mock.calls) {
-      expect(call).toEqual(['/api/improvement/attempts', payload, { timeout: 15_000 }])
-      expect(call[1]).toBe(payload)
+      // The same answer on every retry, with the player's day for the quests.
+      expect(call).toEqual([
+        '/api/improvement/attempts',
+        { ...payload, tz: expect.any(String) },
+        { timeout: 15_000 },
+      ])
     }
   } finally {
     client.clear()

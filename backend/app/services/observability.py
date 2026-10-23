@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -349,6 +349,13 @@ class ObservabilityStore:
                 )
 
             self._roll_minute_bucket_locked(now, duration_ms, status_code >= 500)
+
+            # A healthy healthcheck is the container asking "are you up?" every
+            # few seconds: 72-86% of every stored request row, and nothing
+            # anyone reads. It still counts in the live metrics above; only a
+            # failing one is worth keeping.
+            if path.startswith("/api/health") and status_code < 500 and not path.startswith("/api/health/"):
+                return
 
             self._persist_queue.append(
                 {
@@ -893,12 +900,12 @@ class ObservabilityStore:
     async def purge_expired_events(self, session: AsyncSession) -> int:
         try:
             threshold = _now_utc() - timedelta(days=settings.observability_retention_days)
-            stmt = select(ObservabilityEvent).where(ObservabilityEvent.created_at < threshold)
-            expired = list((await session.execute(stmt)).scalars().all())
-            for item in expired:
-                await session.delete(item)
+            # One statement, not a row at a time through the ORM.
+            result = await session.execute(
+                delete(ObservabilityEvent).where(ObservabilityEvent.created_at < threshold)
+            )
             await session.flush()
-            return len(expired)
+            return int(result.rowcount or 0)
         except Exception:
             try:
                 await session.rollback()

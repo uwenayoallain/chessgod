@@ -137,3 +137,24 @@ it('settles a superseded sparring search with nothing', async () => {
   engine.analyze('c')
   await expect(superseded).resolves.toBeNull()
 })
+
+it('reports a worker that cannot be created through onError and settles init', async () => {
+  vi.stubGlobal('Worker', undefined)
+  const onError = vi.fn()
+  const engine = new StockfishEngine({
+    onInfo: vi.fn(),
+    onBestMove: vi.fn(),
+    onReady: vi.fn(),
+    onStatus: vi.fn(),
+    onError,
+  })
+  await expect(engine.init({ hash: 16, threads: 1 })).resolves.toBeUndefined()
+  expect(onError).toHaveBeenCalledOnce()
+  expect(onError.mock.calls[0][0]).toMatch(/Worker/)
+
+  // A later init tries again rather than replaying the failure.
+  vi.stubGlobal('Worker', FakeWorker)
+  await engine.init({ hash: 16, threads: 1 })
+  expect(FakeWorker.instance.commands.at(-1)).toMatchObject({ type: 'init', hash: 16, threads: 1 })
+  expect(onError).toHaveBeenCalledOnce()
+})

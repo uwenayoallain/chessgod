@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 
+import type { BoardArrow } from '@/lib/analysis/board-guidance'
+
 export const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -'
 
 function loadStoredUsername() {
@@ -82,6 +84,24 @@ function createRootNode(fen = STARTING_FEN, lastUci: string | null = null): Move
   }
 }
 
+function clearScopedArrows(state: {
+  trainerArrowsFen: string | null
+  trainerArrows: BoardArrow[]
+  hintSquare: string | null
+}) {
+  // Browse arrows (scoped to a position) die with the tree they were drawn
+  // for; a trainer's unscoped arrows are its own to manage. This is what stops
+  // a mistake row's answer arrows from surviving into a drill, the quiz or a
+  // game that later lands on the same position. A hint's square goes the same
+  // way: it belongs to the question, never to the next board.
+  return {
+    ...(state.trainerArrowsFen != null
+      ? { trainerArrows: [] as BoardArrow[], trainerArrowsFen: null }
+      : {}),
+    ...(state.hintSquare != null ? { hintSquare: null, hintSquareFen: null } : {}),
+  }
+}
+
 function pathToRoot(nodes: Record<string, MoveNode>, nodeId: string): MoveNode[] {
   const path: MoveNode[] = []
   let current = nodes[nodeId]
@@ -102,6 +122,10 @@ type AppState = {
   isLoadingGame: boolean
   importStatus: 'idle' | 'running' | 'complete' | 'error'
   importProgress: ImportProgress | null
+  // A sync the player did not ask for (coming back to the tab): it runs
+  // without the banner or the header's spinner, and says nothing unless
+  // games actually arrived.
+  importQuiet: boolean
   analysisRequested: boolean
 
   nodes: Record<string, MoveNode>
@@ -117,6 +141,19 @@ type AppState = {
   // True while a drill is waiting for the player's move. The board must not hint
   // at the answer with guidance arrows or move annotations while it is set.
   drillSolving: boolean
+  // Arrows a trainer draws on purpose ("play this", "that was the move"). When
+  // set they replace every other guidance arrow, which may give the answer away.
+  trainerArrows: BoardArrow[]
+  // When set, the arrows belong to this position only and disappear the moment
+  // the board leaves it. Trainers manage their own arrows and leave this null;
+  // browse surfaces (a mistake row, a deviation row) scope theirs so a stale
+  // arrow can never follow the player onto another position.
+  trainerArrowsFen: string | null
+  // A square a trainer's hint points at ("look at the knight on f3"), drawn as
+  // a ring on the board. Scoped to its position like a browse arrow, so it is
+  // gone the moment the board leaves the question it belongs to.
+  hintSquare: string | null
+  hintSquareFen: string | null
   // Bumped whenever the move tree is replaced wholesale (a game, a drill, an
   // opening or a cleared board). Anything that owns the current line — a
   // sparring game — compares it to know its line is gone.
@@ -130,6 +167,14 @@ type AppState = {
   loadReplay: (moves: ReplayMove[], startIndex?: number, source?: 'loaded' | 'free') => void
   clearLoadedLine: () => void
   setDrillSolving: (value: boolean) => void
+  setTrainerArrows: (arrows: BoardArrow[], forFen?: string | null) => void
+  setHintSquare: (square: string | null, forFen?: string | null) => void
+  /**
+   * Show a position that may already be in the loaded line. Jumping to the
+   * existing node keeps the game, its move list and its annotations; only a
+   * position outside the line falls back to pushing a branch.
+   */
+  jumpToFen: (fen: string) => void
   jumpToNode: (nodeId: string) => void
   jumpToIndex: (index: number) => void
   goBack: () => void
@@ -142,6 +187,7 @@ type AppState = {
   setTimeClassFilter: (value: string | null) => void
   setIsLoadingGame: (loading: boolean) => void
   setImportStatus: (status: AppState['importStatus']) => void
+  setImportQuiet: (quiet: boolean) => void
   setImportProgress: (progress: ImportProgress | null) => void
   setBookPlies: (plies: number[]) => void
   setAnalysisRequested: (requested: boolean) => void
@@ -176,6 +222,7 @@ export const useAppStore = create<AppState>((set, get) => {
     isLoadingGame: false,
     importStatus: 'idle',
     importProgress: null,
+    importQuiet: false,
     analysisRequested: false,
 
     nodes: initialNodes,
@@ -185,6 +232,10 @@ export const useAppStore = create<AppState>((set, get) => {
     bookPlies: [],
     hasLoadedLine: false,
     drillSolving: false,
+    trainerArrows: [],
+    trainerArrowsFen: null,
+    hintSquare: null,
+    hintSquareFen: null,
     treeEpoch: 0,
     ...initialCompat,
 
@@ -219,6 +270,7 @@ export const useAppStore = create<AppState>((set, get) => {
         analysisRequested: false,
         bookPlies: [],
         hasLoadedLine: false,
+        ...clearScopedArrows(state),
         ...compat,
       }))
     },
@@ -308,11 +360,31 @@ export const useAppStore = create<AppState>((set, get) => {
         currentFen: targetFen,
         analysisRequested: false,
         hasLoadedLine: source === 'loaded' && moves.length > 0,
+        ...clearScopedArrows(state),
         ...compat,
       }))
     },
 
     setDrillSolving: (value) => set({ drillSolving: value }),
+    setTrainerArrows: (arrows, forFen = null) =>
+      set({ trainerArrows: arrows, trainerArrowsFen: forFen }),
+    setHintSquare: (square, forFen = null) =>
+      set({ hintSquare: square, hintSquareFen: square ? forFen : null }),
+
+    jumpToFen: (fen) => {
+      const { nodes, mainLine } = get()
+      const matches = (node: MoveNode) =>
+        node.fen.split(' ', 4).join(' ') === fen.split(' ', 4).join(' ')
+      // Prefer the main line, so a position that also exists on a side branch
+      // lands where the move list expects it.
+      const onMain = mainLine.map((id) => nodes[id]).find((node) => node && matches(node))
+      const anywhere = onMain ?? Object.values(nodes).find(matches)
+      if (anywhere) {
+        get().jumpToNode(anywhere.id)
+        return
+      }
+      get().pushPosition(fen)
+    },
 
     clearLoadedLine: () => {
       nextNodeCounter = 0
@@ -330,6 +402,7 @@ export const useAppStore = create<AppState>((set, get) => {
         bookPlies: [],
         hasLoadedLine: false,
         drillSolving: false,
+        ...clearScopedArrows(state),
         ...compat,
       }))
     },
@@ -459,6 +532,7 @@ export const useAppStore = create<AppState>((set, get) => {
     },
     setIsLoadingGame: (isLoadingGame) => set({ isLoadingGame }),
     setImportStatus: (importStatus) => set({ importStatus }),
+    setImportQuiet: (importQuiet) => set({ importQuiet }),
     setImportProgress: (importProgress) => set({ importProgress }),
     setBookPlies: (bookPlies) => set({ bookPlies }),
     setAnalysisRequested: (analysisRequested) => set({ analysisRequested }),

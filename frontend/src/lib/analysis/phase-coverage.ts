@@ -96,5 +96,5 @@ export function describePhaseSkew(coverage: PhaseCoverage): string | null {
   const names = unexamined.map((row) => row.label.toLowerCase())
   const list =
     names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
-  return `Your ${list} play has barely been analyzed, so no lesson can come from it yet — that is a gap in the analysis, not a clean bill of health.`
+  return `Your ${list} play has barely been analyzed, so it has no lessons yet. That doesn't mean it has no mistakes.`
 }

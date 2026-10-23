@@ -17,8 +17,8 @@ export function MarkButton({
   if (!node.move?.uci) return null
 
   const label = node.marked
-    ? `Drop ${node.move.san} from your repertoire`
-    : `Mark ${node.move.san} as the line you mean to play`
+    ? `Remove ${node.move.san} from your repertoire`
+    : `Add ${node.move.san} to your repertoire`
 
   return (
     <Button

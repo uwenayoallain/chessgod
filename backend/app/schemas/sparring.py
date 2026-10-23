@@ -18,10 +18,16 @@ class SparringGameIn(BaseModel):
     start_fen: str = Field(min_length=10, max_length=100)
     moves_uci: list[str] = Field(default_factory=list, max_length=600)
     time_control_seconds: int | None = Field(default=None, ge=10, le=7200)
+    # Where the game came from: "boss:<line id>" when it was played from the end
+    # of a repertoire line. Not stored; it only decides the XP.
+    origin: str | None = Field(default=None, max_length=60, pattern=r"^[a-z]+:[A-Za-z0-9_-]+$")
+    tz: str | None = Field(default=None, max_length=64)
 
 
 class SparringGameCreated(BaseModel):
     id: int
+    # XP the game earned (services/training.py), a boss fight's included.
+    xp_gained: int = 0
 
 
 class SparringMistakeIn(BaseModel):
@@ -61,6 +67,9 @@ class SparringGameOut(BaseModel):
     mistakes: int
     time_control_seconds: int | None
     played_at: datetime
+    # The game itself, so a past game can be put back on the board and reviewed.
+    start_fen: str
+    moves_uci: list[str]
 
 
 class SparringSummaryOut(BaseModel):

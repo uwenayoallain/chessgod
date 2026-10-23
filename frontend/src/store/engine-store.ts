@@ -21,6 +21,7 @@ import type { UCIInfo } from '@/lib/stockfish/uci'
 import { STOCKFISH_ENGINE_ID } from '@/lib/stockfish/version'
 import { getTelemetryNowMs, reportFrontendEvent } from '@/lib/telemetry'
 import { useAppStore } from '@/store/app-store'
+import { useSparStore } from '@/store/spar-store'
 
 // Interactive "quick" analysis is capped lower for responsiveness; stable,
 // deep, and replay passes target this higher browser-computed depth.
@@ -109,6 +110,11 @@ type EngineState = {
    */
   playMove: (fen: string, options: { depth: number; multiPV: number }) => Promise<UCIInfo[] | null>
   stop: () => void
+  /**
+   * Drop board searches only, keeping a game review and the library crawl:
+   * for when nothing on screen reads the board any more.
+   */
+  stopInteractive: () => void
   setEngineDepth: (depth: number) => void
   highPerformance: boolean
   setHighPerformance: (value: boolean) => Promise<void>
@@ -146,6 +152,61 @@ let botSearchActive = false
 let reviewAbort: AbortController | null = null
 // Each pool engine keeps a small table: it searches one position at a time.
 const REVIEW_HASH_MB = 32
+
+/**
+ * The main engine is released after this long with nothing to do. Its worker
+ * holds ~450MB of wasm plus its hash (~0.95GB, ~1.45GB with the deeper search)
+ * and used to hold it from page load until the tab closed, Review tab and
+ * all. The next search builds a new one; re-init reads the net from the cache.
+ */
+export const ENGINE_IDLE_RELEASE_MS = 5 * 60_000
+let lastEngineActivity = 0
+let idleTimer: number | null = null
+
+function engineBusy() {
+  return (
+    activeFen !== null ||
+    queuedAnalyses.length > 0 ||
+    botSearchActive ||
+    reviewAbort !== null ||
+    analyzeTimer != null ||
+    stableAnalyzeTimer != null ||
+    // Between the opponent's moves nothing is searching, but the game needs it.
+    useSparStore.getState().status === 'playing'
+  )
+}
+
+function checkEngineIdle() {
+  idleTimer = null
+  if (!engine) return
+  const idleFor = Date.now() - lastEngineActivity
+  if (engineBusy() || idleFor < ENGINE_IDLE_RELEASE_MS) {
+    const wait = engineBusy() ? ENGINE_IDLE_RELEASE_MS : ENGINE_IDLE_RELEASE_MS - idleFor
+    idleTimer = window.setTimeout(checkEngineIdle, wait)
+    return
+  }
+  releaseEngine()
+}
+
+/** Record engine work, so the idle release counts from the last of it. */
+function touchEngine() {
+  lastEngineActivity = Date.now()
+  if (idleTimer == null && typeof window !== 'undefined') {
+    idleTimer = window.setTimeout(checkEngineIdle, ENGINE_IDLE_RELEASE_MS)
+  }
+}
+
+/** Tear the main worker down. Cached lines stay; only the worker goes. */
+function releaseEngine() {
+  if (idleTimer != null) {
+    window.clearTimeout(idleTimer)
+    idleTimer = null
+  }
+  if (!engine) return
+  engine.destroy()
+  engine = null
+  useEngineStore.setState({ isReady: false, isLoadingNnue: false, hasAttempted: false })
+}
 
 function abortGameReview() {
   reviewAbort?.abort()
@@ -209,7 +270,15 @@ async function runGameReview(jobs: AnalysisJob[]) {
         }),
       onResult: (job, lines) => recordReviewResult(job.fen, lines),
     })
+  } catch (error) {
+    // The review is started fire-and-forget, so a pool that cannot run at all
+    // (worker construction failed) must be reported here, not escape as an
+    // unhandled rejection with no finally cleanup observed.
+    emitEngineEvent('engine_error', {
+      error_message: error instanceof Error ? error.message : String(error),
+    })
   } finally {
+    touchEngine()
     if (reviewAbort === controller) {
       reviewAbort = null
       useEngineStore.setState({
@@ -499,6 +568,7 @@ function enqueueFen(fen: string, options: AnalyzeOptions = {}) {
 
 function completeActiveAnalysis(bestMove: string | null, provider = STOCKFISH_ENGINE_ID) {
   if (!activeFen) return
+  touchEngine()
   if (bestMove && !isLegalEngineMove(activeFen, bestMove)) return
 
   clearPositionTimeout()
@@ -589,6 +659,58 @@ function completeActiveAnalysis(bestMove: string | null, provider = STOCKFISH_EN
   void processQueue()
 }
 
+/**
+ * Stop the search in hand and keep what it reached, as an interrupt does: the
+ * lines found so far are cached, a replay job is counted as done.
+ */
+function interruptActive() {
+  engine?.stop()
+  if (pendingRafId !== null) {
+    cancelAnimationFrame(pendingRafId)
+    pendingRafId = null
+  }
+  const partialFen = activeFen
+  const partialLines = partialFen ? storableLines(partialFen, activeLines) : []
+  if (partialFen && partialLines.length) {
+    useEngineStore.setState((s) => ({
+      analysisByFen: trimAnalysisCache(
+        {
+          ...s.analysisByFen,
+          [partialFen]: mergeEngineAnalysis(s.analysisByFen[partialFen], {
+            bestMove: partialLines[0]?.pv[0] || null,
+            depth: partialLines.find((line) => line.multipv === 1)?.depth ?? 0,
+            engine: STOCKFISH_ENGINE_ID,
+            lines: partialLines,
+          }),
+        },
+        partialFen,
+      ),
+      analysisVersion: s.analysisVersion + 1,
+    }))
+  }
+  if (activeQueueItem?.source === 'replay') {
+    useEngineStore.setState((s) => {
+      const progress = completeReplayJob({
+        completed: s.replayQueueCompleted,
+        total: s.replayQueueTotal,
+      })
+      return {
+        replayQueueCompleted: progress.completed,
+        replayQueueActive: progress.active,
+      }
+    })
+  }
+  clearPositionTimeout()
+  activeFen = null
+  activeQueueItem = null
+  activeLines = []
+  activeDepth = 0
+  activeStartedAt = null
+  activeLastNps = null
+  useEngineStore.setState({ activeMode: null })
+  activeGeneration += 1
+}
+
 async function processQueue(interrupt = false) {
   const state = useEngineStore.getState()
 
@@ -598,51 +720,7 @@ async function processQueue(interrupt = false) {
 
   if (activeFen) {
     if (!interrupt) return
-    engine?.stop()
-    if (pendingRafId !== null) {
-      cancelAnimationFrame(pendingRafId)
-      pendingRafId = null
-    }
-    const partialFen = activeFen
-    const partialLines = partialFen ? storableLines(partialFen, activeLines) : []
-    if (partialFen && partialLines.length) {
-      useEngineStore.setState((s) => ({
-        analysisByFen: trimAnalysisCache(
-          {
-            ...s.analysisByFen,
-            [partialFen]: mergeEngineAnalysis(s.analysisByFen[partialFen], {
-              bestMove: partialLines[0]?.pv[0] || null,
-              depth: partialLines.find((line) => line.multipv === 1)?.depth ?? 0,
-              engine: STOCKFISH_ENGINE_ID,
-              lines: partialLines,
-            }),
-          },
-          partialFen,
-        ),
-        analysisVersion: s.analysisVersion + 1,
-      }))
-    }
-    if (activeQueueItem?.source === 'replay') {
-      useEngineStore.setState((s) => {
-        const progress = completeReplayJob({
-          completed: s.replayQueueCompleted,
-          total: s.replayQueueTotal,
-        })
-        return {
-          replayQueueCompleted: progress.completed,
-          replayQueueActive: progress.active,
-        }
-      })
-    }
-    clearPositionTimeout()
-    activeFen = null
-    activeQueueItem = null
-    activeLines = []
-    activeDepth = 0
-    activeStartedAt = null
-    activeLastNps = null
-    useEngineStore.setState({ activeMode: null })
-    activeGeneration += 1
+    interruptActive()
   }
 
   const nextItem = queuedAnalyses.shift()
@@ -672,6 +750,7 @@ async function processQueue(interrupt = false) {
   }
 
   const generation = activeGeneration
+  touchEngine()
   await state.init()
   if (activeGeneration !== generation || activeFen !== nextItem.fen) return
 
@@ -808,6 +887,7 @@ export const useEngineStore = create<EngineState>((set, get) => ({
   replayQueueKind: null,
   highPerformance: readHighPerformance(),
   init: async () => {
+    touchEngine()
     const currentEngine = ensureEngine()
     await currentEngine.init({
       hash: getHashSize(get().highPerformance),
@@ -1015,8 +1095,16 @@ export const useEngineStore = create<EngineState>((set, get) => ({
       })
     } finally {
       botSearchActive = false
+      touchEngine()
       void processQueue()
     }
+  },
+  stopInteractive: () => {
+    clearAnalyzeTimer()
+    queuedAnalyses = queuedAnalyses.filter((job) => job.source !== 'interactive')
+    if (activeQueueItem?.source === 'interactive') interruptActive()
+    if (queuedAnalyses.length) void processQueue()
+    else if (!activeFen) set({ activeMode: null, isAnalyzing: false })
   },
   stop: () => {
     clearAnalyzeTimer()
@@ -1076,6 +1164,8 @@ export const useEngineStore = create<EngineState>((set, get) => ({
         replayQueueTotal: 0,
         replayQueueStartedAt: null,
       })
+      // Turned off by hand: give the memory back now, not in five minutes.
+      releaseEngine()
       return
     }
     set({ enabled: true, error: null })
@@ -1168,6 +1258,8 @@ export const useEngineStore = create<EngineState>((set, get) => ({
     const primaryStable = options.stable ?? options.deep ?? Boolean(cachedAnalysis)
 
     analyzeTimer = window.setTimeout(() => {
+      // Spent: a fired timer left set reads as pending work forever.
+      analyzeTimer = null
       const prio = options.priority ?? 'high'
       const enqueued = enqueueFen(fen, {
         ...options,
@@ -1180,6 +1272,7 @@ export const useEngineStore = create<EngineState>((set, get) => ({
 
     if (!options.deep && !cachedAnalysis && (options.priority ?? 'high') === 'high') {
       stableAnalyzeTimer = window.setTimeout(() => {
+        stableAnalyzeTimer = null
         if (useAppStore.getState().currentFen !== fen) return
         enqueueFen(fen, { depth: requestedDepth, priority: 'high', stable: true })
         void processQueue(false)

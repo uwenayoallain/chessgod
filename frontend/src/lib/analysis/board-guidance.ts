@@ -6,6 +6,12 @@ import { findOpponentHangingPieceThreat } from './hanging-threats'
 // Amber reads on both square colors; red is reserved for the threat arrow.
 export const BEST_MOVE_ARROW_COLOR = 'rgba(255, 170, 0, 0.85)'
 export const THREAT_ARROW_COLOR = 'rgba(214, 60, 45, 0.8)'
+/**
+ * "Play this" — a trainer's hint or answer arrow. Blue, not the app's green:
+ * the dark squares are green (#739552), and a green arrow vanished on them.
+ * Every mark on the board contrasts with the squares, never with the theme.
+ */
+export const PLAY_ARROW_COLOR = 'rgba(36, 98, 214, 0.92)'
 export const LAST_MOVE_SQUARE = 'rgba(255, 255, 51, 0.42)'
 
 export type BoardArrow = {

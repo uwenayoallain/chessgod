@@ -56,3 +56,31 @@ it('keeps what a deep look reached when it runs out of time', async () => {
   expect(stored?.bestMove).toBe('c7c5')
   expect(mock.report).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'engine_error' }))
 })
+
+it('stops a board search when nothing reads the board, keeping what it reached', async () => {
+  vi.useFakeTimers()
+  vi.stubGlobal('window', { setTimeout, clearTimeout })
+  vi.stubGlobal('requestAnimationFrame', () => 0)
+  vi.stubGlobal('cancelAnimationFrame', () => {})
+  const fen = 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -'
+  useEngineStore.setState({ enabled: true, analysisByFen: {} })
+  await useEngineStore.getState().analyzePosition(fen, { depth: 30, deep: true })
+  await vi.advanceTimersByTimeAsync(100)
+  mock.callbacks!.onInfo({
+    depth: 19,
+    seldepth: null,
+    multipv: 1,
+    score: { type: 'cp', value: 10 },
+    nodes: null,
+    nps: null,
+    time: null,
+    pv: ['d7d5', 'c2c4'],
+  })
+  await vi.advanceTimersByTimeAsync(50)
+
+  useEngineStore.getState().stopInteractive()
+
+  // Stopped at once rather than running on to its 90s timeout.
+  expect(useEngineStore.getState().isAnalyzing).toBe(false)
+  expect(useEngineStore.getState().analysisByFen[fen]?.depth).toBe(19)
+})

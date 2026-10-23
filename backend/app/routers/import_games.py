@@ -5,6 +5,7 @@ import json
 import logging
 from datetime import UTC, datetime
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,8 +15,8 @@ from app.database import async_session_factory, get_db
 from app.models.game import Game
 from app.models.import_job import ImportEvent, ImportJob
 from app.services.import_jobs import (
-    ImportEventPublisher, ImportJobInactive, create_import_job,
-    expire_stale_import_jobs, guard_import_commit,
+    TERMINAL_EVENT_TYPES, ImportEventPublisher, ImportJobInactive, cancel_import_job,
+    create_import_job, expire_stale_import_jobs, guard_import_commit,
 )
 from app.schemas.import_progress import ImportSummary
 from app.services.chesscom import ChessComClient
@@ -130,9 +131,12 @@ async def build_import_summary(session: AsyncSession, username: str) -> ImportSu
     )
 
 
-async def run_import(username: str, request: Request, force: bool = False, *, job_id: str) -> None:
+async def run_import(
+    username: str, http_client: httpx.AsyncClient, force: bool = False, *, job_id: str,
+) -> int | None:
+    """Import the player's archives. Returns the new games, or None when the import failed."""
     queue = ImportEventPublisher(job_id)
-    client = ChessComClient(request.app.state.http_client)
+    client = ChessComClient(http_client)
     total_new_games = 0
     total_skipped = 0
     total_cached_archives = 0
@@ -315,9 +319,12 @@ async def run_import(username: str, request: Request, force: bool = False, *, jo
             }
         )
     except ImportJobInactive:
-        logger.info("Stopped expired import job %s", job_id)
+        logger.info("Stopped import job %s: no longer running (expired or cancelled)", job_id)
+        return None
     except Exception as exc:
         await queue.put({"type": "error", "message": str(exc)})
+        return None
+    return total_new_games
 
 
 @router.post("/{username}")
@@ -333,12 +340,25 @@ async def start_import(
     if job_id is None:
         raise HTTPException(status_code=409, detail="An import for this player is already running")
     await session.commit()
-    background_tasks.add_task(run_import, username, request, force, job_id=job_id)
+    background_tasks.add_task(run_import, username, request.app.state.http_client, force, job_id=job_id)
     return {
         "job_id": job_id,
         "message": "Import started",
         "mode": "force" if force else "cached",
     }
+
+
+@router.post("/{username}/stop")
+async def stop_import(username: str) -> dict[str, str]:
+    """Cancel the running import. The background worker notices on its next
+    event and unwinds; archives already committed stay imported and are
+    served from the cache on the next run."""
+    async with async_session_factory() as session:
+        job_id = await cancel_import_job(session, username)
+        if job_id is None:
+            raise HTTPException(status_code=404, detail="No import in progress")
+        await session.commit()
+    return {"job_id": job_id, "status": "cancelled"}
 
 
 @router.get("/{username}/status")
@@ -371,7 +391,7 @@ async def import_status(username: str, request: Request):
             for event in events:
                 cursor = event.id
                 yield {"id": f"{job_id}:{cursor}", "data": json.dumps(event.payload)}
-                if event.payload.get("type") in {"complete", "error"}:
+                if event.payload.get("type") in TERMINAL_EVENT_TYPES:
                     return
             if not events and status != "running":
                 return

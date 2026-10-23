@@ -10,7 +10,7 @@ export function BackgroundTasksPanel({ tasks }: Props) {
   return (
     <Card>
       <CardHeader>
-        <h2>Background Tasks</h2>
+        <h2>Background tasks</h2>
       </CardHeader>
       <CardBody>
         <table className="table">

@@ -11,7 +11,7 @@ export function QueriesPanel({ templates, slow }: Props) {
   return (
     <Card>
       <CardHeader>
-        <h2>Database Queries</h2>
+        <h2>Database queries</h2>
       </CardHeader>
       <CardBody className="column admin-observability__panel-stack">
         <div>

@@ -25,6 +25,7 @@ from app.schemas.sparring import (
     SparringSummaryOut,
 )
 from app.utils.fen import normalize_fen
+from app.services import training
 
 router = APIRouter()
 
@@ -109,8 +110,20 @@ async def save_game(
         time_control_seconds=payload.time_control_seconds,
     )
     session.add(game)
+    await session.flush()
+    xp = await training.award(session, payload.username, "sparring_game",
+                              detail={"result": payload.result}, request_id=f"sparring:{game.id}")
+    if payload.origin and payload.origin.startswith("boss:"):
+        # A draw from a line's end is holding the position; that counts as beating it.
+        beaten = payload.result in ("win", "draw")
+        xp += await training.award(
+            session, payload.username, "boss_defeated" if beaten else "boss_fought",
+            detail={"line_id": payload.origin.removeprefix("boss:"), "result": payload.result},
+            request_id=f"boss:{game.id}",
+        )
+    await training.settle_quests(session, payload.username, tz=payload.tz)
     await session.commit()
-    return SparringGameCreated(id=game.id)
+    return SparringGameCreated(id=game.id, xp_gained=xp)
 
 
 @router.post("/games/{game_id}/mistakes", response_model=SparringMistakesStored)
@@ -204,6 +217,8 @@ async def history(
                 mistakes=int(count),
                 time_control_seconds=game.time_control_seconds,
                 played_at=game.played_at,
+                start_fen=game.start_fen,
+                moves_uci=game.moves_uci.split() if game.moves_uci else [],
             )
             for game, count in rows
         ],

@@ -8,14 +8,13 @@ import { EngineBar } from '@/components/analysis/engine-bar'
 import { Button } from '@/components/ui/button'
 import { BEST_MOVE_ARROW_COLOR, THREAT_ARROW_COLOR } from '@/lib/analysis/board-guidance'
 import { shouldShowBoardAnnotations } from '@/lib/board-annotations'
-import { useEngine } from '@/hooks/use-engine'
 import type { WorkspaceGame } from '@/hooks/use-workspace-data'
 import { useChessGame } from '@/hooks/use-chess-game'
 import { useMoveMarkers } from '@/hooks/use-move-markers'
 import { formatGameDate } from '@/lib/format-date'
 import { useAppStore } from '@/store/app-store'
 import { useEngineStore } from '@/store/engine-store'
-import { useIsSparring } from '@/store/spar-store'
+import { useIsSparring, useSparStore } from '@/store/spar-store'
 
 const PIECE_FILL = { w: '#ffffff', b: '#312e2b' } as const
 const PIECE_COLOR = { w: 'White', b: 'Black' } as const
@@ -75,15 +74,21 @@ export function ChessBoard({
 }) {
   const boardOrientation = useAppStore((state) => state.boardOrientation)
   const { position, squareStyles, onPieceDrag, onPieceDrop, onSquareClick } = useChessGame()
-  const { enabled, toggle, isLoadingNnue } = useEngine({ autoAnalyze: false })
+  // Three fields, not the whole engine: the board redrew on every line.
+  const enabled = useEngineStore((state) => state.enabled)
+  const toggle = useEngineStore((state) => state.toggle)
+  const isLoadingNnue = useEngineStore((state) => state.isLoadingNnue)
   const engineDepth = useEngineStore((state) => state.engineDepth)
   const setEngineDepth = useEngineStore((state) => state.setEngineDepth)
 
   const isSolvingDrill = useAppStore((state) => state.drillSolving)
   const sparring = useIsSparring()
+  const sparReview = useSparStore((state) => state.reviewing)
+  const treeEpoch = useAppStore((state) => state.treeEpoch)
   const showAnnotations = shouldShowBoardAnnotations({
     hasActiveGame: Boolean(activeGame),
     hasSelectedOpening: Boolean(selectedOpening),
+    hasSparringReview: sparReview !== null && sparReview.epoch === treeEpoch,
     // A sparring game is a question being answered move by move, like a drill.
     isSolvingDrill: isSolvingDrill || sparring,
   })
@@ -243,10 +248,12 @@ export function ChessBoard({
           </select>
         ) : null}
         {enabled && isLoadingNnue ? (
-          <span className="board-engine__status">Loading neural network…</span>
+          <span className="board-engine__status">Starting the engine…</span>
         ) : null}
-        {sparring ? (
-          <span className="board-engine__status">Evaluation hidden while you play</span>
+        {sparring || isSolvingDrill ? (
+          <span className="board-engine__status">
+            {sparring ? 'Evaluation hidden while you play' : 'Evaluation hidden while you solve'}
+          </span>
         ) : (
           <EngineBar />
         )}

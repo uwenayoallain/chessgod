@@ -9,7 +9,7 @@ const CHESSCOM_404 =
 describe('describeImportError', () => {
   it('explains the commonest failure: a mistyped username', () => {
     expect(describeImportError(CHESSCOM_404, 'zzz-nope')).toBe(
-      'Chess.com has no account called “zzz-nope”. Check the spelling — this is your Chess.com username, not your email address.',
+      'Chess.com has no account called “zzz-nope”. Check the spelling, and use your Chess.com username, not your email address.',
     )
   })
 

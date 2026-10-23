@@ -59,16 +59,22 @@ function FamilyBranch({
             <strong>{family.display_name}</strong>
             {family.eco ? <span className="badge">{family.eco}</span> : null}
           </div>
+          {/* Games count right-aligned so it forms a column down the list,
+              whatever width the variation count takes. */}
           <div className="family-row__meta">
-            <span>{family.child_count} branches</span>
-            <span>{family.user_game_count.toLocaleString()} games</span>
+            <span>
+              {family.child_count} {family.child_count === 1 ? 'variation' : 'variations'}
+            </span>
+            <span className="workspace-list__date">
+              {family.user_game_count.toLocaleString()} games
+            </span>
           </div>
         </button>
       </div>
       {expanded ? (
         <div className="family-branch__children">
           {showInitialChildLoading ? (
-            <div className="family-row family-row--loading">Loading branches…</div>
+            <div className="family-row family-row--loading">Loading variations…</div>
           ) : null}
           {sortedChildren.map((child) => (
             <FamilyBranch
@@ -107,25 +113,29 @@ export function FamilyBrowser({
   return (
     <Card className="family-browser">
       <CardHeader>
-        <h2>Opening Families</h2>
+        <h2>Your openings</h2>
         <div className="panel-header__meta">
           {families.isRefreshing ? <span className="refresh-badge">Updating</span> : null}
           <span className="muted">
-            {showInitialLoading ? 'Loading' : `${families.data.length} roots`}
+            {showInitialLoading ? 'Loading' : `${families.data.length}`}
           </span>
         </div>
       </CardHeader>
       <CardBody className="family-browser__body">
         {showInitialLoading ? (
-          <PanelSkeleton label="Loading opening families" rowHeight={52} rows={8} />
+          <PanelSkeleton label="Loading your openings" rowHeight={52} rows={8} />
         ) : null}
         {families.error && !families.data.length && !families.isLoading ? (
-          <PanelError error={families.error} what="your opening families" />
+          <PanelError error={families.error} what="your openings" />
         ) : null}
         {!families.isLoading && !families.error && !families.data.length ? (
           <div className="rail-empty">
-            <strong>No families</strong>
-            <span>Nothing matches these filters.</span>
+            <strong>No openings</strong>
+            <span>
+              {color !== 'both' || timeClass
+                ? 'Nothing matches these filters.'
+                : 'Import games to see the openings you play.'}
+            </span>
           </div>
         ) : null}
         {sortedFamilies.map((family) => (

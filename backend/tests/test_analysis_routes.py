@@ -251,3 +251,37 @@ async def test_get_evaluations_returns_persisted_line_data_for_cache_hydration()
         assert result["fen-a"].multipv_rank == 1
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_activity_reports_when_the_engine_last_stored_anything() -> None:
+    # A stalled crawl leaves no error, only a coverage number that stops
+    # moving; the page reads this to tell "still working" from "stopped".
+    from datetime import timedelta
+
+    from app.routers.analysis import _ACTIVITY_CACHE_KEY, analysis_activity
+
+    await get_shared_cache().delete_prefix(_ACTIVITY_CACHE_KEY)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            now = datetime.now(UTC)
+            session.add_all([Position(id=1, fen=START), Position(id=2, fen=SECOND)])
+            session.add_all([
+                AnalysisResult(position_id=1, depth=22, eval_cp=30, best_move_uci="e2e4",
+                               best_move_san="e4", engine="stockfish-19", engine_version="19",
+                               analyzed_at=now - timedelta(minutes=5)),
+                AnalysisResult(position_id=2, depth=22, eval_cp=20, best_move_uci="e7e5",
+                               best_move_san="e5", engine="stockfish-19", engine_version="19",
+                               analyzed_at=now - timedelta(hours=5)),
+            ])
+            await session.commit()
+            activity = await analysis_activity(session=session)
+            assert activity["stored_last_hour"] == 1
+            assert activity["stored_last_24h"] == 2
+            assert 4 <= activity["minutes_since"] <= 6
+    finally:
+        await get_shared_cache().delete_prefix(_ACTIVITY_CACHE_KEY)
+        await engine.dispose()

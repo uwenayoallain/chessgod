@@ -11,6 +11,7 @@ const COMPLETE_VISIBLE_MS = 8000
 export function ImportProgress() {
   const progress = useAppStore((state) => state.importProgress)
   const status = useAppStore((state) => state.importStatus)
+  const quiet = useAppStore((state) => state.importQuiet)
   const [dismissed, setDismissed] = useState(false)
 
   // An import that simply vanishes leaves the user unsure whether it worked.
@@ -35,6 +36,8 @@ export function ImportProgress() {
   if (status !== 'running' && !(isComplete && progress)) {
     return null
   }
+  // A sync the player did not ask for shows nothing until it finds games.
+  if (quiet) return null
   if (isComplete && dismissed) {
     return null
   }

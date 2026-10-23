@@ -34,7 +34,7 @@ def test_parse_game_pgn_extracts_positions_and_metadata() -> None:
     assert parsed.black_username == "beta"
     assert parsed.result == "1-0"
     assert parsed.eco == "C20"
-    assert parsed.opening_name == "Kings Pawn Game"
+    assert parsed.opening_name == "King's Pawn Game"
     assert parsed.time_control == "600"
     assert parsed.white_rating == 1500
     assert parsed.black_rating == 1480

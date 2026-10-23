@@ -90,3 +90,13 @@ for (const bound of ['lowerbound', 'upperbound']) {
     })
   }
 }
+
+test('each MultiPV line keeps its rank, flipped like any other score', () => {
+  const second = parseInfoLine(
+    'info depth 18 seldepth 25 multipv 2 score cp 20 nodes 900 pv g8f6 d2d3', 'b',
+  )
+  assert.equal(second.multipv, 2)
+  assert.equal(second.evalCp, -20)
+  assert.equal(second.bestMoveUci, 'g8f6')
+  assert.equal(parseInfoLine('info depth 18 score cp 5 pv e2e4', 'w').multipv, 1)
+})

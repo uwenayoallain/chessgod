@@ -1,6 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
 
+import { useApplyReward } from '@/hooks/use-training'
+import { browserTimeZone } from '@/lib/training/progress'
 import { api } from '@/lib/api'
 
 export type Recurrence = 'habit' | 'repeated' | 'one_off'
@@ -183,7 +185,6 @@ export function useImprovementPlan({
   patternKey?: string | null
   enabled?: boolean
 }) {
-  const queryClient = useQueryClient()
   const trainingTimeClass = getTrainingTimeClass(timeClass)
   const query = useQuery({
     enabled: enabled && Boolean(username),
@@ -195,7 +196,6 @@ export function useImprovementPlan({
           username,
           color,
           time_class: trainingTimeClass,
-          min_user_rating: 1000,
           pattern_key: patternKey || undefined,
         },
       })
@@ -211,6 +211,7 @@ export function useImprovementPlan({
         : undefined,
     staleTime: 2 * 60 * 1000,
   })
+  const applyReward = useApplyReward(username)
   const attempt = useMutation({
     mutationFn: async (payload: DrillAttempt) => {
       const response = await api.post<{
@@ -218,13 +219,18 @@ export function useImprovementPlan({
         follow_up_correct: boolean | null
         intent_matched: boolean | null
         intent_feedback: string | null
-      }>('/api/improvement/attempts', payload, { timeout: 15_000 })
+        xp_gained?: number
+      }>('/api/improvement/attempts', { ...payload, tz: browserTimeZone() }, { timeout: 15_000 })
       return response.data
     },
-    onSuccess: (_result, payload) => {
-      // Run at the mutation level so a completed save refreshes progress even
-      // after its trainer unmounts. Do not delay grading on the follow-up GET.
-      void queryClient.invalidateQueries({ queryKey: ['improvement-plan', payload.username] })
+    onSuccess: (result) => {
+      void applyReward(
+        { xp_gained: result.xp_gained ?? 0 },
+        result.correct && result.follow_up_correct !== false ? 'Drill solved' : 'Drill attempted',
+      )
+      // The reward's refresh covers the plan, at the mutation level, so a
+      // completed save refreshes progress even after its trainer unmounts and
+      // never delays the grade on the follow-up GET.
     },
     retry: (failureCount, error) =>
       failureCount < 2 && isAxiosError(error) && (!error.response || error.response.status >= 500),

@@ -24,6 +24,7 @@ export function parseInfoLine(line, sideToMove) {
   const cp = /\bscore cp (-?\d+)/.exec(line)
   const mate = /\bscore mate (-?\d+)/.exec(line)
   const pv = /\bpv (.+)$/.exec(line)
+  const multipv = /\bmultipv (\d+)/.exec(line)
   if (!depth || (!cp && !mate)) return null
   // Stockfish reports from the side to move; the database stores White's view.
   const perspective = sideToMove === 'b' ? -1 : 1
@@ -33,6 +34,7 @@ export function parseInfoLine(line, sideToMove) {
     evalMate: mate ? Number(mate[1]) * perspective : null,
     bestMoveUci: pv ? pv[1].split(' ')[0] : null,
     pvUci: pv ? pv[1] : null,
+    multipv: multipv ? Number(multipv[1]) : 1,
   }
 }
 
@@ -89,8 +91,14 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
   let searching = false
   let poisoned = false
 
-  /** Search one position and resolve with the deepest info line seen. */
-  function analyse(fen, depth) {
+  /**
+   * Search one position and resolve with the deepest info line seen.
+   *
+   * With `multiPV` above one, `lines` holds every ranked line of the last
+   * depth the engine completed for all of them, so the candidates are
+   * compared inside one search — what a repertoire choice needs.
+   */
+  function analyse(fen, depth, { multiPV = 1 } = {}) {
     if (poisoned) return Promise.reject(Object.assign(
       new Error('engine did not stop; cannot safely reuse it'), { fatal: true },
     ))
@@ -100,6 +108,7 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
     const mine = ++generation
     return new Promise((resolve, reject) => {
       let best = null
+      const ranked = new Map()
       let timedOut = false
       const softTimer = setTimeout(() => {
         timedOut = true
@@ -121,8 +130,11 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
         if (mine !== generation) return
         if (line.startsWith('info depth')) {
           const info = parseInfoLine(line, sideToMove)
+          if (!info) return
+          const previous = ranked.get(info.multipv)
+          if (!previous || info.depth >= previous.depth) ranked.set(info.multipv, info)
           // Keep the deepest completed line; Stockfish can finish past the ask.
-          if (info && (!best || info.depth >= best.depth)) best = info
+          if (info.multipv === 1 && (!best || info.depth >= best.depth)) best = info
           return
         }
         if (line.startsWith('bestmove')) {
@@ -138,13 +150,20 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
           }
           const move = line.split(' ')[1]
           try {
-            resolve(finishSearch(best, move, depth))
+            const result = finishSearch(best, move, depth)
+            // Only lines searched as deep as the best one belong to its search.
+            result.lines = result.terminal
+              ? []
+              : [...ranked.values()]
+                  .filter((info) => info.depth === result.depth && info.pvUci)
+                  .sort((a, b) => a.multipv - b.multipv)
+            resolve(result)
           } catch (error) {
             reject(error)
           }
         }
       }
-      engine.uci('setoption name MultiPV value 1')
+      engine.uci(`setoption name MultiPV value ${multiPV}`)
       engine.uci(`position fen ${fen}`)
       engine.uci(`go depth ${depth}`)
     })

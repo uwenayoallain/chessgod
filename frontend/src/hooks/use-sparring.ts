@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Chess } from 'chess.js'
 import { useQuery } from '@tanstack/react-query'
 
 import { useImportSummary } from '@/hooks/use-import-summary'
+import { useTrainingStore } from '@/store/training-store'
 import { useAnalyzeLine } from '@/hooks/use-analyze-line'
 import { theoryQuery } from '@/hooks/use-theory'
 import type { ActiveReplayLine } from '@/lib/analysis/active-line'
@@ -22,9 +24,12 @@ import {
   timeoutOutcome,
   type SparColor,
 } from '@/lib/sparring/sparring'
-import { useAppStore } from '@/store/app-store'
+import { revealSection } from '@/components/ui/collapsible-section'
+import { useAppStore, type ReplayMove } from '@/store/app-store'
 import { useEngineStore } from '@/store/engine-store'
 import { clockRemaining, resolveSparElo, useSparStore } from '@/store/spar-store'
+import { useApplyReward } from '@/hooks/use-training'
+import { browserTimeZone } from '@/lib/training/progress'
 
 /** Give up on a move after this many searches came back empty. */
 const MAX_EMPTY_SEARCHES = 3
@@ -72,17 +77,36 @@ export function useSparringController() {
   }, [chargeMove, currentFen, currentNodeId, epoch, isLeaf, playing, timed, treeEpoch])
 
   // The flag: whoever's clock reaches zero loses, unless the other side
-  // cannot mate. Checked on a short timer, since nothing else happens then.
+  // cannot mate. One timer set for the moment the running clock would reach
+  // zero, re-set whenever the clocks change, instead of a check every 100ms.
   useEffect(() => {
     if (!playing || !timed) return
-    const timer = window.setInterval(() => {
+    let timer: number | undefined
+    const arm = () => {
+      window.clearTimeout(timer)
       const state = useSparStore.getState()
       const side = state.clockSide
       if (state.status !== 'playing' || !side) return
-      if ((clockRemaining(state, side, Date.now()) ?? 1) > 0) return
+      const left = clockRemaining(state, side, Date.now()) ?? 1
+      if (left > 0) {
+        timer = window.setTimeout(arm, left + 10)
+        return
+      }
       finish(timeoutOutcome(state.clockFen ?? currentFen, side, userColor), username)
-    }, 100)
-    return () => window.clearInterval(timer)
+    }
+    arm()
+    const unsubscribe = useSparStore.subscribe((next, previous) => {
+      if (
+        next.clockSide !== previous.clockSide ||
+        next.turnStartedAt !== previous.turnStartedAt ||
+        next.clocks !== previous.clocks
+      )
+        arm()
+    })
+    return () => {
+      window.clearTimeout(timer)
+      unsubscribe()
+    }
   }, [currentFen, finish, playing, timed, userColor, username])
 
   // A game, a drill or an opening loaded over the sparring line ends the game.
@@ -199,7 +223,15 @@ export function useStartSparring(username: string, onBeforeNewGame: () => void) 
    * Play a given position out, the side to move being the player's. Always
    * unrated: a position handed over mid-game is already won or lost.
    */
-  function playOut({ fen, lastUci = null }: { fen: string; lastUci?: string | null }) {
+  function playOut({
+    fen,
+    lastUci = null,
+    origin = null,
+  }: {
+    fen: string
+    lastUci?: string | null
+    origin?: string | null
+  }) {
     const color = sideToMove(fen)
     prepareEngine()
     onBeforeNewGame()
@@ -211,6 +243,7 @@ export function useStartSparring(username: string, onBeforeNewGame: () => void) 
       rated: false,
       epoch: useAppStore.getState().treeEpoch,
       fen,
+      origin,
     })
   }
 
@@ -245,6 +278,8 @@ export type SparringHistory = {
     mistakes: number
     time_control_seconds: number | null
     played_at: string
+    start_fen: string
+    moves_uci: string[]
   }>
 }
 
@@ -280,13 +315,16 @@ export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: A
   const userColor = useSparStore((state) => state.userColor)
   const elo = useSparStore((state) => state.elo)
   const rated = useSparStore((state) => state.rated)
+  const origin = useSparStore((state) => state.origin)
   const timeControl = useSparStore((state) => state.timeControlSeconds)
   const savedGameId = useSparStore((state) => state.savedGameId)
   const mistakesPosted = useSparStore((state) => state.mistakesPosted)
   const reviewing = useSparStore((state) => state.reviewing)
   const recordSaved = useSparStore((state) => state.recordSaved)
   const recordMistakes = useSparStore((state) => state.recordMistakes)
+  const settleReview = useSparStore((state) => state.settleReview)
   const username = useAppStore((state) => state.username)
+  const applyReward = useApplyReward(username)
   const treeEpoch = useAppStore((state) => state.treeEpoch)
   const reviewActive = useEngineStore((state) => state.replayQueueActive)
   const { analyzeLine } = useAnalyzeLine()
@@ -312,6 +350,11 @@ export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: A
     }, 15_000)
     return () => window.clearTimeout(timer)
   }, [savedGameId])
+  // The panel reads it from the store: "Reviewing…" must end when the review does,
+  // whether or not the drill post behind it succeeds.
+  useEffect(() => {
+    if (reviewSettled) settleReview()
+  }, [reviewSettled, settleReview])
 
   useEffect(() => {
     if (status !== 'over' || !outcome || !username || savedFor.current === epoch) return
@@ -320,7 +363,7 @@ export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: A
     setReviewSettled(false)
     void analyzeLine({ depth: QUICK_REVIEW_DEPTH })
     void api
-      .post<{ id: number }>('/api/sparring/games', {
+      .post<{ id: number; xp_gained?: number }>('/api/sparring/games', {
         username,
         user_color: userColor,
         engine_rating: elo,
@@ -330,9 +373,25 @@ export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: A
         start_fen: line.fenHistory[0],
         moves_uci: line.replayMoves.map((move) => move.uci),
         time_control_seconds: timeControl,
+        origin: origin ?? undefined,
+        tz: browserTimeZone(),
       })
       .then((response) => {
         recordSaved(response.data.id)
+        // A game earns XP on the server; a boss fight earns more.
+        void applyReward(
+          { xp_gained: response.data.xp_gained ?? 0 },
+          origin?.startsWith('boss:') ? 'Boss fight' : 'Game vs the engine',
+        )
+        // Holding a line's end against the engine is the course's final exam.
+        if (origin?.startsWith('boss:') && outcome.result !== 'loss') {
+          useTrainingStore.getState().celebrate({
+            kind: 'achievement',
+            title: outcome.result === 'win' ? 'Boss beaten' : 'Boss held to a draw',
+            detail: 'You carried the line past the opening against the engine.',
+            visual: { kind: 'icon', name: 'crown' },
+          })
+        }
         void queryClient.invalidateQueries({ queryKey: sparringHistoryKey(username) })
       })
       .catch(() => {
@@ -340,9 +399,11 @@ export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: A
       })
   }, [
     analyzeLine,
+    applyReward,
     elo,
     epoch,
     line,
+    origin,
     outcome,
     rated,
     recordSaved,
@@ -372,7 +433,9 @@ export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: A
         void queryClient.invalidateQueries({ queryKey: ['improvement-plan'] })
         void queryClient.invalidateQueries({ queryKey: sparringHistoryKey(username) })
       })
-      .catch(() => {})
+      // The game is saved and reviewed either way; only the drills are missing,
+      // and the panel says so rather than reading "Reviewing…" forever.
+      .catch(() => recordMistakes('failed'))
   }, [
     annotations,
     line,
@@ -384,4 +447,40 @@ export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: A
     treeEpoch,
     username,
   ])
+}
+
+/** The moves of a saved game replayed from its start position, as the board loads them. */
+export function replayOfSparringGame(startFen: string, movesUci: string[]): ReplayMove[] {
+  const board = new Chess(startFen.split(' ').length >= 6 ? startFen : `${startFen} 0 1`)
+  const moves: ReplayMove[] = []
+  for (const [index, uci] of movesUci.entries()) {
+    const move = board.move({
+      from: uci.slice(0, 2),
+      to: uci.slice(2, 4),
+      promotion: uci.slice(4) || undefined,
+    })
+    moves.push({ ply: index + 1, san: move.san, uci, fen: board.fen() })
+  }
+  return moves
+}
+
+/**
+ * Put a saved game against the engine back on the board and open its review:
+ * the player's side at the bottom, labelled You / Stockfish, the review at the
+ * quick depth. Nothing is saved again; the game is already in the record.
+ */
+export function useOpenSparringGame(onBeforeOpen: () => void) {
+  const { analyzeLine } = useAnalyzeLine()
+  return useCallback(
+    (game: Pick<SparringHistory['games'][number], 'start_fen' | 'moves_uci' | 'user_color'>) => {
+      onBeforeOpen()
+      const app = useAppStore.getState()
+      app.loadReplay(replayOfSparringGame(game.start_fen, game.moves_uci))
+      app.alignBoardToUserColor(game.user_color)
+      useSparStore.getState().reviewSaved(game.user_color, useAppStore.getState().treeEpoch)
+      revealSection('explore-game-review')
+      void analyzeLine({ depth: QUICK_REVIEW_DEPTH })
+    },
+    [analyzeLine, onBeforeOpen],
+  )
 }

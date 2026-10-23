@@ -26,6 +26,8 @@ type SparState = {
    * lost, and a takeback is a different game.
    */
   rated: boolean
+  /** Where the game came from, e.g. "boss:<line id>" for a boss fight; decides its XP. */
+  origin: string | null
   /** `treeEpoch` at the start; a different value means the line was replaced. */
   epoch: number
   outcome: SparOutcome | null
@@ -45,7 +47,10 @@ type SparState = {
   setOverride: (elo: number | null) => void
   /** The finished game once it is saved, and the mistakes its review sent to drills. */
   savedGameId: number | null
-  mistakesPosted: number | null
+  // How many drills the review added; 'failed' when the post did not go through.
+  mistakesPosted: number | 'failed' | null
+  // The review's search is over (or never needed): the game can be read as reviewed.
+  reviewSettled: boolean
   /** Seconds per side for the next game (null: no clock), and the running clocks. */
   timeControlSeconds: SparTimeControl
   setTimeControl: (seconds: SparTimeControl) => void
@@ -59,7 +64,10 @@ type SparState = {
   /** A move reached the end of the line: charge its maker and start the other clock. */
   chargeMove: (mover: SparColor, now: number, fen: string) => void
   recordSaved: (gameId: number) => void
-  recordMistakes: (count: number) => void
+  recordMistakes: (count: number | 'failed') => void
+  settleReview: () => void
+  /** A saved game put back on the board: reviewed as You / Stockfish, never re-saved. */
+  reviewSaved: (userColor: SparColor, epoch: number) => void
   start: (options: {
     userColor: SparColor
     elo: number
@@ -67,6 +75,7 @@ type SparState = {
     epoch: number
     /** The position the game starts from; its side to move starts the clock. */
     fen: string
+    origin?: string | null
   }) => void
   finish: (outcome: SparOutcome, username: string | null) => void
   markUnrated: () => void
@@ -173,6 +182,7 @@ export const useSparStore = create<SparState>((set, get) => ({
   userColor: 'white',
   elo: startingSparElo(null),
   rated: false,
+  origin: null,
   epoch: 0,
   outcome: null,
   eloChange: 0,
@@ -180,6 +190,7 @@ export const useSparStore = create<SparState>((set, get) => ({
   override: null,
   savedGameId: null,
   mistakesPosted: null,
+  reviewSettled: false,
   timeControlSeconds: readTimeControl(),
   setTimeControl: (seconds) => {
     writeTimeControl(seconds)
@@ -204,20 +215,35 @@ export const useSparStore = create<SparState>((set, get) => ({
     }),
   recordSaved: (gameId) => set({ savedGameId: gameId }),
   recordMistakes: (count) => set({ mistakesPosted: count }),
+  settleReview: () => set({ reviewSettled: true }),
+  reviewSaved: (userColor, epoch) =>
+    set((state) => ({
+      ...stoppedClocks(state, Date.now()),
+      status: 'idle',
+      userColor,
+      outcome: null,
+      eloChange: 0,
+      reviewing: { userColor, epoch },
+      savedGameId: null,
+      mistakesPosted: null,
+      reviewSettled: true,
+    })),
   setOverride: (elo) => set({ override: elo == null ? null : clampSparRating(elo) }),
-  start: ({ userColor, elo, rated, epoch, fen }) => {
+  start: ({ userColor, elo, rated, epoch, fen, origin = null }) => {
     const seconds = get().timeControlSeconds
     set({
       status: 'playing',
       userColor,
       elo: clampSparRating(elo),
       rated,
+      origin,
       epoch,
       outcome: null,
       eloChange: 0,
       reviewing: null,
       savedGameId: null,
       mistakesPosted: null,
+      reviewSettled: false,
       clocks: seconds == null ? null : { white: seconds * 1000, black: seconds * 1000 },
       clockSide: seconds == null ? null : sideToMove(fen),
       clockFen: fen,

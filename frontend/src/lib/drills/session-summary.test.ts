@@ -49,7 +49,7 @@ describe('describeSessionEstimate', () => {
     })
     expect(text).toContain('10 of 113 positions')
     expect(text).toContain('about 7 min')
-    expect(text).toContain('ten-minute session')
+    expect(text).toContain('stops at 10 minutes')
   })
 
   it('does not claim a subset when it is showing everything', () => {

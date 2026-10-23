@@ -159,7 +159,7 @@ export function MoveList({ showHeader = true }: { showHeader?: boolean }) {
           ) : (
             <>
               <strong>No moves yet</strong>
-              <span>Play a move, or load a game from the Library.</span>
+              <span>Play a move, or load a game.</span>
             </>
           )}
         </div>
@@ -198,7 +198,7 @@ export function MoveList({ showHeader = true }: { showHeader?: boolean }) {
   return (
     <Card>
       <CardHeader>
-        <h2>Move History</h2>
+        <h2>Moves</h2>
       </CardHeader>
       <CardBody>{content}</CardBody>
     </Card>

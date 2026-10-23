@@ -17,7 +17,7 @@ from app.models.analysis import AnalysisResult
 from app.models.external_sync_state import ExternalSyncState
 from app.models.position import Position
 from app.models.position_move import PositionMove
-from app.services.theory import LichessExplorerClient, cache_is_stale, load_moves_for_position, refresh_master_data
+from app.services.theory import LichessExplorerClient, cache_is_stale, cache_master_stats
 from app.utils.fen import normalize_fen
 
 
@@ -302,10 +302,20 @@ async def sync_stale_master_data(
     client: LichessExplorerClient,
     *,
     force: bool = False,
-    batch_size: int = 50,
     min_position_games: int = 0,
     max_positions: int | None = None,
 ) -> int:
+    """Fetch master stats for stale positions, committing on `session` as it goes.
+
+    No transaction is open while Lichess is called. Requests are paced seconds
+    apart, and the old loop held one transaction across ~50 of them (seen
+    "idle in transaction" for 2.5+ minutes), which pinned the xmin horizon so
+    autovacuum could clean nothing anywhere -- least of all `positions` and
+    `position_moves`, which this rewrites. The batch is read and committed
+    first, each fetch happens with the session idle, and each answer is
+    written in its own short transaction. Needs `expire_on_commit=False`, as
+    every session factory here sets: the work list is read after commits.
+    """
     sync_state = await _load_sync_state(session)
     if _is_cooldown_active(sync_state):
         logger.info(
@@ -335,11 +345,16 @@ async def sync_stale_master_data(
     if not force:
         # Staleness must live in SQL: with a Python-side check, a capped run
         # kept re-reading the same already-fresh top rows and never advanced
-        # through the corpus (millions of positions here).
+        # through the corpus (millions of positions here). A position fetched
+        # and found empty (master_total = 0) keeps its own, much longer TTL —
+        # 86% of fetches here came back with zero master games, and re-asking
+        # those monthly would spend the whole quota re-confirming nothing.
         stale_cutoff = _now_utc() - timedelta(days=settings.lichess_cache_ttl_days)
+        empty_cutoff = _now_utc() - timedelta(days=settings.lichess_empty_ttl_days)
         filters.append(
             (Position.master_fetched_at.is_(None))
-            | (Position.master_fetched_at < stale_cutoff)
+            | ((Position.master_total > 0) & (Position.master_fetched_at < stale_cutoff))
+            | ((Position.master_total == 0) & (Position.master_fetched_at < empty_cutoff))
         )
 
     # Positions with a stored engine evaluation come first: recurring-mistake
@@ -379,26 +394,43 @@ async def sync_stale_master_data(
             fill_query = fill_query.limit(remaining)
         candidates.extend((await session.execute(fill_query)).scalars().all())
 
-    refreshed = 0
+    # Phase 1: everything the loop needs, read now and committed, so the
+    # loop itself never reads lazily or keeps a transaction open.
+    if not force:
+        candidates = [
+            position for position in candidates
+            if cache_is_stale(position.master_fetched_at, position.master_total)
+        ]
+    moves_by_position: dict[int, list[PositionMove]] = {}
+    if candidates:
+        move_rows = await session.execute(
+            select(PositionMove)
+            .where(PositionMove.from_position_id.in_([position.id for position in candidates]))
+            .order_by(PositionMove.game_count.desc(), PositionMove.move_san.asc())
+        )
+        for move in move_rows.scalars():
+            moves_by_position.setdefault(move.from_position_id, []).append(move)
+    work = [
+        (position, position.fen, moves_by_position[position.id])
+        for position in candidates
+        if moves_by_position.get(position.id)
+    ]
+    await session.commit()
 
-    for idx, position in enumerate(candidates):
+    refreshed = 0
+    for idx, (position, fen, moves) in enumerate(work):
         if idx % 100 == 0:
             await asyncio.sleep(0)
 
-        if not force and not cache_is_stale(position.master_fetched_at):
-            continue
-
-        moves = await load_moves_for_position(session, position.id)
-        if not moves:
-            continue
-
         try:
-            await refresh_master_data(session, client, position, moves)
+            # Phase 2: the fetch, with no transaction open.
+            master_data = await client.get_master_stats(fen)
         except httpx.RequestError:
             await _set_cooldown(
                 session, status_code=None, error="network_unavailable",
                 duration_seconds=settings.lichess_sync_cooldown_rate_limit_seconds,
             )
+            await session.commit()
             logger.warning("Pausing master opening sync after network failure")
             break
         except httpx.HTTPStatusError as exc:
@@ -409,6 +441,7 @@ async def sync_stale_master_data(
                     session, status_code=status_code, error="upstream_unavailable",
                     duration_seconds=max(settings.lichess_sync_cooldown_rate_limit_seconds, retry_after or 0),
                 )
+                await session.commit()
                 logger.warning("Pausing master opening sync after upstream failure", extra={"status_code": status_code})
                 break
             if exc.response is not None and exc.response.status_code in {401, 403}:
@@ -418,9 +451,10 @@ async def sync_stale_master_data(
                     error="authorization",
                     duration_seconds=settings.lichess_sync_cooldown_auth_minutes * 60,
                 )
+                await session.commit()
                 logger.warning(
                     "Skipping master opening sync after authorization error",
-                    extra={"status_code": exc.response.status_code, "fen": position.fen},
+                    extra={"status_code": exc.response.status_code, "fen": fen},
                 )
                 break
             if status_code == 429:
@@ -435,22 +469,23 @@ async def sync_stale_master_data(
                     error="rate_limit",
                     duration_seconds=cooldown_seconds,
                 )
+                await session.commit()
                 logger.warning(
                     "Stopping master opening sync after rate limit response",
                     extra={
                         "status_code": status_code,
                         "retry_after": exc.response.headers.get("Retry-After") if exc.response else None,
-                        "fen": position.fen,
+                        "fen": fen,
                     },
                 )
                 break
             raise
+        # Phase 3: the answer, in a transaction lasting milliseconds.
+        await cache_master_stats(session, position, moves, master_data)
         refreshed += 1
         if refreshed == 1:
             await _clear_cooldown(session)
-
-        if refreshed % batch_size == 0:
-            await session.commit()
+        await session.commit()
 
     return refreshed
 

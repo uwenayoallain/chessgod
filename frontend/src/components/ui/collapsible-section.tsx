@@ -14,6 +14,24 @@ export function writeSectionOpen(id: string, open: boolean) {
   window.localStorage.setItem(STORAGE_PREFIX + id, String(open))
 }
 
+export const OPEN_SECTION_EVENT = 'chessgod:open-section'
+
+/**
+ * Open a section by id, wherever it is on the page, and scroll to it: how a
+ * link elsewhere ("Go" on a quest) reaches a section the player collapsed.
+ */
+export function revealSection(id: string) {
+  window.dispatchEvent(new CustomEvent(OPEN_SECTION_EVENT, { detail: id }))
+  window.requestAnimationFrame(() => {
+    const target =
+      document.querySelector(`[data-section-id="${id}"]`) ?? document.getElementById(id)
+    const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    target?.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' })
+    // Keyboard users land where they were sent, not back at the button they pressed.
+    target?.querySelector<HTMLElement>('.section__toggle')?.focus({ preventScroll: true })
+  })
+}
+
 /**
  * Accordion building block for the two workspace tabs. Closed sections unmount
  * their children after transition so any TanStack queries / polling inside them stop —
@@ -51,6 +69,17 @@ export function CollapsibleSection({
     }
   }, [open])
 
+  useEffect(() => {
+    function reveal(event: Event) {
+      if ((event as CustomEvent<string>).detail !== id) return
+      if (controlledOpen == null) setUncontrolledOpen(true)
+      writeSectionOpen(id, true)
+      onOpenChange?.(true)
+    }
+    window.addEventListener(OPEN_SECTION_EVENT, reveal)
+    return () => window.removeEventListener(OPEN_SECTION_EVENT, reveal)
+  }, [controlledOpen, id, onOpenChange])
+
   function toggle() {
     const next = !open
     if (controlledOpen == null) setUncontrolledOpen(next)
@@ -59,7 +88,7 @@ export function CollapsibleSection({
   }
 
   return (
-    <section className={`section${open ? ' section--open' : ''}`}>
+    <section className={`section${open ? ' section--open' : ''}`} data-section-id={id}>
       <div className="section__header">
         <button aria-expanded={open} className="section__toggle" onClick={toggle} type="button">
           <ChevronRight className="section__chevron" size={14} />

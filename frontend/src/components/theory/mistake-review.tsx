@@ -4,7 +4,12 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { PanelError } from '@/components/ui/panel-error'
 import type { Mistake } from '@/hooks/use-family-detail'
+import { BEST_MOVE_ARROW_COLOR, THREAT_ARROW_COLOR } from '@/lib/analysis/board-guidance'
 import { useAppStore } from '@/store/app-store'
+
+function arrowFor(uci: string, color: string) {
+  return { startSquare: uci.slice(0, 2), endSquare: uci.slice(2, 4), color }
+}
 
 type SortMode = 'severity' | 'occurrences'
 
@@ -24,7 +29,7 @@ type Group = {
 function groupByOpening(mistakes: Mistake[]): Group[] {
   const map = new Map<string, Group>()
   for (const m of mistakes) {
-    const name = m.family_name ?? 'Unclassified'
+    const name = m.family_name ?? 'Outside named openings'
     const key = m.family_id != null ? `f:${m.family_id}` : `n:${name}`
     let g = map.get(key)
     if (!g) {
@@ -68,18 +73,34 @@ export function MistakeReview({
   isLoading = false,
   mistakes,
   title = 'Mistakes',
-  emptyHint = 'No recurring engine mistakes for this scope yet. Import games and run analysis.',
+  emptyHint = 'No repeat mistakes with these filters yet.',
 }: {
   error?: unknown
   isRefreshing?: boolean
   isLoading?: boolean
   mistakes: Mistake[]
-  title?: string
+  /** null when a section header already names the panel. */
+  title?: string | null
   emptyHint?: string
 }) {
   const [sortMode, setSortMode] = useState<SortMode>('severity')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const pushPosition = useAppStore((state) => state.pushPosition)
+  const loadPosition = useAppStore((state) => state.loadPosition)
+  const setTrainerArrows = useAppStore((state) => state.setTrainerArrows)
+  const alignBoardToUserColor = useAppStore((state) => state.alignBoardToUserColor)
+
+  // Show the mistake, not just its position: the move played in red, the move
+  // to play in the engine's own best-move amber. The arrows are scoped to this
+  // position, so they vanish as soon as the board moves on. The mover is the
+  // player, so their side goes to the bottom, as in their own game.
+  function showMistake(mistake: Mistake) {
+    loadPosition(mistake.parent_fen)
+    alignBoardToUserColor(mistake.parent_fen.split(' ')[1] === 'b' ? 'black' : 'white')
+    const arrows = []
+    if (mistake.user_move.uci) arrows.push(arrowFor(mistake.user_move.uci, THREAT_ARROW_COLOR))
+    if (mistake.best_move.uci) arrows.push(arrowFor(mistake.best_move.uci, BEST_MOVE_ARROW_COLOR))
+    setTrainerArrows(arrows, mistake.parent_fen)
+  }
 
   const groups = useMemo(() => {
     const g = groupByOpening(mistakes)
@@ -101,18 +122,28 @@ export function MistakeReview({
   return (
     <Card className="mistake-review">
       <CardHeader>
-        <h2>{title}</h2>
+        {title ? (
+          <h2>{title}</h2>
+        ) : (
+          <span className="muted">
+            {mistakes.length
+              ? `${mistakes.length} ${mistakes.length === 1 ? 'mistake' : 'mistakes'}`
+              : ' '}
+          </span>
+        )}
         <div className="panel-header__meta">
           {isRefreshing ? <span className="refresh-badge">Updating</span> : null}
-          {mistakes.length ? <span className="muted">{mistakes.length} found</span> : null}
+          {title && mistakes.length ? (
+            <span className="muted">{mistakes.length} mistakes</span>
+          ) : null}
           <select
             aria-label="Sort mistakes"
             className="select"
             onChange={(event) => setSortMode(event.target.value as SortMode)}
             value={sortMode}
           >
-            <option value="severity">Severity</option>
-            <option value="occurrences">Occurrences</option>
+            <option value="severity">Worst first</option>
+            <option value="occurrences">Most often</option>
           </select>
         </div>
       </CardHeader>
@@ -131,7 +162,7 @@ export function MistakeReview({
         ) : null}
         {groups.map((group) => {
           // Auto-open when there's only one group so the user isn't staring at a
-          // single collapsed "Unclassified (80)" row.
+          // single collapsed group row.
           const isOpen = expanded.has(group.key) || groups.length === 1
           return (
             <div className="column" key={group.key} style={{ gap: 4 }}>
@@ -142,7 +173,7 @@ export function MistakeReview({
                 type="button"
               >
                 <div className="workspace-list__title">
-                  <strong>
+                  <strong title={group.name}>
                     {isOpen ? '▾ ' : '▸ '}
                     {group.name}
                   </strong>
@@ -151,14 +182,23 @@ export function MistakeReview({
                 <div className="workspace-list__meta">
                   {group.blunders > 0 ? (
                     <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
-                      {group.blunders} blunder
+                      {group.blunders} {group.blunders === 1 ? 'blunder' : 'blunders'}
                     </span>
                   ) : null}
                   {group.mistakesCount > 0 ? (
-                    <span style={{ color: 'var(--warning)' }}>{group.mistakesCount} mistake</span>
+                    <span style={{ color: 'var(--warning)' }}>
+                      {group.mistakesCount} {group.mistakesCount === 1 ? 'mistake' : 'mistakes'}
+                    </span>
                   ) : null}
-                  {group.inaccuracies > 0 ? <span>{group.inaccuracies} inacc.</span> : null}
-                  <span>{group.occurrences}x total</span>
+                  {group.inaccuracies > 0 ? (
+                    <span>
+                      {group.inaccuracies}{' '}
+                      {group.inaccuracies === 1 ? 'inaccuracy' : 'inaccuracies'}
+                    </span>
+                  ) : null}
+                  <span>
+                    in {group.occurrences} {group.occurrences === 1 ? 'game' : 'games'}
+                  </span>
                 </div>
               </button>
               {isOpen
@@ -166,7 +206,7 @@ export function MistakeReview({
                     <button
                       className="move-row move-row--button"
                       key={`${mistake.parent_fen}:${mistake.user_move.uci}`}
-                      onClick={() => pushPosition(mistake.parent_fen)}
+                      onClick={() => showMistake(mistake)}
                       style={{ marginLeft: 16 }}
                       type="button"
                     >
@@ -175,8 +215,14 @@ export function MistakeReview({
                         <span className="badge">{mistake.severity}</span>
                       </div>
                       <div className="workspace-list__meta">
-                        <span>{mistake.eval_drop_cp}cp drop</span>
-                        <span>{mistake.occurrences}x</span>
+                        <span>
+                          loses {(mistake.eval_drop_cp / 100).toFixed(1)}{' '}
+                          {mistake.eval_drop_cp === 100 ? 'pawn' : 'pawns'}
+                        </span>
+                        <span>
+                          played {mistake.occurrences}{' '}
+                          {mistake.occurrences === 1 ? 'time' : 'times'}
+                        </span>
                         <span>best {mistake.best_move.san}</span>
                       </div>
                     </button>

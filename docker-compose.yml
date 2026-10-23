@@ -11,24 +11,46 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-chessgod}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chessgod}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-15432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # JIT compiled the large repertoire query for 3.2s against 1.3-1.7s to run
+    # it without; sorts at the default 4MB work_mem spilled 52GB of temp files
+    # in four days. Both measured on this library.
+    command: postgres -c jit=off -c work_mem=16MB
+    # Parallel hash joins live in /dev/shm, and Docker gives a container 64MB:
+    # at 16MB work_mem a large parallel query failed with "could not resize
+    # shared memory segment ... No space left on device" (9 times in 8h).
+    shm_size: 256m
+    # The caps the containers already ran with, written down so a recreate
+    # keeps them instead of quietly lifting them.
+    mem_limit: 1g
+    # Health checks every 30s once up (5s while starting): every 5s was a
+    # process spawned 17,000 times a day across the stack for nothing.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chessgod}"]
-      interval: 5s
+      interval: 30s
       timeout: 5s
       retries: 5
+      start_period: 30s
+      start_interval: 2s
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    # A pure cache: nothing in it outlives a rebuild, so it never writes
+    # snapshots to disk (the image's default saves did, five times in 3h).
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru --save "" --appendonly no
+    mem_limit: 256m
+    tmpfs:
+      - /data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 30s
       timeout: 3s
       retries: 5
+      start_period: 20s
+      start_interval: 2s
 
   backend:
     build:
@@ -37,7 +59,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://chessgod:chessgod@postgres:5432/chessgod}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:15173"]}
       OBSERVABILITY_RETENTION_DAYS: ${OBSERVABILITY_RETENTION_DAYS:-14}
       OBSERVABILITY_ADMIN_PASSPHRASE_SHA256: ${OBSERVABILITY_ADMIN_PASSPHRASE_SHA256:-3f665a20748df42949e495a1b363194e5c5ab24b12080232a8ec3263fcb2145e}
       # The Opening Explorer requires OAuth (`security: OAuth2` on the masters
@@ -72,7 +94,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${BACKEND_PORT:-18000}:8000"
     volumes:
       - ./backend:/app
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -83,19 +105,28 @@ services:
     # HTTP client in the image (no curl, no wget).
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
-      interval: 10s
+      # Each check starts a Python interpreter (~120ms of CPU): every 30s once
+      # up, every 3s while the migration runs so the crawler is not kept waiting.
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 120s
+      start_interval: 3s
+    mem_limit: 768m
 
   frontend:
     build:
       context: ./frontend
+    # Like every other service. Without it the frontend was the one part of the
+    # stack a reboot did not bring back: it exited 255 when the host went down
+    # and stayed down while the backend, Postgres, Redis and the crawler all
+    # restarted around it.
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-5173}:5173"
+      - "${FRONTEND_PORT:-15173}:5173"
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
@@ -105,7 +136,7 @@ services:
     # took the workspace from 0.3s to 0.6s to appear. FRONTEND_MODE=dev brings
     # the hot-reloading dev server back for working on the frontend.
     environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:18000}
       API_PROXY_TARGET: http://backend:8000
       FRONTEND_MODE: ${FRONTEND_MODE:-production}
     command: >
@@ -138,7 +169,12 @@ services:
       # is what stops the crawler producing a surge in the first place, rather
       # than reacting to one it already caused. Set CRAWL_ACTIVE_MAX=0 to pause
       # entirely whenever the machine is in use.
-      CRAWL_ACTIVE_CORES: ${CRAWL_ACTIVE_CORES:-0.5}
+      # A mean over CRAWL_ACTIVE_WINDOW samples (2s each), not one sample: this
+      # box idles at 0.45-0.6 cores of other people's work with one-sample
+      # spikes past a core, so a single sample over 0.5 kept it "in use" for
+      # good. See createActivityWindow in scripts/engine/presence.mjs.
+      CRAWL_ACTIVE_CORES: ${CRAWL_ACTIVE_CORES:-1.0}
+      CRAWL_ACTIVE_WINDOW: ${CRAWL_ACTIVE_WINDOW:-3}
       CRAWL_ACTIVE_MAX: ${CRAWL_ACTIVE_MAX:-1}
       CRAWL_IDLE_AFTER_MS: ${CRAWL_IDLE_AFTER_MS:-600000}
       CRAWL_BATCH: ${CRAWL_BATCH:-24}

@@ -51,7 +51,8 @@ export function getEngineStatusMessage({
   }
 
   if (!hasAttempted) {
-    return 'Starting analysis…'
+    // Not started yet, or released while idle: it starts on the next search.
+    return currentDepth > 0 ? `Ready at depth ${currentDepth}.` : 'Engine on.'
   }
 
   return 'Starting analysis…'

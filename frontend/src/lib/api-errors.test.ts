@@ -63,19 +63,19 @@ describe('getApiErrorMessage', () => {
   it('translates a server fault into a sentence', () => {
     // Not "Request failed with status code 500".
     expect(getApiErrorMessage(axiosError(500), 'fallback')).toBe(
-      'The server had a problem handling that request.',
+      'The server hit an error. Try again in a moment.',
     )
   })
 
   it('says plainly when the server could not be reached', () => {
-    expect(getApiErrorMessage(axiosError(), 'fallback')).toBe('Could not reach the server.')
+    expect(getApiErrorMessage(axiosError(), 'fallback')).toBe(
+      'Can’t reach the server. Check your connection and try again.',
+    )
   })
 
   it('has wording for rate limiting and for nothing found', () => {
     expect(getApiErrorMessage(axiosError(429), 'fallback')).toMatch(/Wait a moment/)
-    expect(getApiErrorMessage(axiosError(404), 'fallback')).toBe(
-      'The server had nothing for that request.',
-    )
+    expect(getApiErrorMessage(axiosError(404), 'fallback')).toBe('Nothing found for that request.')
   })
 
   it('still prefers a detail the server took the trouble to send', () => {

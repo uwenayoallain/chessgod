@@ -2,22 +2,22 @@ import {
   Gauge,
   GraduationCap,
   FlipVertical,
+  Eraser,
   RotateCcw,
   Search,
   StepBack,
   StepForward,
   Target,
-  X,
 } from 'lucide-react'
 import { type ReactNode, useEffect } from 'react'
 
 import { MoveList } from '@/components/board/move-list'
 import { Button } from '@/components/ui/button'
 import { useAnalyzeLine } from '@/hooks/use-analyze-line'
-import { useEngine } from '@/hooks/use-engine'
+import { analyzeBoard } from '@/hooks/use-engine'
+import { useEngineStore } from '@/store/engine-store'
 import { useTrainingMode } from '@/hooks/use-training-mode'
 import { useAppStore } from '@/store/app-store'
-import { useEngineStore } from '@/store/engine-store'
 import { useIsSparring } from '@/store/spar-store'
 
 export function BoardRail({
@@ -50,10 +50,10 @@ export function BoardRail({
     analysisRequested,
     setAnalysisRequested,
   } = useAppStore()
-  const engineDepth = useEngineStore((state) => state.engineDepth)
 
   const training = useTrainingMode()
-  const { activeMode, analyze } = useEngine({ autoAnalyze: false })
+  const activeMode = useEngineStore((state) => state.activeMode)
+  const analyze = analyzeBoard
   const { analyzeLine, canAnalyze } = useAnalyzeLine()
   // Mid-game against the engine an evaluation is the answer to the next move.
   const sparring = useIsSparring()
@@ -125,13 +125,16 @@ export function BoardRail({
             <FlipVertical size={16} />
           </Button>
           {loadedContextLabel && onClearLoadedContext ? (
+            // Never disabled: this is the way out of every state — a drill, a
+            // retry, a game against the engine, a line being learned.
             <Button
-              disabled={training.active}
+              aria-label={`${loadedContextLabel} and start again`}
               onClick={onClearLoadedContext}
+              title="A fresh board at the start position"
               type="button"
               variant="ghost"
             >
-              <X size={16} />
+              <Eraser size={16} />
               <span>{loadedContextLabel}</span>
             </Button>
           ) : null}
@@ -143,7 +146,7 @@ export function BoardRail({
             onChange={(event) => setKeepUserOnBottom(event.target.checked)}
             type="checkbox"
           />
-          <span>Always keep me on bottom</span>
+          <span>Keep my pieces at the bottom</span>
         </label>
       </div>
 
@@ -156,11 +159,12 @@ export function BoardRail({
                 setAnalysisRequested(true)
                 void analyze(undefined, true, { stable: false })
               }}
+              title="A fast first answer on this position"
               type="button"
               variant={activeMode === 'quick' || activeMode === 'standard' ? 'primary' : 'default'}
             >
               <Gauge size={14} />
-              <span>Quick · d18</span>
+              <span>Quick</span>
             </Button>
             <Button
               disabled={sparring}
@@ -168,11 +172,12 @@ export function BoardRail({
                 setAnalysisRequested(true)
                 void analyze(undefined, true, { deep: true })
               }}
+              title="A longer, deeper search of this position"
               type="button"
               variant={activeMode === 'deep' ? 'primary' : 'default'}
             >
               <Target size={14} />
-              <span>Deep · d{engineDepth}</span>
+              <span>Deep</span>
             </Button>
           </div>
           <Button
@@ -200,19 +205,19 @@ export function BoardRail({
               <>
                 {training.status === 'waiting' ? (
                   <div className="training-status training-status--waiting">
-                    Your turn — play move {training.stepIndex + 1} of {training.totalMoves}
+                    Your turn. Play move {training.stepIndex + 1} of {training.totalMoves}.
                   </div>
                 ) : null}
                 {training.status === 'correct' ? (
-                  <div className="training-status training-status--correct">Correct!</div>
+                  <div className="training-status training-status--correct">Correct.</div>
                 ) : null}
                 {training.status === 'incorrect' ? (
                   <div className="training-status training-status--incorrect">
-                    Wrong move. Expected: <strong>{training.expectedMove?.san}</strong>
+                    Wrong move. The line plays <strong>{training.expectedMove?.san}</strong>
                   </div>
                 ) : null}
                 {training.status === 'complete' ? (
-                  <div className="training-status training-status--correct">Line complete!</div>
+                  <div className="training-status training-status--correct">Line done.</div>
                 ) : null}
                 <div className="workspace-rail__buttons">
                   {training.status === 'incorrect' ? (
@@ -221,7 +226,7 @@ export function BoardRail({
                     </Button>
                   ) : null}
                   <Button onClick={training.stop} type="button" variant="ghost">
-                    Stop Training
+                    Stop training
                   </Button>
                 </div>
               </>

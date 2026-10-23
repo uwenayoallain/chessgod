@@ -11,14 +11,14 @@ function RepertoireNodeView({
   node: RepertoireNode
   username: string
 }) {
-  const pushPosition = useAppStore((state) => state.pushPosition)
+  const loadPosition = useAppStore((state) => state.loadPosition)
   return (
     <div className="column">
       {node.move ? (
         <div className="move-row">
           <button
             className="move-row--button"
-            onClick={() => pushPosition(node.fen, node.move?.san, node.move?.uci ?? undefined)}
+            onClick={() => loadPosition(node.fen, node.move?.uci ?? null)}
             type="button"
           >
             <div className="workspace-list__title">

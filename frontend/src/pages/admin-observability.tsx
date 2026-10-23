@@ -68,7 +68,7 @@ export default function AdminObservabilityPage() {
   const unlock = async () => {
     const candidate = passphraseInput.trim()
     if (!candidate) {
-      setError('Enter admin passphrase')
+      setError('Enter the admin passphrase.')
       return
     }
 
@@ -84,7 +84,7 @@ export default function AdminObservabilityPage() {
     } catch (caught) {
       clearStoredPassphrase()
       setIsUnlocked(false)
-      setError(getApiErrorMessage(caught, 'Failed to load observability snapshot'))
+      setError(getApiErrorMessage(caught, 'Could not load the observability snapshot.'))
       setSnapshot(null)
     } finally {
       setIsLoading(false)
@@ -112,7 +112,7 @@ export default function AdminObservabilityPage() {
         setSnapshot(null)
         setError('Passphrase rejected. Enter it again to unlock the admin page.')
       } else {
-        setError(getApiErrorMessage(caught, 'Failed to refresh observability snapshot'))
+        setError(getApiErrorMessage(caught, 'Could not refresh the observability snapshot.'))
       }
     } finally {
       setIsLoading(false)
@@ -173,7 +173,7 @@ export default function AdminObservabilityPage() {
       <div className="admin-observability-page admin-observability-page--locked">
         <Card className="admin-observability-lock-card">
           <CardHeader>
-            <h2>Admin Observability</h2>
+            <h2>Observability</h2>
           </CardHeader>
           <CardBody className="column admin-observability__lock-body">
             <label className="column" htmlFor="admin-passphrase" style={{ gap: '8px' }}>
@@ -213,7 +213,7 @@ export default function AdminObservabilityPage() {
       <div className="admin-observability-page__shell">
         <Card>
           <CardHeader>
-            <h2>Observability Admin</h2>
+            <h2>Observability</h2>
           </CardHeader>
           <CardBody className="column admin-observability__summary-body">
             <div className="stack admin-observability__toolbar">
@@ -250,7 +250,7 @@ export default function AdminObservabilityPage() {
 
             <Card>
               <CardHeader>
-                <h2>Recent Activity (last 60 min)</h2>
+                <h2>Recent activity (last 60 min)</h2>
               </CardHeader>
               <CardBody>
                 <MinuteSparklines series={snapshot.runtime.minute_series} />
@@ -281,7 +281,7 @@ export default function AdminObservabilityPage() {
             <div className="admin-observability__layout-grid">
               <Card>
                 <CardHeader>
-                  <h2>Persisted Source Distribution</h2>
+                  <h2>Saved events by source</h2>
                 </CardHeader>
                 <CardBody>
                   <table className="table">
@@ -307,7 +307,7 @@ export default function AdminObservabilityPage() {
 
               <Card>
                 <CardHeader>
-                  <h2>DB Pool</h2>
+                  <h2>Database pool</h2>
                 </CardHeader>
                 <CardBody>
                   <table className="table">
@@ -339,7 +339,7 @@ export default function AdminObservabilityPage() {
 
             <Card>
               <CardHeader>
-                <h2>Persisted Event History</h2>
+                <h2>Saved events</h2>
               </CardHeader>
               <CardBody className="column admin-observability__summary-body">
                 <div className="stack admin-observability__toolbar">

@@ -100,12 +100,23 @@ async def invalidate_improvement_caches(username: str, *, include_queue_counts: 
         # The served plan (routers/improvement.py): stale-while-revalidate, so
         # this marks it stale rather than making the next read wait.
         f"improvement:plan:{username}:",
+        # Where the player's points go (routers/improvement.py), served the same way.
+        f"improvement:losses:{username}:",
+        # The training repertoire (routers/training.py): its choices read evaluations.
+        f"improvement:repertoire:{username}:",
+        # Blunder Check's pool of the player's own big mistakes (routers/training.py).
+        f"improvement:threats:{username}:",
+        # Whether training is working (routers/training.py): new evidence moves it.
+        f"improvement:progress:{username}:",
+        f"improvement:clock:{username}:",
+        # Over-the-board habits (routers/training.py): read from evaluations too.
+        f"improvement:habits:{username}:",
     ]
     if include_queue_counts:
         prefixes.append(f"coverage:v3:{username}:")
         # The analysis queue's pool of decision pairs (routers/games.py): an
         # import adds decisions, an upload only resolves ones it already has.
-        prefixes.append(f"queue-pool:v1:{username}:")
+        prefixes.append(f"queue-pool:v2:{username}:")
     await asyncio.gather(
         *(cache.delete_prefix(prefix, versioned_only=True) for prefix in prefixes)
     )
@@ -733,10 +744,7 @@ def classify_pattern(
                 label="Time pressure",
                 phase=phase,
                 explanation=base + detail,
-                cue=(
-                    "Below 10% of your starting time, use a short safety scan: opponent's "
-                    "checks, captures, and immediate threats. Simplify only when the exchange is safe."
-                ),
+                cue="Under 10% of your clock, still check the opponent's captures and checks before moving.",
             )
         )
 
@@ -767,7 +775,7 @@ def classify_pattern(
             label="Converting an advantage",
             phase=phase,
             explanation=base,
-            cue="When better, identify the opponent's active threat. Compare a forcing continuation with a safe improving move; trade only if the resulting ending remains favorable.",
+            cue="When you are winning, find the opponent's threat before improving your own position.",
         ))
 
     if reply is not None and after_user.is_capture(reply):
@@ -819,7 +827,7 @@ def classify_pattern(
             label="Opening decision",
             phase=phase,
             explanation=base,
-            cue="Identify the pawn break and the least active piece. Compare two developing moves, calculate the opponent's strongest reply, and check king safety before choosing.",
+            cue="Develop the piece doing the least, unless the opponent's reply punishes it.",
         ))
 
     if phase == "endgame":
@@ -828,7 +836,7 @@ def classify_pattern(
             label="Endgame technique",
             phase=phase,
             explanation=base,
-            cue="Check king activity, passed pawns, and the opponent's counterplay. Calculate pawn races move by move and check the resulting pawn ending before exchanging.",
+            cue="Count every pawn race to the end before you trade pieces.",
         ))
 
     if perspective_eval <= -150:
@@ -845,7 +853,7 @@ def classify_pattern(
         label="Calculation",
         phase=phase,
         explanation=base,
-        cue="Choose two candidate moves. For each, calculate the opponent's strongest forcing reply, then compare material, king safety, and piece activity at the end of the line.",
+        cue="Pick two candidate moves and calculate the opponent's strongest reply to each.",
     ))
 
 

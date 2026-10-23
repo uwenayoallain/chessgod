@@ -22,9 +22,15 @@ const TERMINATION_LABELS: Record<string, string> = {
   agreed: 'Agreement',
   stalemate: 'Stalemate',
   repetition: 'Repetition',
-  insufficient: 'Insufficient',
+  insufficient: 'Insufficient material',
   '50move': '50-move',
-  timevsinsufficient: 'Time vs Insuf.',
+  timevsinsufficient: 'Timeout, mate impossible',
+}
+
+const RESULT_NOTATION: Record<string, string> = {
+  '1-0': '1–0',
+  '0-1': '0–1',
+  '1/2-1/2': '½–½',
 }
 
 function terminationLabel(termination: string | null): string | null {
@@ -58,8 +64,8 @@ export function GameListPanel({
   const effectiveFen = openingName ? null : currentFen !== STARTING_FEN ? currentFen : null
   const title = useMemo(() => {
     if (openingName) return `Games in ${openingName}`
-    if (effectiveFen) return 'Games Through This Position'
-    return 'Recent Games'
+    if (effectiveFen) return 'Games through this position'
+    return 'Recent games'
   }, [effectiveFen, openingName])
 
   useEffect(() => {
@@ -181,14 +187,22 @@ export function GameListPanel({
         {!isLoading && !error && !data?.games.length ? (
           <div className="rail-empty">
             <strong>No games</strong>
-            <span>Nothing matches this position and these filters.</span>
+            <span>
+              {openingName
+                ? 'No games in this opening with these filters.'
+                : effectiveFen
+                  ? 'None of your games reach the position on the board.'
+                  : color !== 'both' || timeClass
+                    ? 'Nothing matches these filters.'
+                    : 'Import games to see them here.'}
+            </span>
           </div>
         ) : null}
 
         {!isLoading && !error && data?.games.length && !filteredGames.length ? (
           <div className="rail-empty">
             <strong>No matching games</strong>
-            <span>No games match this filter.</span>
+            <span>Try a different search or clear the filter.</span>
           </div>
         ) : null}
 
@@ -210,7 +224,8 @@ export function GameListPanel({
                     <span className="game-card__rating">({game.white_rating})</span>
                   ) : null}
                 </span>
-                <span className="game-card__vs">vs</span>
+                {/* The result as a game database prints it, between the players. */}
+                <span className="game-card__vs">{RESULT_NOTATION[game.result] ?? 'vs'}</span>
                 <span className="game-card__player">
                   <span className="game-card__color game-card__color--black" />
                   {game.black_username}
@@ -223,10 +238,13 @@ export function GameListPanel({
                 <span className={`game-card__result ${res.cls}`}>{res.text}</span>
                 {term ? <span className="badge">{term}</span> : null}
                 <span className="badge">{game.time_class}</span>
-                {game.eco ? <span className="badge">{game.eco}</span> : null}
+                {/* The opening's own name renders below; the code only earns a
+                    badge when it is the only opening signal the game has. */}
+                {game.eco && !game.opening_name ? <span className="badge">{game.eco}</span> : null}
                 {game.has_analysis ? <span className="badge">Analyzed</span> : null}
                 {game.num_moves ? (
-                  <span className="game-card__moves">{game.num_moves}m</span>
+                  // num_moves counts plies; a player's "move" is one of each side's.
+                  <span className="game-card__moves">{Math.ceil(game.num_moves / 2)} moves</span>
                 ) : null}
                 <span className="game-card__date">{formatGameDate(game.played_at)}</span>
               </div>

@@ -3,10 +3,26 @@ export type NnueLoad = {
   filename: string
 }
 
-async function verifyNnue(filename: string, buffer: ArrayBuffer): Promise<Uint8Array<ArrayBuffer>> {
+// Written onto a cached copy only after its bytes were hashed and matched, so
+// a later read can trust them without hashing ~98MB again (177-263ms of CPU
+// per engine start, measured; the review pool starts four at once and the
+// main engine restarts after its idle release). A copy that was truncated or
+// replaced fails the length or name check and is hashed in full as before.
+const VERIFIED_HEADER = 'x-chessgod-verified'
+
+function expectedDigest(filename: string): string {
   // Official NNUE filenames contain the first 12 hexadecimal SHA-256 digits.
   const expected = /^nn-([a-f0-9]{12})\.nnue$/.exec(filename)?.[1]
   if (!expected) throw new Error('Invalid analysis model filename.')
+  return expected
+}
+
+export function verifiedMarker(filename: string, byteLength: number): string {
+  return `${expectedDigest(filename)}:${byteLength}`
+}
+
+async function verifyNnue(filename: string, buffer: ArrayBuffer): Promise<Uint8Array<ArrayBuffer>> {
+  const expected = expectedDigest(filename)
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buffer))
   const actual = [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')
   if (!actual.startsWith(expected)) throw new Error('Analysis model integrity check failed.')
@@ -26,7 +42,15 @@ export async function fetchNnueBuffer(
     if (cached) {
       try {
         if (!cached.ok) throw new Error('Invalid cached model response.')
-        return await verifyNnue(filename, await cached.arrayBuffer())
+        const marker = cached.headers.get(VERIFIED_HEADER)
+        const buffer = await cached.arrayBuffer()
+        if (marker && marker === verifiedMarker(filename, buffer.byteLength)) {
+          return new Uint8Array(buffer)
+        }
+        const bytes = await verifyNnue(filename, buffer)
+        // A copy cached before the marker existed: mark it, once.
+        await putVerified(cache, url, bytes, cached.headers, filename)
+        return bytes
       } catch {
         replaceCorruptCache = true
         await cache.delete(url).catch(() => false)
@@ -40,14 +64,24 @@ export async function fetchNnueBuffer(
   const response = await fetch(url, replaceCorruptCache ? { cache: 'reload' } : undefined)
   if (!response.ok) throw new Error(`Failed to load NNUE ${filename}: ${response.status}`)
   const bytes = await verifyNnue(filename, await response.arrayBuffer())
-  if (cache) {
-    try {
-      await cache.put(url, new Response(bytes, { headers: response.headers }))
-    } catch {
-      // The verified bytes are usable even if the device cannot persist them.
-    }
-  }
+  if (cache) await putVerified(cache, url, bytes, response.headers, filename)
   return bytes
+}
+
+async function putVerified(
+  cache: Cache,
+  url: string,
+  bytes: Uint8Array<ArrayBuffer>,
+  source: Headers,
+  filename: string,
+) {
+  try {
+    const headers = new Headers(source)
+    headers.set(VERIFIED_HEADER, verifiedMarker(filename, bytes.byteLength))
+    await cache.put(url, new Response(bytes, { headers }))
+  } catch {
+    // The verified bytes are usable even if the device cannot persist them.
+  }
 }
 
 /**

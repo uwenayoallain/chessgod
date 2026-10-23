@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  parseProcStat, parseCgroupUsage, otherCoresBetween, presenceCeiling,
+  parseProcStat, parseCgroupUsage, otherCoresBetween, presenceCeiling, createOwnWork,
+  createActivityWindow,
 } from './presence.mjs'
 
 const STAT = 'cpu  21999783 8818270 3118145 43856113 87658 0 116732 0 0 0\ncpu0 1 2 3\n'
@@ -79,4 +80,75 @@ test('the full pool unlocks only after a long quiet stretch', () => {
 
 test('the active cap never exceeds the configured maximum', () => {
   assert.equal(presenceCeiling({ idleAfterMs: 1, activeMax: 5, fullMax: 2, msSinceActive: 0 }), 2)
+})
+
+test('a sample that overlaps our own request is not evidence of a person', async () => {
+  let now = 0
+  const ownWork = createOwnWork({ clock: () => now })
+  assert.equal(ownWork.overlaps(0), false)
+  let finish
+  const request = ownWork.around(() => new Promise(resolve => { finish = resolve }))
+  // In flight: whatever the backend and Postgres are doing is on our behalf.
+  assert.equal(ownWork.overlaps(-2_000), true)
+  now = 3_000
+  finish('ok')
+  assert.equal(await request, 'ok')
+  // A sample window that began before the request ended still contains its work.
+  assert.equal(ownWork.overlaps(2_000), true)
+  // One that began afterwards does not.
+  assert.equal(ownWork.overlaps(3_001), false)
+})
+
+test('a failed request still ends, so presence is not blinded for good', async () => {
+  let now = 0
+  const ownWork = createOwnWork({ clock: () => now })
+  now = 1_000
+  await assert.rejects(ownWork.around(async () => { throw new Error('fetch failed') }))
+  assert.equal(ownWork.overlaps(1_001), false)
+})
+
+// Host-only cores, 2s apart, recorded on this machine while a coding agent ran
+// an `fplai update` job (~0.9 cores) next to qBittorrent, another project's
+// Docker dev stack and two terminals. That is somebody using the machine, and
+// the rule must say so.
+const AGENT_AT_WORK = [
+  0.73, 0.57, 0.38, 0.35, 0.45, 0.57, 1.14, 0.53, 0.52, 0.69, 0.61, 0.92, 0.43, 0.36, 1.58,
+  0.42, 0.63, 0.58, 0.52, 1.39, 0.77, 1.46, 1.25, 0.54, 0.44, 0.62, 0.73, 0.56, 0.50, 0.68,
+]
+
+function trips(series, line = 1.0) {
+  const activity = createActivityWindow({ size: 3 })
+  return series.filter(cores => {
+    activity.push(cores)
+    return (activity.mean() ?? 0) >= line
+  }).length
+}
+
+test('real work next to the background still reads as somebody here', () => {
+  // With a ten-minute hold, a trip every twenty seconds or so keeps it in use.
+  assert.ok(trips(AGENT_AT_WORK) >= 2)
+})
+
+test('the always-on background and its one-sample spikes do not', () => {
+  // The floor measured per process: qBittorrent 0.25, GNOME Shell 0.09, the
+  // other stack's JVMs 0.06 and the rest ~0.1 -- right on the old 0.5 line, so
+  // under the old rule nothing ever went quiet. Spikes on it last one sample.
+  const background = [0.5, 0.45, 1.5, 0.5, 0.55, 0.45, 1.2, 1.2, 0.5, 0.45, 0.6, 1.4, 0.5, 0.5, 0.45]
+  assert.ok(background.filter(cores => cores >= 0.5).length >= 10, 'the old rule trips constantly')
+  assert.equal(trips(background), 0)
+})
+
+test('somebody working trips it within one window', () => {
+  // 1.36-1.94 cores is what the machine's owner working was measured at.
+  const activity = createActivityWindow({ size: 3 })
+  for (const cores of [0.45, 0.5, 1.4, 1.9, 1.6]) activity.push(cores)
+  assert.ok(activity.mean() >= 1.0)
+})
+
+test('the window says nothing until it is full, and ignores gaps', () => {
+  const activity = createActivityWindow({ size: 3 })
+  activity.push(5)
+  activity.push(null)
+  activity.push(Number.NaN)
+  assert.equal(activity.mean(), null)
 })

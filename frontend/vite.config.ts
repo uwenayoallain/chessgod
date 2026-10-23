@@ -15,7 +15,7 @@ const serverOptions = {
       // Inside the compose stack `localhost` is the frontend container
       // itself, so every proxied request answered 502; compose points this
       // at the backend service.
-      target: process.env.API_PROXY_TARGET ?? 'http://localhost:8000',
+      target: process.env.API_PROXY_TARGET ?? 'http://localhost:18000',
       changeOrigin: true,
     },
   },

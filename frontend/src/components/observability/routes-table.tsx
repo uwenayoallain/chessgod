@@ -38,7 +38,7 @@ export function RoutesTable({ routes }: Props) {
   return (
     <Card>
       <CardHeader>
-        <h2>Top Backend Routes</h2>
+        <h2>Top backend routes</h2>
       </CardHeader>
       <CardBody>
         <table className="table">

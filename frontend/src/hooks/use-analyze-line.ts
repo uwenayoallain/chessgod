@@ -1,11 +1,12 @@
 import { useCallback } from 'react'
 
-import { useGameLine } from '@/hooks/use-game-line'
 import { useEngine } from '@/hooks/use-engine'
+import { buildFullGameLine } from '@/lib/analysis/active-line'
 import { prefetchBookPlies } from '@/lib/analysis/book-moves'
 import { GAME_REVIEW_DEPTH } from '@/lib/analysis/review-depth'
 import { api } from '@/lib/api'
-import { useAppStore } from '@/store/app-store'
+import { useGameLine } from '@/hooks/use-game-line'
+import { useAppStore, type ReplayMove } from '@/store/app-store'
 
 /**
  * Runs the engine over the whole line currently on the board — the action
@@ -16,12 +17,11 @@ export function useAnalyzeLine() {
   const setBookPlies = useAppStore((state) => state.setBookPlies)
   const setAnalysisRequested = useAppStore((state) => state.setAnalysisRequested)
   const { analyze, queueReplayAnalysis, enabled } = useEngine({ autoAnalyze: false })
-  // The whole game: a freshly loaded game leaves the cursor at the start,
-  // and a review scoped to the cursor would cover nothing.
-  const { fenHistory, replayMoves } = useGameLine()
+  // Only for `canAnalyze`, a button's state, which belongs to the render.
+  const rendered = useGameLine()
 
   const preloadBookPlies = useCallback(
-    async (requestFenHistory: string[], requestReplayMoves: typeof replayMoves) => {
+    async (requestFenHistory: string[], requestReplayMoves: ReplayMove[]) => {
       if (!requestReplayMoves.length) {
         setBookPlies([])
         return
@@ -53,6 +53,13 @@ export function useAnalyzeLine() {
 
   const analyzeLine = useCallback(
     async ({ depth = GAME_REVIEW_DEPTH }: { depth?: number } = {}) => {
+      // The whole game, read from the store at the moment of the call: a
+      // freshly loaded game leaves the cursor at the start, and a line taken
+      // from the render that handed out this callback could still be the
+      // previous board (a saved game opened and reviewed in the same tick
+      // analysed one empty position instead of its 67 moves).
+      const { nodes, currentNodeId } = useAppStore.getState()
+      const { fenHistory, replayMoves } = buildFullGameLine(nodes, currentNodeId)
       const requestFenHistory = [...fenHistory]
       const requestReplayMoves = [...replayMoves]
 
@@ -75,16 +82,8 @@ export function useAnalyzeLine() {
         console.warn('[chessgod] Failed to load book moves:', err)
       })
     },
-    [
-      analyze,
-      enabled,
-      fenHistory,
-      preloadBookPlies,
-      queueReplayAnalysis,
-      replayMoves,
-      setAnalysisRequested,
-    ],
+    [analyze, enabled, preloadBookPlies, queueReplayAnalysis, setAnalysisRequested],
   )
 
-  return { analyzeLine, canAnalyze: fenHistory.length > 1 }
+  return { analyzeLine, canAnalyze: rendered.fenHistory.length > 1 }
 }

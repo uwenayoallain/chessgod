@@ -53,5 +53,5 @@ export function describeSessionEstimate({
     availablePositions > drillCount
       ? `${drillCount} of ${availablePositions.toLocaleString()} positions`
       : `${drillCount} ${drillCount === 1 ? 'position' : 'positions'}`
-  return `${scope}, about ${minutes} min — roughly 40s for a one-move lesson and 60s for a two-move one, filling a ten-minute session.`
+  return `${scope}, about ${minutes} min. A session stops at 10 minutes, so longer sets are split.`
 }

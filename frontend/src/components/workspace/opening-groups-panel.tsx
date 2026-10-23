@@ -58,13 +58,15 @@ export const OpeningGroupsPanel = memo(function OpeningGroupsPanel({
 
   return (
     <Card>
+      {/* The Library header's "Openings" toggle already names this view. */}
       <CardHeader>
-        <h2>Your openings</h2>
+        <span className="muted">
+          {(data?.total ?? 0).toLocaleString()} openings, most played first
+        </span>
         <div className="panel-header__meta">
           {isRefreshing || isLoadingPreview ? (
             <span className="refresh-badge">Updating</span>
           ) : null}
-          <span className="muted">{(data?.total ?? 0).toLocaleString()} openings</span>
         </div>
       </CardHeader>
       <CardBody className="column">
@@ -104,7 +106,11 @@ export const OpeningGroupsPanel = memo(function OpeningGroupsPanel({
         {!isLoading && !error && !data?.openings.length ? (
           <div className="rail-empty">
             <strong>No openings</strong>
-            <span>Nothing matches these filters.</span>
+            <span>
+              {color !== 'both' || timeClass
+                ? 'Nothing matches these filters.'
+                : 'Import games to see the openings you play.'}
+            </span>
           </div>
         ) : null}
 
@@ -143,7 +149,9 @@ export const OpeningGroupsPanel = memo(function OpeningGroupsPanel({
                 >
                   {winRate}% win ({opening.wins}W·{opening.draws}D·{opening.losses}L)
                 </span>
-                <span>{formatGameDate(opening.latest_played_at)}</span>
+                <span className="workspace-list__date">
+                  {formatGameDate(opening.latest_played_at)}
+                </span>
               </div>
               <div
                 className="score-distribution-bar"

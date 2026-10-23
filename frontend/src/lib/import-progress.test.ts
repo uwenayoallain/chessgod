@@ -25,7 +25,7 @@ function progress(over: Partial<ImportProgress> = {}): ImportProgress {
 describe('formatImportProgressLabel', () => {
   it('counts archives while running', () => {
     expect(formatImportProgressLabel(progress(), 'running')).toBe(
-      'Archive 2/35 · 4 new games found',
+      'Month 2 of 35 · 4 new games found',
     )
   })
 
@@ -51,18 +51,31 @@ describe('formatImportProgressLabel', () => {
 describe('formatImportProgressDetail', () => {
   it('shows progress through the archive', () => {
     expect(formatImportProgressDetail(progress())).toBe(
-      '2026/08 · 80/105 games · 0 new here · 80 existing here',
+      '2026/08 · 80/105 games · 0 new · 80 already stored',
     )
   })
 
   it('does not print a fraction before the archive size is known', () => {
     // This used to read "0/? games".
     expect(formatImportProgressDetail(progress({ gamesInArchive: 0, currentGameIndex: 0 }))).toBe(
-      '2026/08 · reading games · 0 new here · 80 existing here',
+      '2026/08 · reading games · 0 new · 80 already stored',
+    )
+  })
+
+  it('says how many months were checked, never a library size', () => {
+    // "99 games already in your library" read as a library of 99 games.
+    const done = progress({
+      currentGameLabel: 'Import complete',
+      totalArchives: 2,
+      skippedGames: 99,
+    })
+    expect(formatImportProgressDetail(done)).toBe('Checked 2 months of games on Chess.com')
+    expect(formatImportProgressDetail({ ...done, totalArchives: 0 })).toBe(
+      'Your library is up to date',
     )
   })
 
   it('says when an archive came from cache', () => {
-    expect(formatImportProgressDetail(progress({ cached: true }))).toMatch(/reused from cache/)
+    expect(formatImportProgressDetail(progress({ cached: true }))).toMatch(/unchanged/)
   })
 })

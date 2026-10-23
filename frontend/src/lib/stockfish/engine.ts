@@ -118,11 +118,23 @@ export class StockfishEngine {
 
     this.initStarted = true
     this.initPromise = Promise.resolve().then(() => {
-      this.post({
-        type: 'init',
-        hash,
-        threads,
-      })
+      try {
+        this.post({
+          type: 'init',
+          hash,
+          threads,
+        })
+      } catch (error) {
+        // The worker could not be created at all: no `Worker` outside a
+        // browser, or a module worker refused. A thrown constructor is the
+        // engine failing like any other error, so it goes through `onError`
+        // and the promise settles, instead of an unhandled rejection every
+        // caller of `init()` would have to catch. The flag resets so a later
+        // `init()` tries again rather than returning this failure forever.
+        this.initStarted = false
+        this.initPromise = null
+        this.callbacks.onError(error instanceof Error ? error.message : String(error))
+      }
     })
 
     return this.initPromise

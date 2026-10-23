@@ -8,6 +8,7 @@ import {
 } from '@/lib/analysis/continuation'
 import { useAppStore } from '@/store/app-store'
 import { useEngineStore } from '@/store/engine-store'
+import { GAME_REVIEW_DEPTH } from '@/lib/analysis/review-depth'
 
 /** Plies to show: enough to answer "and then what?", short enough to read. */
 const CONTINUATION_PLIES = 6
@@ -38,11 +39,21 @@ export function DrillContinuation({ fen, active }: { fen: string; active: boolea
   const engineReady = useEngineStore((state) => state.isReady)
 
   useEffect(() => {
-    if (!active || !engineEnabled || !engineReady || !fen) return
+    if (!active || !engineEnabled || !fen) return
     // Only if nothing is cached: the crawl and the board fill this same cache,
     // so a position already searched costs nothing here.
     if (pickTopLine(fen)) return
-    void useEngineStore.getState().analyzePosition(fen, { priority: 'normal' })
+    // The engine starts on demand and is released when idle; start it, and
+    // this runs again once it is ready.
+    if (!engineReady) {
+      void useEngineStore.getState().init()
+      return
+    }
+    // Review depth, not the board's 30: this is a line under a finished drill,
+    // and a depth-30 row would also make the crawler deepen its partner to 30.
+    void useEngineStore
+      .getState()
+      .analyzePosition(fen, { priority: 'normal', depth: GAME_REVIEW_DEPTH })
   }, [active, engineEnabled, engineReady, fen])
 
   const continuation: Continuation | null = useMemo(() => {

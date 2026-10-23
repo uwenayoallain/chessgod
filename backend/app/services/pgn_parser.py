@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import chess.pgn
 
 from app.utils.fen import normalize_fen
+from app.utils.opening_names import restore_apostrophes
 
 
 @dataclass
@@ -96,7 +97,9 @@ def parse_game_pgn(pgn_text: str) -> ParsedGame:
 
     headers = game.headers
     eco_url = headers.get("ECOUrl")
-    opening_name = eco_url.split("/")[-1].replace("-", " ") if eco_url else headers.get("Opening")
+    opening_name = restore_apostrophes(
+        eco_url.split("/")[-1].replace("-", " ") if eco_url else headers.get("Opening")
+    )
 
     return ParsedGame(
         positions=positions,

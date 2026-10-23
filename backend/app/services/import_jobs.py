@@ -41,11 +41,26 @@ async def create_import_job(session: AsyncSession, username: str) -> str | None:
     return await session.scalar(stmt.on_conflict_do_nothing().returning(ImportJob.id))
 
 
+TERMINAL_EVENT_TYPES = frozenset({"complete", "error", "cancelled"})
+
+
+async def cancel_import_job(session: AsyncSession, username: str) -> str | None:
+    """Stop the player's running import. The worker is fenced the same way an
+    expired job is: its next event append fails and run_import unwinds."""
+    job_id = await session.scalar(select(ImportJob.id).where(
+        ImportJob.username == username.lower(), ImportJob.status == "running",
+    ).with_for_update())
+    if job_id is None:
+        return None
+    await append_import_event(session, job_id, {"type": "cancelled", "message": "Import stopped."})
+    return job_id
+
+
 async def append_import_event(session: AsyncSession, job_id: str, payload: dict) -> bool:
     status = payload.get("type")
     changed = await session.scalar(update(ImportJob).where(
         ImportJob.id == job_id, ImportJob.status == "running",
-    ).values(updated_at=datetime.now(UTC), status=status if status in {"complete", "error"} else "running")
+    ).values(updated_at=datetime.now(UTC), status=status if status in TERMINAL_EVENT_TYPES else "running")
       .returning(ImportJob.id))
     if changed is None:
         return False

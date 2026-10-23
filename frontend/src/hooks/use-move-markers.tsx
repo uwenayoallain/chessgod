@@ -82,6 +82,17 @@ export function useMoveMarkers(
 
   const currentFen = useAppStore((state) => state.currentFen)
   const isSolvingDrill = useAppStore((state) => state.drillSolving)
+  const trainerArrows = useAppStore((state) => state.trainerArrows)
+  const trainerArrowsFen = useAppStore((state) => state.trainerArrowsFen)
+  const hintSquare = useAppStore((state) => state.hintSquare)
+  const hintSquareFen = useAppStore((state) => state.hintSquareFen)
+  // The hint's ring shows on the question's board alone.
+  const hintOn =
+    hintSquare != null &&
+    (hintSquareFen == null ||
+      hintSquareFen.split(' ', 4).join(' ') === currentFen.split(' ', 4).join(' '))
+      ? hintSquare
+      : null
   const sparring = useIsSparring()
   const _arrowVersion = useEngineStore((state) => state.analysisVersion)
   const engineBestMove = useEngineStore((state) => state.bestMove)
@@ -107,6 +118,13 @@ export function useMoveMarkers(
   }, [annotation, showAnnotations])
 
   const customArrows: BoardArrow[] = useMemo(() => {
+    // A trainer's own arrows are the lesson; nothing else may compete with them.
+    // Arrows scoped to a position apply there alone: the moment the board moves
+    // on, they are gone rather than pointing at squares of another game.
+    const arrowsApply =
+      trainerArrowsFen == null ||
+      trainerArrowsFen.split(' ', 4).join(' ') === currentFen.split(' ', 4).join(' ')
+    if (trainerArrows.length && arrowsApply) return trainerArrows
     // The engine's best move and the opponent's hanging-piece threat are both
     // answers to the question a drill is asking, so neither is drawn while
     // solving — nor during a game against the engine, where every move is one.
@@ -119,7 +137,16 @@ export function useMoveMarkers(
       bestMove: currentAnalysisBestMove,
       fen: currentFen,
     })
-  }, [engineBestMove, analyzedFen, _arrowVersion, currentFen, isSolvingDrill, sparring])
+  }, [
+    engineBestMove,
+    analyzedFen,
+    _arrowVersion,
+    currentFen,
+    isSolvingDrill,
+    sparring,
+    trainerArrows,
+    trainerArrowsFen,
+  ])
 
   const squareRenderer = useCallback(
     ({ square, children }: { piece: unknown; square: string; children?: React.ReactNode }) => {
@@ -130,6 +157,11 @@ export function useMoveMarkers(
         <div
           style={{ position: 'relative', width: '100%', height: '100%', ...squareStyles[square] }}
         >
+          {hintOn === square ? (
+            // The whole square lit, under the piece: the mark chess sites use
+            // for "look here". A ring was mostly hidden by the piece on it.
+            <div aria-hidden="true" className="board-hint-square" />
+          ) : null}
           {children}
           {label ? (
             <div className="board-move-marker" title={annotationTitle(label)}>
@@ -149,7 +181,7 @@ export function useMoveMarkers(
         </div>
       )
     },
-    [markersBySquare, bookMarkers, squareStyles],
+    [markersBySquare, bookMarkers, squareStyles, hintOn],
   )
 
   return {

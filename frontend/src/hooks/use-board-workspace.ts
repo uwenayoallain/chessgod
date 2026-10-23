@@ -117,7 +117,11 @@ export function useBoardWorkspace({
       fen: m.resulting_fen,
     }))
 
-    loadReplay(replay)
+    // Land on the end of the line: the position that defines the opening, with
+    // its last move highlighted. Landing on ply 0 left the board visibly
+    // unchanged, which read as the click not working; stepping back through
+    // the line is one key away.
+    loadReplay(replay, replay.length)
     preloadReplayInsights(
       replay,
       replay.map((move) => move.ply),

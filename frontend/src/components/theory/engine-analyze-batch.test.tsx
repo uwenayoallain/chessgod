@@ -152,7 +152,7 @@ describe('analysis batch phase summary', () => {
         middlegame: 4,
         opening: 5,
       }),
-    ).toBe('Next batch: 4 endgame · 4 middlegame · 5 opening decision pairs.')
+    ).toBe('Next up: 4 endgame, 4 middlegame, 5 opening positions.')
     expect(formatSelectedPairCounts({ endgame: 0, middlegame: 0, opening: 0 })).toBeNull()
   })
 })
@@ -184,7 +184,7 @@ it('stops asking for work this browser cannot take on', async () => {
     // It gives a pending upload a couple of cycles, then stops.
     expect(post.mock.calls.length).toBeLessThanOrEqual(3)
     expect(screen.getByRole('button', { name: 'Analyze my games' })).toBeTruthy()
-    expect(screen.getByText(/already analyzed in this browser/)).toBeTruthy()
+    expect(screen.getByText(/Paused while finished analysis uploads/)).toBeTruthy()
   } finally {
     cleanup()
     engineStore.useEngineStore.setState({ queueReplayAnalysis: originalQueue })
@@ -257,7 +257,7 @@ it('shows which phases the engine has actually judged', async () => {
     expect(screen.getByText('3,641 of 93,945')).toBeTruthy()
     expect(screen.getByText('26')).toBeTruthy()
     expect(screen.getByText(/middlegame and endgame play has barely been analyzed/)).toBeTruthy()
-    expect(screen.getByText(/not a clean bill of health/)).toBeTruthy()
+    expect(screen.getByText(/doesn't mean it has no mistakes/)).toBeTruthy()
   } finally {
     cleanup()
   }

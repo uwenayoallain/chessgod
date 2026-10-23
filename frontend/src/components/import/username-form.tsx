@@ -18,7 +18,7 @@ export function UsernameForm() {
   function handleSubmit(event: FormEvent) {
     event.preventDefault()
     if (draft.trim().length === 0) {
-      setHint('Type the Chess.com username whose games you want to read.')
+      setHint('Enter a Chess.com username first.')
       return
     }
     setHint(null)
@@ -29,7 +29,7 @@ export function UsernameForm() {
   return (
     <Card className="landing__card">
       <CardHeader>
-        <h2>Start here</h2>
+        <h2>Import your games</h2>
       </CardHeader>
       <CardBody>
         <form className="column" style={{ gap: '18px' }} onSubmit={handleSubmit}>

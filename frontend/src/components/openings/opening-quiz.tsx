@@ -3,9 +3,13 @@ import { useQuery } from '@tanstack/react-query'
 import { Check, ChevronRight, RotateCcw, X } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
+import { HintControl } from '@/components/training/hint-control'
+import { Medal } from '@/components/training/trophies'
+import { useHint } from '@/hooks/use-hint'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PanelError } from '@/components/ui/panel-error'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
+import { postTrainingEvent, useApplyReward } from '@/hooks/use-training'
 import { api } from '@/lib/api'
 import {
   describeUsualMove,
@@ -59,6 +63,9 @@ export function OpeningQuiz({
   // The first answer per position: a retry is practice, not a second score.
   const [results, setResults] = useState<Record<number, QuizVerdict['kind']>>({})
   const rootId = useRef<string | null>(null)
+  // One run of the quiz: its first answers earn XP once, however often it re-renders.
+  const run = useRef(Date.now())
+  const applyReward = useApplyReward(username)
 
   const loadPosition = useAppStore((state) => state.loadPosition)
   const alignBoardToUserColor = useAppStore((state) => state.alignBoardToUserColor)
@@ -67,6 +74,12 @@ export function OpeningQuiz({
 
   const positions = quiz.data ?? []
   const position = positions[index] as OpeningQuizPosition | undefined
+  // Toward the book's main move; any book move still scores.
+  const book = position?.book_moves[0]
+  const hints = useHint(
+    status === 'asking' && position && book ? { fen: position.fen, uci: book.uci } : null,
+    position?.position_id ?? null,
+  )
 
   function ask(next: number) {
     const item = positions[next]
@@ -89,6 +102,7 @@ export function OpeningQuiz({
   }
 
   function restart() {
+    run.current = Date.now()
     setResults({})
     ask(0)
   }
@@ -102,7 +116,17 @@ export function OpeningQuiz({
     setResults((previous) =>
       index in previous ? previous : { ...previous, [index]: verdict.kind },
     )
+    if (!(index in results)) {
+      const inBook = verdict.kind !== 'off-book'
+      void postTrainingEvent(
+        username,
+        inBook ? 'quiz_correct' : 'quiz_answer',
+        `quiz:${run.current}:${position.position_id}`,
+        { position_id: position.position_id },
+      ).then((reward) => applyReward(reward, inBook ? 'Book move' : 'Quiz answer'))
+    }
     setStatus('answered')
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scored once per new move
   }, [currentNode, index, position, status])
 
   useEffect(() => {
@@ -120,7 +144,7 @@ export function OpeningQuiz({
     return (
       <EmptyState
         title="No book positions yet"
-        message="The quiz needs positions from your games that masters have played often. Import more games, or wait for the master sync to reach your openings."
+        message="No positions masters play often yet. Import more games."
       />
     )
   }
@@ -133,19 +157,28 @@ export function OpeningQuiz({
     return (
       <div className="opening-quiz">
         {status === 'done' ? (
-          <p className="opening-quiz__headline">
-            <strong>
-              {inBook.toLocaleString()} of {answered.length.toLocaleString()}
-            </strong>{' '}
-            answers were book moves.
-          </p>
+          <div className="result-hero">
+            <Medal
+              earned={answered.length > 0 && inBook === answered.length}
+              emblem="question"
+              label={`${inBook} of ${answered.length} answers were book moves`}
+              progress={answered.length ? inBook / answered.length : 0}
+              size={64}
+            />
+            <div className="result-hero__text">
+              <span className="result-hero__score">
+                {inBook.toLocaleString()}
+                <span className="muted"> / {answered.length.toLocaleString()}</span>
+              </span>
+              <span className="muted">answers were book moves.</span>
+            </div>
+          </div>
         ) : null}
         <p className="muted opening-quiz__intro">
-          {positions.length.toLocaleString()} positions from your own games, each checked against
-          what masters play.{' '}
+          {positions.length.toLocaleString()} positions from your own games.{' '}
           {leaks > 0
-            ? `In ${leaks.toLocaleString()} of them your usual move is not a book move — those come first.`
-            : 'Your usual move is book in every one of them.'}
+            ? `In ${leaks.toLocaleString()} of them your usual move isn't a book move, so those come first.`
+            : 'Your usual move is a book move in all of them.'}
         </p>
         <Button onClick={restart} type="button" variant="primary">
           {status === 'done' ? (
@@ -184,8 +217,8 @@ export function OpeningQuiz({
 
       {status === 'asking' ? (
         <p className="opening-quiz__prompt">
-          {position.side_to_move === 'white' ? 'White' : 'Black'} to move. Play the move you would
-          choose on the board.
+          {position.side_to_move === 'white' ? 'White' : 'Black'} to move. Play your move on the
+          board.
         </p>
       ) : answer ? (
         <div className="opening-quiz__answer" data-kind={answer.verdict.kind} aria-live="polite">
@@ -217,14 +250,20 @@ export function OpeningQuiz({
               {index >= positions.length - 1 ? 'Finish' : 'Next position'}{' '}
               <ChevronRight size={14} />
             </Button>
-            <Button onClick={() => ask(index)} type="button">
-              <RotateCcw size={14} /> Try again
-            </Button>
+            {answer?.verdict.kind === 'off-book' ? (
+              // Only after a miss: offered after a book move it reads as one.
+              <Button onClick={() => ask(index)} type="button">
+                <RotateCcw size={14} /> Try again
+              </Button>
+            ) : null}
           </>
         ) : (
-          <Button onClick={next} type="button" variant="ghost">
-            Skip
-          </Button>
+          <>
+            <HintControl hints={hints} />
+            <Button onClick={next} type="button" variant="ghost">
+              Skip
+            </Button>
+          </>
         )}
       </div>
     </div>

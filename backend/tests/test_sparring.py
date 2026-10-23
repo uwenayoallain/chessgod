@@ -122,3 +122,20 @@ async def test_a_mistake_whose_line_does_not_play_is_refused(session):
         )
     assert refused.value.status_code == 422
     assert await session.scalar(select(func.count()).select_from(AnalysisResult)) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_boss_fight_pays_on_top_of_the_game(session):
+    plain = await sparring.save_game(game(result="win"), session=session)
+    boss_won = await sparring.save_game(game(result="win", origin="boss:scotch"), session=session)
+    boss_held = await sparring.save_game(game(result="draw", origin="boss:scotch"), session=session)
+    boss_lost = await sparring.save_game(game(result="loss", origin="boss:scotch"), session=session)
+    assert plain.xp_gained == 15
+    assert boss_won.xp_gained == 15 + 30
+    assert boss_held.xp_gained == 15 + 30
+    assert boss_lost.xp_gained == 15 + 5
+
+
+def test_an_origin_must_look_like_one():
+    with pytest.raises(ValueError):
+        game(origin="boss scotch; drop table")

@@ -14,6 +14,7 @@ from app.models.position_outcome import PositionOutcome
 from app.models.position_move import PositionMove
 from app.models.repertoire_mark import RepertoireMark
 from app.models.sparring import SparringGame, SparringMistake
+from app.models.training import LineMoveProgress, TrainingEvent
 
 __all__ = [
     "AnalysisResult",
@@ -23,6 +24,7 @@ __all__ = [
     "ExternalSyncState",
     "Game",
     "GamePosition",
+    "LineMoveProgress",
     "ImportArchive",
     "ObservabilityEvent",
     "OpeningFamily",
@@ -32,4 +34,5 @@ __all__ = [
     "RepertoireMark",
     "SparringGame",
     "SparringMistake",
+    "TrainingEvent",
 ]

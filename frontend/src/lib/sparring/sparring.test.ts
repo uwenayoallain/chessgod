@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vite-plus/test'
 
 import {
   applyUciMove,
+  describeReviewStatus,
   CALIBRATION_RATING,
   chooseBookMove,
   chooseSparMove,
@@ -182,5 +183,28 @@ describe('running out of time', () => {
     expect(formatClock(61_200)).toBe('1:02')
     expect(formatClock(9_450)).toBe('9.4')
     expect(formatClock(-5)).toBe('0.0')
+  })
+})
+
+describe('describeReviewStatus', () => {
+  it('ends the moment the review does, before the drills are posted', () => {
+    expect(
+      describeReviewStatus({ savedGameId: null, mistakesPosted: null, reviewSettled: false }),
+    ).toBe('Reviewing the game…')
+    expect(
+      describeReviewStatus({ savedGameId: 4, mistakesPosted: null, reviewSettled: true }),
+    ).toBe('Reviewed. Adding the drills…')
+  })
+
+  it('counts the drills, and says so when they could not be saved', () => {
+    expect(describeReviewStatus({ savedGameId: 4, mistakesPosted: 0, reviewSettled: true })).toBe(
+      'Reviewed. No mistakes to drill from this one.',
+    )
+    expect(describeReviewStatus({ savedGameId: 4, mistakesPosted: 5, reviewSettled: true })).toBe(
+      'Reviewed: 5 mistakes added to your drills.',
+    )
+    expect(
+      describeReviewStatus({ savedGameId: 4, mistakesPosted: 'failed', reviewSettled: true }),
+    ).toBe('Reviewed. The drills could not be saved this time.')
   })
 })

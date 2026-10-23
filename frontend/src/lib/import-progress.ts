@@ -43,7 +43,7 @@ export function reduceImportProgress(
       totalArchives: Number(payload.total_archives ?? current?.totalArchives ?? 0),
       gamesInArchive: 0,
       currentGameIndex: 0,
-      currentGameLabel: 'Preparing archive…',
+      currentGameLabel: 'Reading this month…',
       newGames: current?.newGames ?? 0,
       skippedGames: current?.skippedGames ?? 0,
       archiveNewGames: 0,
@@ -106,7 +106,7 @@ export function reduceImportProgress(
       currentArchive: String(payload.archive ?? current.currentArchive),
       gamesInArchive,
       currentGameIndex: gamesInArchive,
-      currentGameLabel: payload.cached ? 'Reused cached archive' : 'Archive complete',
+      currentGameLabel: payload.cached ? 'Month unchanged' : 'Month complete',
       newGames: baseline.newGames + archiveNewGames,
       skippedGames: baseline.skippedGames + archiveSkippedGames,
       archiveNewGames,
@@ -130,24 +130,24 @@ export function formatImportProgressLabel(progress: ImportProgress | null, statu
   }
 
   const cacheLabel = progress.cached
-    ? 'cached'
+    ? 'no new games'
     : `${pluralize(progress.newGames, 'new game')} found`
-  return `Archive ${progress.archiveIndex}/${progress.totalArchives} · ${cacheLabel}`
+  return `Month ${progress.archiveIndex} of ${progress.totalArchives} · ${cacheLabel}`
 }
 
 export function formatImportProgressDetail(progress: ImportProgress | null) {
-  if (!progress) return 'Connecting to Chess.com archives'
+  if (!progress) return 'Contacting Chess.com…'
 
   if (progress.currentGameLabel === 'Import complete') {
-    const cached =
-      progress.cachedArchives > 0
-        ? ` · ${pluralize(progress.cachedArchives, 'cached archive')}`
-        : ''
-    return `${pluralize(progress.skippedGames, 'existing game')} skipped${cached}`
+    // The skipped count is only the months re-read, never the library; "99
+    // games already in your library" read as a library of 99 games.
+    return progress.totalArchives > 0
+      ? `Checked ${pluralize(progress.totalArchives, 'month')} of games on Chess.com`
+      : 'Your library is up to date'
   }
 
   if (progress.cached) {
-    return `${progress.currentArchive} reused from cache · ${pluralize(progress.archiveSkippedGames, 'game')} already stored`
+    return `${progress.currentArchive} unchanged · ${pluralize(progress.archiveSkippedGames, 'game')} already stored`
   }
 
   // Before the archive reports its size there is no denominator to show, and
@@ -156,5 +156,5 @@ export function formatImportProgressDetail(progress: ImportProgress | null) {
     progress.gamesInArchive > 0
       ? `${progress.currentGameIndex}/${progress.gamesInArchive} games`
       : 'reading games'
-  return `${progress.currentArchive} · ${counted} · ${importCount(progress.archiveNewGames, 'new here')} · ${importCount(progress.archiveSkippedGames, 'existing here')}`
+  return `${progress.currentArchive} · ${counted} · ${importCount(progress.archiveNewGames, 'new')} · ${importCount(progress.archiveSkippedGames, 'already stored')}`
 }

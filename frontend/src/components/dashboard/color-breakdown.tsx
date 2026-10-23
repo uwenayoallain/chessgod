@@ -11,7 +11,7 @@ export function ColorBreakdown({ stats }: { stats: GameStats }) {
   return (
     <Card className="stats-panel">
       <CardHeader>
-        <h2>Results by Color</h2>
+        <h2>Results by color</h2>
       </CardHeader>
       <CardBody className="stats-panel__body">
         <div className="stats-color-grid">

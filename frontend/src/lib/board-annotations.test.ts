@@ -37,4 +37,23 @@ describe('shouldShowBoardAnnotations', () => {
       }),
     ).toBe(true)
   })
+
+  it('shows board annotations for a reviewed game against the engine', () => {
+    expect(
+      shouldShowBoardAnnotations({
+        hasActiveGame: false,
+        hasSelectedOpening: false,
+        hasSparringReview: true,
+      }),
+    ).toBe(true)
+    // Not while the game is still being played: every grade is an answer.
+    expect(
+      shouldShowBoardAnnotations({
+        hasActiveGame: false,
+        hasSelectedOpening: false,
+        hasSparringReview: true,
+        isSolvingDrill: true,
+      }),
+    ).toBe(false)
+  })
 })

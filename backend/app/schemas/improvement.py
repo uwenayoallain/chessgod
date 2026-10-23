@@ -205,6 +205,8 @@ class DrillAttemptIn(BaseModel):
     # a one-move card; omission preserves compatibility with older clients.
     expected_follow_up: DrillFollowUpOut | None = None
     response_ms: int | None = Field(default=None, ge=0, le=3_600_000)
+    # The player's time zone, so a daily quest the answer finishes is paid on their day.
+    tz: str | None = Field(default=None, max_length=64)
 
 
 class DrillAttemptOut(BaseModel):
@@ -219,3 +221,82 @@ class DrillAttemptOut(BaseModel):
     streak: int
     interval_days: int
     due_at: datetime
+    # XP this answer earned (services/training.py); 0 for a replayed request.
+    xp_gained: int = 0
+
+
+class PhaseLossOut(BaseModel):
+    """One phase's part of the winning chances the player gave away."""
+
+    phase: str
+    analyzed_decisions: int
+    # Both shares are estimated over *all* the player's decisions, not only the
+    # analysed ones, so a library analysed mostly in one phase is not misread.
+    share_of_moves: float
+    share_of_loss: float
+    # Expected score given away per move, 0-1 (0.05 = five percentage points).
+    average_loss: float
+
+
+class LossKindOut(BaseModel):
+    """What kind of move gave the chances away, after the opening."""
+
+    key: str
+    label: str
+    decisions: int
+    share_of_loss: float
+
+
+class OpeningFixOut(BaseModel):
+    """An opening move the player keeps repeating that the engine says loses."""
+
+    position_id: int
+    fen: str
+    # The move that led to `fen`, so the board can show what is being answered.
+    last_move_uci: str | None = None
+    side_to_move: str
+    opening_name: str | None = None
+    played_san: str
+    played_uci: str
+    best_san: str
+    best_uci: str
+    occurrences: int
+    average_loss_cp: int
+
+
+class OutOfOpeningOut(BaseModel):
+    """How the player's games stand once the opening is over, for one colour.
+
+    Where the evaluation drops is not where the damage starts: an opening that
+    leaves the player a pawn down hands them a middlegame that looks like
+    middlegame mistakes. This measures the position the opening *delivers*.
+    """
+
+    color: str
+    games: int
+    # The evaluation after move 10, from the player's side.
+    average_cp: int
+    # Share of games a pawn or more down after move 10.
+    worse_share: float
+    score_when_worse: float | None = None
+    score_when_level: float | None = None
+
+
+class PointsLostOut(BaseModel):
+    username: str
+    color: str
+    time_class: str
+    min_user_rating: int
+    analyzed_decisions: int
+    total_decisions: int
+    phases: list[PhaseLossOut]
+    # Moves that each gave away at least `big_error_threshold` of expected score.
+    big_error_threshold: float
+    big_error_share_of_moves: float
+    big_error_share_of_loss: float
+    kinds: list[LossKindOut]
+    opening_fixes: list[OpeningFixOut]
+    # lighter / even / heavier than the opening's share of moves, or
+    # insufficient when either side has too few analysed decisions to say.
+    opening_verdict: str
+    out_of_opening: list[OutOfOpeningOut] = Field(default_factory=list)

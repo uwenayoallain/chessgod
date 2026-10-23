@@ -8,11 +8,11 @@ export function StatsOverview({ stats }: { stats: GameStats }) {
   return (
     <div className="card-grid">
       <div className="stat-card">
-        <div className="stat-card__label">Total Games</div>
+        <div className="stat-card__label">Total games</div>
         <div className="stat-card__value">{stats.total_games.toLocaleString()}</div>
       </div>
       <div className="stat-card">
-        <div className="stat-card__label">Win Rate</div>
+        <div className="stat-card__label">Win rate</div>
         <div className="stat-card__value">{(stats.win_rate * 100).toFixed(1)}%</div>
       </div>
       <div className="stat-card">

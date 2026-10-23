@@ -29,6 +29,11 @@ const collectedAnalyses = new WeakSet<CachedEngineAnalysis>()
 let retryCount = 0
 let retryAfter = 0
 let isFlushing = false
+// Set when a pass stopped at MAX_PENDING_ITEMS with analyses left uncollected.
+// Only then does the timer scan the cache: every new result already arrives
+// through the store subscription, and a full scan of up to 5,000 entries every
+// 3s, hidden tab or not, found nothing new almost every time.
+let collectionCut = false
 
 function rejectedItemIndexes(error: unknown, batchSize: number): Set<number> {
   if (!isAxiosError(error) || error.response?.status !== 422) return new Set()
@@ -56,12 +61,16 @@ function rejectedItemIndexes(error: unknown, batchSize: number): Set<number> {
 function collectNewItems(): EvalItem[] {
   const { analysisByFen } = useEngineStore.getState()
   const newItems: EvalItem[] = []
+  collectionCut = false
 
   for (const [fen, analysis] of Object.entries(analysisByFen)) {
     if (analysis.persisted || collectedAnalyses.has(analysis)) continue
     const engine = analysis.engine ?? STOCKFISH_ENGINE_ID
     if (engine !== STOCKFISH_ENGINE_ID) continue
-    if (pendingItems.size + analysis.lines.length > MAX_PENDING_ITEMS) break
+    if (pendingItems.size + analysis.lines.length > MAX_PENDING_ITEMS) {
+      collectionCut = true
+      break
+    }
     for (const line of analysis.lines) {
       // Keep one pending result per position/rank; a deeper search replaces
       // unsent intermediate results instead of generating another upload.
@@ -151,7 +160,7 @@ export function useEngineEvalSync() {
   // Periodic flush timer
   useEffect(() => {
     const timer = window.setInterval(() => {
-      collectNewItems()
+      if (collectionCut) collectNewItems()
       void flushPending()
     }, FLUSH_INTERVAL_MS)
 

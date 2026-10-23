@@ -24,9 +24,9 @@ function formatGames(value: number) {
 }
 
 function sourceLabel(state?: TheoryComparisonData['master_data_state']) {
-  if (state === 'synced') return 'Synced master data'
-  if (state === 'seeded') return 'Seeded book'
-  return 'No master data'
+  if (state === 'synced') return 'Lichess masters'
+  if (state === 'seeded') return 'Built-in book'
+  return 'No master data yet'
 }
 
 function MoveStatRow({ move, share }: { move: TheoryMove; share?: number | null }) {
@@ -40,7 +40,9 @@ function MoveStatRow({ move, share }: { move: TheoryMove; share?: number | null 
         <span>{formatGames(move.game_count)}</span>
         {/* The share of the book this move is, which is what "theory" means
             here — a move played in 2% of master games is not the main line. */}
-        {share != null ? <span className="mono">{formatPercent(share)} of book</span> : null}
+        {share != null ? (
+          <span className="mono">{formatPercent(share)} of master games</span>
+        ) : null}
       </div>
     </div>
   )
@@ -109,7 +111,7 @@ export function TheoryComparison({
   return (
     <Card>
       <CardHeader>
-        <h2>Theory Comparison</h2>
+        <h2>You against the book</h2>
         <div className="panel-header__meta">
           {isRefreshing ? <span className="refresh-badge">Updating</span> : null}
           <EcoBadge eco={data?.eco} name={data?.opening_name} />
@@ -118,19 +120,19 @@ export function TheoryComparison({
       </CardHeader>
       <CardBody className="split">
         <MoveColumn
-          emptyLabel="No imported moves from this position."
+          emptyLabel="You have no games from this position."
           isLoading={!data}
           loadingLabel="Loading your moves"
           moves={data?.user_moves}
-          title="Your Repertoire"
+          title="Your moves"
         />
         <MoveColumn
-          emptyLabel="No master moves for this position."
+          emptyLabel="Masters have no games from this position."
           isLoading={!data}
           loadingLabel="Loading master moves"
           moves={data?.master_moves}
           shares
-          title="Master Database"
+          title="Master moves"
         />
       </CardBody>
     </Card>

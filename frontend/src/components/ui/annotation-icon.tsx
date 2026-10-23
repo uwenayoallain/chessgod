@@ -14,47 +14,47 @@ type AnnotationAppearance = {
 const ANNOTATION_META: Record<string, AnnotationAppearance> = {
   Brilliant: {
     symbol: '!!',
-    title: 'Brilliant - a surprising sacrifice that is the best move',
+    title: 'Brilliant: a sacrifice that is also the best move',
     tone: '#1baca6',
   },
   Best: {
     icon: 'star',
-    title: 'Best - the engine top choice',
+    title: 'Best: the engine’s top choice',
     tone: '#95bb4b',
   },
   Excellent: {
     icon: 'thumbs-up',
-    title: 'Excellent - very close to the best move',
+    title: 'Excellent: almost as good as the best move',
     tone: '#96bc4b',
   },
   Good: {
     icon: 'check',
-    title: 'Good - a reasonable move with minor inaccuracy',
+    title: 'Good: gives up very little',
     tone: '#96af8b',
   },
   Book: {
     icon: 'book',
-    title: 'Book - a known opening move from master games',
+    title: 'Book: an opening move masters play',
     tone: '#a88865',
   },
   Inaccuracy: {
     symbol: '?!',
-    title: 'Inaccuracy - a suboptimal move up to 90cp loss',
+    title: 'Inaccuracy: loses up to a pawn',
     tone: '#f7c631',
   },
   Mistake: {
     symbol: '?',
-    title: 'Mistake - a significant error up to 200cp loss',
+    title: 'Mistake: loses up to two pawns',
     tone: '#ffa459',
   },
   Blunder: {
     symbol: '??',
-    title: 'Blunder - a serious error losing material or the game',
+    title: 'Blunder: loses more than two pawns',
     tone: '#fa412d',
   },
   'Missed Win': {
     icon: 'minus',
-    title: 'Missed Win - a winning chance was missed',
+    title: 'Missed win: a winning move was there and this wasn’t it',
     tone: '#dbac16',
   },
 }

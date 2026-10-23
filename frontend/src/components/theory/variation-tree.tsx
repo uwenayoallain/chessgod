@@ -12,7 +12,7 @@ export function VariationTree({
   onSelect: (family: FamilySummary) => void
 }) {
   if (!families.length) {
-    return <div className="muted">No named continuations yet.</div>
+    return <div className="muted">No named variations from here.</div>
   }
 
   return (
@@ -29,7 +29,9 @@ export function VariationTree({
             {family.eco ? <span className="badge">{family.eco}</span> : null}
           </div>
           <div className="workspace-list__meta">
-            <span>{family.child_count} branches</span>
+            <span>
+              {family.child_count} {family.child_count === 1 ? 'variation' : 'variations'}
+            </span>
             <span>{family.user_game_count.toLocaleString()} games</span>
           </div>
         </button>

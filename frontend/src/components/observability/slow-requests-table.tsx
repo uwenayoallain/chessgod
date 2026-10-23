@@ -11,7 +11,7 @@ export function SlowRequestsTable({ rows, onSelectRequestId }: Props) {
   return (
     <Card>
       <CardHeader>
-        <h2>Slow / Heavy Requests</h2>
+        <h2>Slow and heavy requests</h2>
       </CardHeader>
       <CardBody>
         <table className="table">

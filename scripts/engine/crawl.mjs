@@ -38,17 +38,20 @@ import os from 'node:os'
 import { readFileSync, readdirSync } from 'node:fs'
 import { createEngine } from './sf19.mjs'
 import { requestJson } from './http.mjs'
-import { createOutage } from './outage.mjs'
+import { createOutage, formatDuration } from './outage.mjs'
+import { createIdleWait } from './idle.mjs'
+import { createSetAside } from './setaside.mjs'
 import { uploadEvaluations, uploadWithRetry } from './upload.mjs'
 import {
   targetWorkers, createLoadHistory, nextWorkers, parseCpuPressure, pressureLimit,
 } from './pool.mjs'
 import {
-  parseProcStat, parseCgroupUsage, otherCoresBetween, presenceCeiling,
+  parseProcStat, parseCgroupUsage, otherCoresBetween, presenceCeiling, createOwnWork,
+  createActivityWindow,
 } from './presence.mjs'
 import { readPackageTempC, thermalCeiling, createTempWindow } from './thermal.mjs'
 
-const API = process.env.CRAWL_API ?? 'http://localhost:8000'
+const API = process.env.CRAWL_API ?? 'http://localhost:18000'
 const USERNAME = process.env.CRAWL_USERNAME
 const TIME_CLASS = process.env.CRAWL_TIME_CLASS ?? 'rapid_blitz'
 // Not a constant: the server owns the depth a crawl fills to and reports it as
@@ -125,11 +128,16 @@ const PRESSURE_POLL_MS = Number(process.env.CRAWL_PRESSURE_POLL_MS ?? 5_000)
 // while somebody is there at all, so the surge is never produced in the first
 // place.
 //
-// Cores of non-crawler CPU that count as "somebody is using this machine".
-// Measured here: 0.07-0.20 cores quiet, 1.36-1.94 with its owner working, so
-// 0.5 sits an order of magnitude clear of the noise on both sides. Our own
-// backend, Postgres and Redis are inside the quiet baseline.
-const ACTIVE_CORES = Number(process.env.CRAWL_ACTIVE_CORES ?? 0.5)
+// Cores of non-crawler CPU, averaged over ACTIVE_WINDOW samples, that count as
+// "somebody is using this machine". 0.5 was chosen against a quiet box at
+// 0.07-0.20 cores; this one now idles at 0.45-0.6 (qBittorrent, GNOME Shell,
+// another project's Docker dev stack) with one-sample spikes past a core, so a
+// single sample over 0.5 held it "in use" around the clock. Somebody working
+// holds 1.36-1.94, and an agent's job about a core over the floor, so 1.0 over
+// a 6s mean sits between them. See `createActivityWindow`. Our own backend and
+// Postgres are excluded outright (`createOwnWork`), not averaged away.
+const ACTIVE_CORES = Number(process.env.CRAWL_ACTIVE_CORES ?? 1.0)
+const ACTIVE_WINDOW = Math.max(1, Number(process.env.CRAWL_ACTIVE_WINDOW ?? 3))
 // How long the machine must stay quiet before the full pool is allowed.
 const IDLE_AFTER_MS = Number(process.env.CRAWL_IDLE_AFTER_MS ?? 10 * 60_000)
 // The ceiling while somebody is present, chosen by measurement rather than by
@@ -219,6 +227,8 @@ const COOL_WINDOW = Math.max(1, Number(process.env.CRAWL_COOL_WINDOW ?? 2))
 // because standing down for other work is the load guard's job, not this one's.
 const REST_MS = Number(process.env.CRAWL_REST_MS ?? 100)
 const IDLE_MS = Number(process.env.CRAWL_IDLE_MS ?? 60_000)
+// The ceiling an unchanged empty queue's wait doubles up to (idle.mjs).
+const IDLE_MAX_MS = Number(process.env.CRAWL_IDLE_MAX_MS ?? 30 * 60_000)
 const BUSY_MS = Number(process.env.CRAWL_BUSY_MS ?? 30_000)
 // How often a standing-down crawler re-checks whether it may start again.
 // This used to be BUSY_MS, which is a queue-outage backoff and far too coarse
@@ -239,6 +249,13 @@ const UPLOAD_RETRY_MAX_MS = Number(process.env.CRAWL_UPLOAD_RETRY_MAX_MS ?? 300_
 // minute or two; an outage longer than that is someone's attention, not the
 // crawler's, and polling it every BUSY_MS just buries the log.
 const QUEUE_RETRY_MAX_MS = Number(process.env.CRAWL_QUEUE_RETRY_MAX_MS ?? 300_000)
+// How long a queue request may take. The shared 30s default read a healthy
+// backend as a failing one: when the queue's pool expires the request that
+// finds it rebuilds it, which takes ~3s on a quiet machine and 12s at load 5-9,
+// and past 30s at load 10+ -- measured overnight, with another project's jobs
+// saturating the box, six requests timed out and each cost 2-4 minutes of
+// backoff for work that was about to arrive. A slow answer is still an answer.
+const QUEUE_TIMEOUT_MS = Number(process.env.CRAWL_QUEUE_TIMEOUT_MS ?? 120_000)
 
 if (!USERNAME) {
   console.error('CRAWL_USERNAME is required')
@@ -348,6 +365,12 @@ function thermalLimit(active = 0) {
 let presenceSample = null
 let lastActiveAt = Date.now()
 let lastOtherCores = null
+// Our own requests: the backend and Postgres work they cause is not a person.
+// See `createOwnWork`.
+const ownWork = createOwnWork()
+const activity = createActivityWindow({ size: ACTIVE_WINDOW })
+// What presence last told the log, so a change of state is written once.
+let reportedInUse = null
 
 function readPresenceSample() {
   try {
@@ -362,11 +385,29 @@ function readPresenceSample() {
 
 function samplePresence() {
   const next = readPresenceSample()
+  const windowStart = presenceSample?.at
   const other = otherCoresBetween(presenceSample, next)
   if (next) presenceSample = next
-  if (other == null) return
-  lastOtherCores = other
-  if (other >= ACTIVE_CORES) lastActiveAt = Date.now()
+  // Unmeasurable, or measuring our own backend: leave the belief alone.
+  if (other != null && !(windowStart != null && ownWork.overlaps(windowStart))) {
+    lastOtherCores = other
+    activity.push(other)
+    if ((activity.mean() ?? 0) >= ACTIVE_CORES) lastActiveAt = Date.now()
+  }
+  // Written on change only. This is the state the thermal line and the pool
+  // ceiling both hang on, and it was misread for days without the log ever
+  // saying which way it had gone.
+  const inUse = machineInUse()
+  if (inUse !== reportedInUse) {
+    if (reportedInUse !== null || inUse) {
+      log(inUse
+        ? `machine in use (${activity.mean() == null ? 'assumed at start' : `${activity.mean().toFixed(2)} cores of other work`}): ` +
+          `at most ${ACTIVE_MAX} engine(s), thermal line ${HOT_ACTIVE_C}C`
+        : `machine quiet for ${Math.round(IDLE_AFTER_MS / 60000)}min: ` +
+          `up to ${WORKERS_MAX} engine(s), thermal line ${HOT_C}C`)
+    }
+    reportedInUse = inUse
+  }
 }
 
 /**
@@ -457,7 +498,15 @@ async function waitForCapacity(active) {
 // every batch, costing about 40% of an engine and stretching batches from ~45s
 // to three minutes. The endpoint takes these as selection context, exactly as
 // the browser crawl reports its own timeouts, never as completed work.
-const unfinished = new Set()
+//
+// Held back for a while, not for good: a set that lasted the whole process
+// grew to thirteen positions over three days, and once those were the queue's
+// newest work a one-engine crawl got an empty batch every minute for thirty
+// hours. See setaside.mjs for the backoff.
+const unfinished = createSetAside({
+  baseMs: Number(process.env.CRAWL_RETRY_UNFINISHED_MS ?? 6 * 3_600_000),
+  maxMs: Number(process.env.CRAWL_RETRY_UNFINISHED_MAX_MS ?? 48 * 3_600_000),
+})
 // Evaluations the server refused to store. Like `unfinished`, these are
 // selection context rather than completed work: without saying so, the queue
 // re-offers a position until it is analysed, and one that can never validate
@@ -479,7 +528,7 @@ const EXCLUDE_LIMIT = 512
 // the log say so when that is not enough.
 async function probeBackend() {
   try {
-    await requestJson(new URL('/api/health', API), { timeoutMs: 5_000 })
+    await ownWork.around(() => requestJson(new URL('/api/health', API), { timeoutMs: 5_000 }))
     return 'up'
   } catch (error) {
     // A refused connection, a DNS failure or a timeout is the backend being
@@ -492,6 +541,7 @@ async function probeBackend() {
 // One continuous outage of the queue: backs the retry off to CRAWL_QUEUE_RETRY_MAX_MS
 // and makes each line state the outage rather than repeat during it.
 const outage = createOutage({ baseMs: BUSY_MS, maxMs: QUEUE_RETRY_MAX_MS })
+const idleWait = createIdleWait({ baseMs: IDLE_MS, maxMs: IDLE_MAX_MS })
 
 async function fetchBatch() {
   const url = new URL('/api/games/unanalyzed-fens', API)
@@ -499,23 +549,28 @@ async function fetchBatch() {
   url.searchParams.set('time_class', TIME_CLASS)
   url.searchParams.set('min_depth', String(minDepth))
   url.searchParams.set('limit', String(batchSize()))
-  if (unfinished.size === 0 && rejected.size === 0) return requestJson(url)
-  return requestJson(url, {
+  // Rows are stored per depth, so a side studied deep on the board is searched
+  // again at the review depth rather than its partner at 34 (see _pair_work).
+  url.searchParams.set('shallow_pairs', 'true')
+  const excluded = [...unfinished.excluded(), ...rejected]
+  if (excluded.length === 0) return ownWork.around(() => requestJson(url, { timeoutMs: QUEUE_TIMEOUT_MS }))
+  return ownWork.around(() => requestJson(url, {
+    timeoutMs: QUEUE_TIMEOUT_MS,
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     // Keep the most recent failures when there are more than the cap allows.
-    body: JSON.stringify({ exclude_fens: [...unfinished, ...rejected].slice(-EXCLUDE_LIMIT) }),
-  })
+    body: JSON.stringify({ exclude_fens: excluded.slice(-EXCLUDE_LIMIT) }),
+  }))
 }
 
 async function upload(items) {
-  return uploadEvaluations(API, items, {
+  return ownWork.around(() => uploadEvaluations(API, items, {
     onRejected: (invalid, details) => {
       for (const item of invalid) rejected.add(item.fen)
       const reasons = [...new Set(details.map(issue => issue.msg ?? issue.type ?? "unspecified validation error"))]
       log(`validation rejected ${invalid.length} evaluations: ${reasons.join("; ")}; excluding these positions and preserving the rest of the batch`)
     },
-  })
+  }))
 }
 
 // Engines are created on demand and then kept. Growing means starting one more
@@ -536,7 +591,7 @@ async function poolOf(size) {
 log(`crawling for ${USERNAME}: ${WORKERS_MIN}-${WORKERS_MAX} engine(s) x ${THREADS} thread, ` +
     `${HASH_MB}MB hash each, ${CORES} cores, under ${MAX_LOAD} load/core`)
 log(`while the machine is in use: at most ${ACTIVE_MAX} engine(s) ` +
-    `(over ${ACTIVE_CORES} cores of other work counts as in use); ` +
+    `(over ${ACTIVE_CORES} cores of other work across ${ACTIVE_WINDOW * PRESENCE_POLL_MS / 1000}s counts as in use); ` +
     `full pool after ${Math.round(IDLE_AFTER_MS / 60000)}min quiet`)
 
 let idleBatches = 0
@@ -599,10 +654,17 @@ while (!stopping) {
   if (recovered) log(recovered.message)
 
   if (batch.fens.length === 0) {
-    log(`nothing queued; ${batch.analyzed_count}/${batch.candidate_count} positions covered`)
-    await sleep(IDLE_MS)
+    // Say what is being held back: "nothing queued" while positions are set
+    // aside is not the same as a finished library, and reading it as one is
+    // how thirty idle hours went unnoticed.
+    const held = unfinished.size
+    const heldBack = held === 0 ? '' : `; ${held} set aside after timeouts, next back in ${formatDuration(unfinished.nextRetryMs())}`
+    const waitMs = idleWait.next(`${batch.analyzed_count}/${batch.candidate_count}/${held}`)
+    log(`nothing queued; ${batch.analyzed_count}/${batch.candidate_count} positions covered${heldBack}; next look in ${formatDuration(waitMs)}`)
+    await sleep(waitMs)
     continue
   }
+  idleWait.reset()
 
   // One shared queue, every engine taking the next position as it frees up, so
   // a single slow search cannot hold up the others. Nothing here needs a lock:
@@ -678,6 +740,7 @@ while (!stopping) {
       const searchFen = fen.trim().split(/\s+/).length === 6 ? fen : `${fen} 0 1`
       try {
         const result = await analyse(searchFen, depth)
+        unfinished.resolved(fen)
         // A checkmated or stalemated position has no move to store; the server
         // records those as exact outcomes instead.
         if (!result.terminal && result.bestMoveUci) {
@@ -695,8 +758,8 @@ while (!stopping) {
         // Remember it, so the queue stops handing back a search we cannot
         // finish. A depth that deep was asked for by someone studying the
         // position in the browser, which is where it can still be filled.
-        unfinished.add(fen)
-        log(`skipped a position (${unfinished.size} unfinished): ${error.message}`)
+        const { delayMs } = unfinished.add(fen)
+        log(`skipped a position (${unfinished.size} set aside, this one for ${formatDuration(delayMs)}): ${error.message}`)
       }
       await sleep(REST_MS)
     }

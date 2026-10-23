@@ -38,3 +38,6 @@ frontend/public/stockfish/*.wasm
 
 # pnpm content-addressable store created inside the frontend container
 frontend/.pnpm-store/
+
+# Database dumps (make db-backup)
+backups/

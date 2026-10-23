@@ -1,10 +1,12 @@
 import { Cpu, Pause, X } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { PanelError } from '@/components/ui/panel-error'
 import { useAnalysisProgress } from '@/hooks/use-analysis-progress'
 import { useImprovementPlan } from '@/hooks/use-improvement'
+import { describeEngineActivity, type EngineActivity } from '@/lib/analysis/engine-activity'
 import { describePhaseSkew, summarizePhaseCoverage } from '@/lib/analysis/phase-coverage'
 import { formatDuration } from '@/lib/analysis/progress-rate'
 import { GAME_REVIEW_DEPTH } from '@/lib/analysis/review-depth'
@@ -49,7 +51,18 @@ export function formatSelectedPairCounts(counts?: Record<string, number>): strin
     .map((phase) => `${counts[phase]} ${phase}`)
   const total = phases.reduce((sum, phase) => sum + (counts[phase] ?? 0), 0)
   if (total === 0) return null
-  return `Next batch: ${parts.join(' · ')} decision pair${total === 1 ? '' : 's'}.`
+  return `Next up: ${parts.join(', ')} position${total === 1 ? '' : 's'}.`
+}
+
+/** The background crawler's last store, polled so a stall shows within a minute. */
+function useEngineActivity() {
+  return useQuery({
+    queryKey: ['analysis-activity'],
+    queryFn: async ({ signal }) =>
+      (await api.get<EngineActivity>('/api/analysis/activity', { signal })).data,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  })
 }
 
 export function EngineAnalyzeBatch({
@@ -76,13 +89,13 @@ export function EngineAnalyzeBatch({
   const total = useEngineStore((state) => state.replayQueueTotal)
   const active = useEngineStore((state) => state.replayQueueActive)
   const progressLabel = active
-    ? `This run: ${completed} of ${total} analyzing`
+    ? `Analyzing ${Math.min(completed + 1, total)} of ${total}`
     : total > 0
-      ? `This run: ${completed} of ${total} analyzed`
+      ? `${completed} of ${total} analyzed this run`
       : null
   const stalled = idleBatches >= MAX_IDLE_BATCHES
   const analysisStatus = stalled
-    ? 'Paused: every position left is already analyzed in this browser and waiting to upload. Start again once it has.'
+    ? 'Paused while finished analysis uploads. Start again in a minute.'
     : browserAnalysisEnabled || active
       ? 'Analyzing…'
       : coverage?.missing_count === 0
@@ -97,6 +110,7 @@ export function EngineAnalyzeBatch({
   // Same query key as the trainer's unfiltered plan, so this is a cache read
   // rather than a second trip for numbers the server already computed.
   const plan = useImprovementPlan({ username, color, timeClass })
+  const activity = useEngineActivity()
   const decisions = plan.data?.summary
   const phaseCoverage = decisions ? summarizePhaseCoverage(decisions.analyzed_by_phase) : null
   const phaseSkew = phaseCoverage ? describePhaseSkew(phaseCoverage) : null
@@ -122,7 +136,6 @@ export function EngineAnalyzeBatch({
           color,
           time_class: timeClass ?? undefined,
           min_depth: GAME_REVIEW_DEPTH,
-          min_user_rating: 1000,
           limit: AUTOPILOT_BATCH_LIMIT,
         },
       },
@@ -157,7 +170,6 @@ export function EngineAnalyzeBatch({
           color,
           time_class: timeClass ?? undefined,
           min_depth: GAME_REVIEW_DEPTH,
-          min_user_rating: 1000,
           limit: AUTOPILOT_BATCH_LIMIT,
         },
       })
@@ -186,6 +198,9 @@ export function EngineAnalyzeBatch({
     const tick = () => {
       if (running) return
       if (active) return
+      // A hidden tab takes no new batch: the one in hand finishes, and the
+      // next waits until somebody can see the page again.
+      if (typeof document !== 'undefined' && document.hidden) return
 
       running = true
       void queueNextImportedGameBatch(controller.signal)
@@ -207,7 +222,7 @@ export function EngineAnalyzeBatch({
         .catch(() => {
           if (controller.signal.aborted) return
           setBrowserAnalysisFailures((count) => count + 1)
-          setError('A batch failed, so analysis stopped. Start it again to retry.')
+          setError('Analysis stopped after an error. Start it again to retry.')
         })
         .finally(() => {
           running = false
@@ -231,8 +246,15 @@ export function EngineAnalyzeBatch({
     username,
   ])
 
+  const activityLine = activity.data ? describeEngineActivity(activity.data) : null
+
   return (
     <div className="analysis-batch">
+      {/* Reserved line: the status lands with the request and must not push
+          the meter down when it does. */}
+      <p className="engine-activity" data-tone={activityLine?.tone}>
+        {activityLine?.text ?? '\u00a0'}
+      </p>
       {coverage?.candidate_count != null && coverage.analyzed_count != null ? (
         <div className="coverage-meter">
           <div className="coverage-meter__head">
@@ -242,8 +264,8 @@ export function EngineAnalyzeBatch({
                 {coverage.analyzed_count.toLocaleString()} of{' '}
                 {coverage.candidate_count.toLocaleString()}
               </strong>{' '}
-              positions analyzed at depth {coverage.min_depth ?? GAME_REVIEW_DEPTH}, from games you
-              played at rating {coverage.min_user_rating ?? 1000}+.
+              positions analyzed, from games you played at rating {coverage.min_user_rating ?? 1000}{' '}
+              and up.
             </span>
           </div>
           <div
@@ -260,9 +282,8 @@ export function EngineAnalyzeBatch({
           {remaining > 0 ? (
             <p className="coverage-meter__next">
               {libraryEta
-                ? `${remaining.toLocaleString()} positions left — about ${libraryEta} of analysis at the current rate. Reviewing single games from the Library is far quicker.`
-                : (nextBatchLabel ??
-                  'Next batches balance complete decisions across available game phases.')}
+                ? `${remaining.toLocaleString()} positions left, about ${libraryEta} at this rate. Reviewing one game from the Library is much faster.`
+                : nextBatchLabel}
             </p>
           ) : null}
         </div>
@@ -272,7 +293,7 @@ export function EngineAnalyzeBatch({
       ) : (
         <div aria-busy={phaseCoverage ? undefined : true} className="phase-coverage">
           <h4 className="phase-coverage__title">
-            Judged decisions by phase
+            Analyzed decisions by phase
             <span className="phase-coverage__total">
               {decisions
                 ? `${decisions.analyzed_decisions.toLocaleString()} of ${decisions.total_decisions.toLocaleString()}`
@@ -325,9 +346,10 @@ export function EngineAnalyzeBatch({
           </Button>
         ) : null}
       </div>
-      {analysisStatus ? <div className="analysis-batch__status">{analysisStatus}</div> : null}
       {active && progressLabel ? (
         <div className="analysis-batch__status">{progressLabel}</div>
+      ) : analysisStatus ? (
+        <div className="analysis-batch__status">{analysisStatus}</div>
       ) : null}
       {error ? <div className="callout callout--error">{error}</div> : null}
     </div>
