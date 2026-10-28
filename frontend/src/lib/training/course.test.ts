@@ -7,6 +7,10 @@ import {
   explainTrap,
   formatLine,
   lineStakes,
+  lineStatusLabel,
+  mostRecentlyTouched,
+  nextCourseStep,
+  nextLineToPractise,
   nextLineToLearn,
   numberedMove,
 } from './course'
@@ -66,6 +70,7 @@ function yours(ply: number, san: string, extra: Partial<YourStep> = {}): YourSte
     level: null,
     due: false,
     due_at: null,
+    recalled: false,
     ...extra,
   }
 }
@@ -103,6 +108,8 @@ const scotch: RepertoireLine = {
   known_moves: 0,
   new_moves: 4,
   due_moves: 0,
+  recalled_moves: 0,
+  practised: false,
   status: 'new',
 }
 
@@ -183,6 +190,38 @@ describe('what to train next', () => {
     expect(lineStakes(scotch)).toBe(
       'Reached in 44 of your games. Nxd4 gives away 0.6 pawns, and you scored 41% after it.',
     )
+  })
+
+  it('asks for a learned line to be practised before another is learned', () => {
+    const learned = line('learned', 'd4', {
+      status: 'learning',
+      known_moves: 1,
+      new_moves: 0,
+      practised: false,
+    })
+    const lines = [learned, scotch]
+    expect(nextCourseStep(lines, 'black')).toEqual({ mode: 'practice', line: learned })
+    expect(lineStatusLabel(learned)).toBe('Learned · practice it')
+    // Once played from memory, the course moves on to the next line to learn.
+    const practised = { ...learned, practised: true, recalled_moves: 1 }
+    expect(nextCourseStep([practised, scotch], 'black')).toEqual({ mode: 'learn', line: scotch })
+    expect(lineStatusLabel(practised)).toBe('Learning')
+    expect(nextCourseStep([practised], 'black')).toBeNull()
+  })
+
+  it('offers the line learned last, whichever chapter or colour it sits in', () => {
+    const touched = (id: string, first: string, dueAt: string) =>
+      line(id, first, {
+        status: 'learning',
+        known_moves: 1,
+        new_moves: 0,
+        moves: [opponent(1, first), yours(2, first === 'e4' ? 'e5' : 'd5', { due_at: dueAt })],
+      })
+    const older = touched('older', 'e4', '2026-10-28T20:00:00Z')
+    const newer = touched('newer', 'd4', '2026-10-28T23:40:00Z')
+    expect(nextLineToPractise([older, newer], 'black')?.id).toBe('newer')
+    expect(mostRecentlyTouched([older, null, newer])?.id).toBe('newer')
+    expect(mostRecentlyTouched([null])).toBeNull()
   })
 
   it('learns the biggest fix first and queues the most-due reviews first', () => {

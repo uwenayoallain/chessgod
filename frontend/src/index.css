@@ -11877,3 +11877,33 @@ button.sparring__game:disabled {
 .trainer-actions--quiet {
   margin-top: 0.2rem;
 }
+
+/* ── What follows, while the engine searches ───────────────────────────────────
+   The continuation box is itself --surface-2, so the generic skeleton (a
+   surface-2 → surface-3 shimmer) vanished on it: the heading stood over an
+   empty strip until the line landed. The loading state is a row of move-sized
+   pills shimmering a shade darker than the box, the same height as the ply
+   buttons they stand in for, so nothing moves when the moves arrive. */
+.drill-continuation__line--loading {
+  min-height: 1.5rem;
+}
+
+.drill-continuation__ply-skeleton {
+  display: inline-block;
+  height: 1.25em;
+  margin: 0.1em 0;
+  border-radius: 5px;
+  background-image: linear-gradient(
+    90deg,
+    var(--surface-3) 0%,
+    color-mix(in srgb, var(--surface-3) 60%, var(--border)) 50%,
+    var(--surface-3) 100%
+  );
+  background-size: 200% 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drill-continuation__ply-skeleton {
+    animation: none;
+  }
+}

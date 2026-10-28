@@ -28,6 +28,8 @@ export type YourStep = StepBase & {
   level: number | null
   due: boolean
   due_at: string | null
+  /** Played from memory at least once (practice, due or early). */
+  recalled: boolean
 }
 
 export type OpponentStep = StepBase & {
@@ -57,6 +59,10 @@ export type RepertoireLine = {
   /** Moves in the line not taught yet; the line stays "new" until this is 0. */
   new_moves: number
   due_moves: number
+  /** Moves played from memory at least once. */
+  recalled_moves: number
+  /** Every move taught and every one played from memory at least once. */
+  practised: boolean
   status: LineStatus
 }
 

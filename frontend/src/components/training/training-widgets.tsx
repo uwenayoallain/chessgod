@@ -22,7 +22,13 @@ import { shortOpeningName } from '@/lib/analysis/points-lost'
 import { StatTile } from '@/components/training/stat-tile'
 import { formatGameDate } from '@/lib/format-date'
 import { challengesStale } from '@/lib/training/challenges'
-import { dueLines, lineTitle, nextLineToLearn } from '@/lib/training/course'
+import {
+  dueLines,
+  lineTitle,
+  mostRecentlyTouched,
+  nextLineToLearn,
+  nextLineToPractise,
+} from '@/lib/training/course'
 import {
   BadgeMedallion,
   Emblem,
@@ -554,6 +560,14 @@ export function TodayCard({
   const due = dueColor === 'black' ? dueBlack : dueWhite
   const nextFix = nextLineToLearn(blackLines, 'black') ?? nextLineToLearn(whiteLines, 'white')
   const nextColor = nextFix && blackLines.includes(nextFix) ? 'black' : 'white'
+  // A line learned with the hints showing and never played from memory. It
+  // comes before anything else: the player just did the work, and offering
+  // another line to learn reads as if that session had not counted.
+  const toPractise = mostRecentlyTouched([
+    nextLineToPractise(blackLines, 'black'),
+    nextLineToPractise(whiteLines, 'white'),
+  ])
+  const practiseColor = toPractise && blackLines.includes(toPractise) ? 'black' : 'white'
   const fixes = blackLines.filter((line) => line.changes > 0)
   const fixGames = fixes.reduce((n, line) => n + line.games, 0)
   const unlearnedFixes = fixes.filter((line) => line.status === 'new').length
@@ -590,24 +604,42 @@ export function TodayCard({
         },
       }
     : null
-  const step = fixFirst
-    ? learnStep
-    : due.length
-      ? {
-          label: `Review ${dueMoves.toLocaleString()} opening moves`,
-          note: 'Due now · +3 XP each',
-          icon: Dumbbell,
-          start: () => {
-            startSession({
-              color: dueColor,
-              lineIds: due.map((line) => line.id),
-              mode: 'practice',
-              label: 'Review',
-            })
-            revealSection('review-course')
-          },
-        }
-      : learnStep
+  const practiseStep = toPractise
+    ? {
+        label: `Practice ${lineTitle(toPractise)}`,
+        note: 'Learned · play it from memory',
+        icon: Dumbbell,
+        start: () => {
+          startSession({
+            color: practiseColor,
+            lineIds: [toPractise.id],
+            mode: 'practice',
+            label: 'Practice',
+          })
+          revealSection('review-course')
+        },
+      }
+    : null
+  const step = practiseStep
+    ? practiseStep
+    : fixFirst
+      ? learnStep
+      : due.length
+        ? {
+            label: `Review ${dueMoves.toLocaleString()} opening moves`,
+            note: 'Due now · +3 XP each',
+            icon: Dumbbell,
+            start: () => {
+              startSession({
+                color: dueColor,
+                lineIds: due.map((line) => line.id),
+                mode: 'practice',
+                label: 'Review',
+              })
+              revealSection('review-course')
+            },
+          }
+        : learnStep
 
   return (
     <section aria-label="Today's training" className="today-card">

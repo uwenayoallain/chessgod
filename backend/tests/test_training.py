@@ -192,13 +192,17 @@ async def test_achievements_report_progress_and_unlock_at_their_target() -> None
 
 def test_a_line_s_status_follows_the_memory_of_its_moves() -> None:
     class Row:
-        def __init__(self, level: int, due_at: datetime) -> None:
+        def __init__(self, level: int, due_at: datetime, recalls: int = 0) -> None:
             self.level = level
             self.due_at = due_at
+            self.recalls = recalls
+
+    def annotated(rows: dict) -> dict:
+        line = {"id": "x", "moves": [dict(step) for step in LINE["moves"]]}
+        return annotate_repertoire({"lines": [line]}, rows, now=NOW)["lines"][0]
 
     def status(rows: dict) -> str:
-        line = {"id": "x", "moves": [dict(step) for step in LINE["moves"]]}
-        return annotate_repertoire({"lines": [line]}, rows, now=NOW)["lines"][0]["status"]
+        return annotated(rows)["status"]
 
     later = NOW + timedelta(days=3)
     assert status({}) == "new"
@@ -207,6 +211,17 @@ def test_a_line_s_status_follows_the_memory_of_its_moves() -> None:
     assert status({("after-e4", "e7e5"): Row(1, later), ("after-nf3", "b8c6"): Row(1, later)}) == "learning"
     assert status({("after-e4", "e7e5"): Row(4, later), ("after-nf3", "b8c6"): Row(2, NOW)}) == "due"
     assert status({("after-e4", "e7e5"): Row(4, later), ("after-nf3", "b8c6"): Row(5, later)}) == "mastered"
+
+    # Learned is not practised: taught with the hint showing, never played from
+    # memory. The line is practised once every move has been recalled once.
+    taught = annotated({("after-e4", "e7e5"): Row(1, later), ("after-nf3", "b8c6"): Row(1, later)})
+    assert taught["status"] == "learning" and taught["practised"] is False
+    assert taught["recalled_moves"] == 0
+    half = annotated({("after-e4", "e7e5"): Row(1, later, 1), ("after-nf3", "b8c6"): Row(1, later)})
+    assert half["practised"] is False and half["recalled_moves"] == 1
+    assert [step.get("recalled") for step in half["moves"] if step["side"] == "you"] == [True, False]
+    done = annotated({("after-e4", "e7e5"): Row(1, later, 1), ("after-nf3", "b8c6"): Row(2, later, 3)})
+    assert done["practised"] is True and done["recalled_moves"] == 2
 
 
 @pytest.mark.asyncio
@@ -227,6 +242,12 @@ async def test_replaying_a_line_before_it_is_due_earns_no_perfect_bonus() -> Non
     assert {result["level"] for result in early["results"]} == {1}
     assert due["xp_gained"] == 2 * training.XP["move_recalled"] + training.XP["line_perfect"]
     assert {result["level"] for result in due["results"]} == {2}
+    # Both passes were played from memory, so both count as recalls: the early
+    # one climbs no rung and pays little, but it still makes the line practised.
+    async with factory() as session:
+        progress = await training.load_move_progress(session, "tester")
+    assert {row.recalls for row in progress.values()} == {2}
+    assert {row.reviews for row in progress.values()} == {3}
     await engine.dispose()
 
 

@@ -426,6 +426,7 @@ def annotate_repertoire(repertoire: dict, progress: dict[tuple[str, str], LineMo
         yours = [step for step in line["moves"] if step["side"] == "you"]
         levels = []
         due = 0
+        recalled = 0
         for step in yours:
             row = progress.get((step["fen"], step["uci"]))
             level = row.level if row else None
@@ -433,12 +434,19 @@ def annotate_repertoire(repertoire: dict, progress: dict[tuple[str, str], LineMo
             step["level"] = level
             step["due"] = is_due
             step["due_at"] = _aware(row.due_at).isoformat() if row else None
+            step["recalled"] = bool(row and (getattr(row, "recalls", 0) or 0) > 0)
             levels.append(level)
             due += int(is_due)
+            recalled += int(step["recalled"])
         known = sum(1 for level in levels if level is not None and level >= 1)
         line["your_moves"] = len(yours)
         line["known_moves"] = known
         line["due_moves"] = due
+        line["recalled_moves"] = recalled
+        # Learned is not practised: a move taught with the hint showing has never
+        # been played from memory. Until every move has, the course offers this
+        # line to practise before it offers another line to learn.
+        line["practised"] = known == len(yours) and recalled == len(yours)
         # A line is new until every one of its moves has been taught. Lines share
         # moves (every Black line starts 1...e5), so counting "any move known"
         # turned lines never shown into ones to practise from memory.
@@ -486,7 +494,7 @@ async def record_line_review(
         if row is None:
             row = LineMoveProgress(
                 username=username, color=color, fen=step["fen"], move_uci=step["uci"],
-                level=0, reviews=0, lapses=0, due_at=now,
+                level=0, reviews=0, recalls=0, lapses=0, due_at=now,
             )
             session.add(row)
             progress[(step["fen"], step["uci"])] = row
@@ -501,6 +509,8 @@ async def record_line_review(
             row.level = next_level(before, correct=correct, due=due)
             if not correct:
                 row.lapses = (row.lapses or 0) + 1
+            else:
+                row.recalls = (row.recalls or 0) + 1
             if correct and not due:
                 xp_kind = "move_early"
             else:

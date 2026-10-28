@@ -85,6 +85,11 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    // Node 25+ ships its own experimental `localStorage` global, which is
+    // undefined until `--localstorage-file` is given and shadows jsdom's in
+    // every jsdom test: 16 files failed on `window.localStorage.getItem`. The
+    // app runs in a browser and never wants Node's copy, so switch it off.
+    execArgv: ['--no-experimental-webstorage'],
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'tests/**/*.test.ts', 'tests/**/*.test.tsx'],
   },
 })

@@ -28,6 +28,10 @@ class LineMoveProgress(Base):
     # 0 = introduced, never recalled; 1-8 = the review interval ladder.
     level: Mapped[int] = mapped_column(Integer, default=0)
     reviews: Mapped[int] = mapped_column(Integer, default=0)
+    # Correct answers from memory (practice mode, due or early). Learning a move
+    # with the hint showing is not a recall; the first recall is what makes a
+    # learned line one to practise rather than one to learn again.
+    recalls: Mapped[int] = mapped_column(Integer, default=0)
     lapses: Mapped[int] = mapped_column(Integer, default=0)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

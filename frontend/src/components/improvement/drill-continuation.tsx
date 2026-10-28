@@ -1,6 +1,5 @@
 import { useEffect, useMemo } from 'react'
 
-import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import {
   buildContinuation,
   formatContinuationScore,
@@ -12,6 +11,9 @@ import { GAME_REVIEW_DEPTH } from '@/lib/analysis/review-depth'
 
 /** Plies to show: enough to answer "and then what?", short enough to read. */
 const CONTINUATION_PLIES = 6
+
+/** One pill per ply while the search runs, sized like "1.Nf3", "Bxf7+", "e5". */
+const SKELETON_WIDTHS = ['3.2em', '2.4em', '3.6em', '2.6em', '3.1em', '2.3em']
 
 function pickTopLine(fen: string) {
   const cached = useEngineStore.getState().analysisByFen[fen]
@@ -101,7 +103,20 @@ export function DrillContinuation({ fen, active }: { fen: string; active: boolea
             ))}
           </ol>
         ) : engineEnabled ? (
-          <PanelSkeleton label="Searching the continuation" rowHeight={18} rows={1} />
+          // Shaped like the line it stands in for: six move-sized pills, so the
+          // reader sees that moves are coming, where, and roughly how many.
+          <ol
+            aria-busy="true"
+            aria-label="Searching the continuation"
+            className="drill-continuation__line drill-continuation__line--loading"
+            role="status"
+          >
+            {SKELETON_WIDTHS.map((width, index) => (
+              <li key={index}>
+                <span className="skeleton drill-continuation__ply-skeleton" style={{ width }} />
+              </li>
+            ))}
+          </ol>
         ) : (
           <p className="muted">Turn the engine on to see what follows.</p>
         )}

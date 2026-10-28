@@ -13,12 +13,12 @@ import { repertoireQueryKey, useRepertoire } from '@/hooks/use-training'
 import { api } from '@/lib/api'
 import { scoreToWhitePerspective } from '@/lib/stockfish/eval'
 import {
-  STATUS_LABELS,
   buildChapters,
   dueLines,
   lineStakes,
+  lineStatusLabel,
   lineTitle,
-  nextLineToLearn,
+  nextCourseStep,
 } from '@/lib/training/course'
 import type { LineReviewResponse, Repertoire, RepertoireLine } from '@/lib/training/types'
 import { useEngineStore } from '@/store/engine-store'
@@ -220,10 +220,7 @@ function LineRow({
   onStart: (mode: 'learn' | 'practice') => void
   onBoss?: () => void
 }) {
-  const label =
-    line.status === 'new' && line.known_moves > 0
-      ? `${line.new_moves.toLocaleString()} new ${line.new_moves === 1 ? 'move' : 'moves'}`
-      : STATUS_LABELS[line.status]
+  const label = lineStatusLabel(line)
   // What the line is for says which emblem it wears: a fix, a trap, or a line to keep.
   const emblem: EmblemName = line.changes > 0 ? 'shield' : line.traps > 0 ? 'crosshair' : 'book'
   const learned = line.your_moves ? line.known_moves / line.your_moves : 0
@@ -261,7 +258,7 @@ function LineRow({
             aria-label={`Practice ${lineTitle(line)}`}
             onClick={() => onStart('practice')}
             type="button"
-            variant={line.status === 'due' ? 'primary' : 'default'}
+            variant={line.status === 'due' || !line.practised ? 'primary' : 'default'}
           >
             <Dumbbell size={13} /> Practice
           </Button>
@@ -375,8 +372,9 @@ export function OpeningCourse({
           onBegin={onBegin}
           onFinished={(result) => {
             setFinished({ key, result })
-            // The line is no longer new and nothing in it is due: say so on
-            // every card that reads the repertoire before the server confirms.
+            // The line is no longer new, nothing in it is due, and a clean
+            // practice pass has played it from memory: say so on every card
+            // that reads the repertoire before the server confirms.
             queryClient.setQueryData<Repertoire>(
               repertoireQueryKey(username, session.color),
               (current) =>
@@ -388,6 +386,8 @@ export function OpeningCourse({
                           ...item,
                           status: item.status === 'new' ? 'learning' : item.status,
                           due_moves: 0,
+                          practised:
+                            item.practised || (session.mode === 'practice' && result?.misses === 0),
                         }
                       : item,
                   ),
@@ -451,7 +451,7 @@ export function OpeningCourse({
 
   const chapters = buildChapters(lines, color)
   const due = dueLines(lines)
-  const next = nextLineToLearn(lines, color)
+  const next = nextCourseStep(lines, color)
   const totalMoves = lines.reduce((n, line) => n + line.your_moves, 0)
   const knownMoves = lines.reduce((n, line) => n + line.known_moves, 0)
   const fixes = lines.filter((line) => line.changes > 0).length
@@ -514,11 +514,14 @@ export function OpeningCourse({
           ) : null}
           {next ? (
             <Button
-              onClick={() => start([next.id], 'learn', 'Learn')}
+              onClick={() =>
+                start([next.line.id], next.mode, next.mode === 'learn' ? 'Learn' : 'Practice')
+              }
               type="button"
               variant={due.length ? 'default' : 'primary'}
             >
-              <BookOpen size={14} /> Learn next: {lineTitle(next)}
+              {next.mode === 'learn' ? <BookOpen size={14} /> : <Dumbbell size={14} />}{' '}
+              {next.mode === 'learn' ? 'Learn next' : 'Practice next'}: {lineTitle(next.line)}
             </Button>
           ) : null}
         </div>

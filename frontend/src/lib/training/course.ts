@@ -177,8 +177,72 @@ export function nextLineToLearn(
   lines: RepertoireLine[],
   color: 'white' | 'black',
 ): RepertoireLine | null {
+  return firstLine(lines, color, (line) => line.status === 'new')
+}
+
+/**
+ * A line learned with the hints showing and never yet played from memory —
+ * the most recently learned one first, since that is the line the player has
+ * just been shown and expects to be asked for.
+ */
+export function nextLineToPractise(
+  lines: RepertoireLine[],
+  color: 'white' | 'black',
+): RepertoireLine | null {
+  const unpractised = buildChapters(lines, color)
+    .flatMap((chapter) => chapter.lines)
+    .filter((line) => line.status !== 'new' && !line.practised)
+  return mostRecentlyTouched(unpractised)
+}
+
+/** When the line was last learned or reviewed, read from its moves' next due dates. */
+export function lastTouched(line: RepertoireLine): number {
+  return Math.max(0, ...yourSteps(line).map((step) => (step.due_at ? Date.parse(step.due_at) : 0)))
+}
+
+/** The line touched last; chapter order breaks a tie, so `lines` must already be in it. */
+export function mostRecentlyTouched(lines: (RepertoireLine | null)[]): RepertoireLine | null {
+  let best: RepertoireLine | null = null
+  for (const line of lines) {
+    if (line && (!best || lastTouched(line) > lastTouched(best))) best = line
+  }
+  return best
+}
+
+export type CourseStep = { mode: 'learn' | 'practice'; line: RepertoireLine }
+
+/**
+ * What the course asks for next: practise what was just learned before
+ * learning another line. A line taught with the hints showing is not known
+ * until it has been played from memory once, and recommending "learn" straight
+ * after a learn session reads as if the session had not counted.
+ */
+export function nextCourseStep(
+  lines: RepertoireLine[],
+  color: 'white' | 'black',
+): CourseStep | null {
+  const practise = nextLineToPractise(lines, color)
+  if (practise) return { mode: 'practice', line: practise }
+  const learn = nextLineToLearn(lines, color)
+  return learn ? { mode: 'learn', line: learn } : null
+}
+
+/** The chip on a line card: how far the player's memory of it has got. */
+export function lineStatusLabel(line: RepertoireLine): string {
+  if (line.status === 'new' && line.known_moves > 0) {
+    return `${line.new_moves.toLocaleString()} new ${line.new_moves === 1 ? 'move' : 'moves'}`
+  }
+  if (line.status === 'learning' && !line.practised) return 'Learned · practice it'
+  return STATUS_LABELS[line.status]
+}
+
+function firstLine(
+  lines: RepertoireLine[],
+  color: 'white' | 'black',
+  match: (line: RepertoireLine) => boolean,
+): RepertoireLine | null {
   for (const chapter of buildChapters(lines, color)) {
-    const line = chapter.lines.find((item) => item.status === 'new')
+    const line = chapter.lines.find(match)
     if (line) return line
   }
   return null
