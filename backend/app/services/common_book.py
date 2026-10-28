@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -71,8 +72,19 @@ def _build_book_index() -> dict[str, dict[str, str]]:
 
 
 @lru_cache(maxsize=1)
-def load_common_book_index() -> dict[str, dict[str, str]]:
+def _cached_book_index() -> dict[str, dict[str, str]]:
     return _build_book_index()
+
+
+# Building takes ~6s of pure-Python chess replay. Callers run in worker threads
+# (asyncio.to_thread); without the lock, the startup warm-up and an early
+# request would both build the index and fight over the GIL.
+_build_lock = threading.Lock()
+
+
+def load_common_book_index() -> dict[str, dict[str, str]]:
+    with _build_lock:
+        return _cached_book_index()
 
 
 def get_common_book_moves(fen: str) -> list[dict[str, str | None]]:
@@ -89,3 +101,11 @@ def is_common_book_move(
     if move_san and move_san in moves.values():
         return True
     return False
+
+
+def common_book_move_keys(fen: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Return (uci set, san set) of book moves for a position, computed once so
+    callers checking many candidate moves for the same FEN avoid re-normalising
+    the FEN and re-scanning the values on every move."""
+    moves = load_common_book_index().get(normalize_fen(fen), {})
+    return frozenset(moves.keys()), frozenset(moves.values())

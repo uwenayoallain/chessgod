@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,7 +22,7 @@ async def insert_game(session: AsyncSession, game: Game) -> int | None:
         .values(
             chesscom_game_url=game.chesscom_game_url,
             chesscom_game_id=game.chesscom_game_id,
-            username=game.username,
+            username=game.username.lower(),
             white_username=game.white_username,
             black_username=game.black_username,
             user_color=game.user_color,
@@ -37,14 +37,25 @@ async def insert_game(session: AsyncSession, game: Game) -> int | None:
             opening_name=game.opening_name,
             played_at=game.played_at,
             num_moves=game.num_moves,
+            termination=game.termination,
         )
-        .on_conflict_do_nothing(index_elements=["chesscom_game_url"])
+        .on_conflict_do_nothing(index_elements=["chesscom_game_url", "username"])
+        .returning(Game.id)
     )
 
-    result = await session.execute(stmt)
-    if result.rowcount == 0:
-        return None
-
-    return await session.scalar(
-        select(Game.id).where(Game.chesscom_game_url == game.chesscom_game_url)
-    )
+    # ON CONFLICT DO NOTHING ... RETURNING yields no row when the game already
+    # exists. Older imports predate termination capture, so opportunistically
+    # backfill that one derived field when an archive is fetched again while
+    # retaining the None return that tells callers not to rebuild the tree.
+    inserted_id = await session.scalar(stmt)
+    if inserted_id is None and game.termination is not None:
+        await session.execute(
+            update(Game)
+            .where(
+                Game.chesscom_game_url == game.chesscom_game_url,
+                Game.username == game.username,
+                Game.termination.is_(None),
+            )
+            .values(termination=game.termination)
+        )
+    return inserted_id

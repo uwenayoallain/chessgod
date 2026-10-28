@@ -1,6 +1,10 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test } from 'vite-plus/test'
 
-import { formatImportProgressDetail, formatImportProgressLabel, reduceImportProgress } from '../src/lib/import-progress'
+import {
+  formatImportProgressDetail,
+  formatImportProgressLabel,
+  reduceImportProgress,
+} from '../src/lib/import-progress'
 
 describe('reduceImportProgress', () => {
   test('tracks per-game progress inside an archive', () => {
@@ -71,8 +75,12 @@ describe('reduceImportProgress', () => {
 
     expect(secondProgress?.newGames).toBe(2)
     expect(secondProgress?.archiveNewGames).toBe(0)
-    expect(formatImportProgressLabel(secondProgress, 'running')).toBe('Archive 2/3 · 2 new games found')
-    expect(formatImportProgressDetail(secondProgress)).toBe('2024/03 · 1/10 games · 0 new here · 1 existing here')
+    expect(formatImportProgressLabel(secondProgress, 'running')).toBe(
+      'Month 2 of 3 · 2 new games found',
+    )
+    expect(formatImportProgressDetail(secondProgress)).toBe(
+      '2024/03 · 1/10 games · 0 new · 1 already stored',
+    )
   })
 
   test('marks archive complete and cached when archive is reused', () => {
@@ -117,7 +125,7 @@ describe('reduceImportProgress', () => {
     expect(completed?.newGames).toBe(12)
     expect(completed?.skippedGames).toBe(48)
     expect(formatImportProgressLabel(completed, 'complete')).toBe('Import complete · 12 new games')
-    expect(formatImportProgressDetail(completed)).toBe('48 existing games skipped · 3 cached archives')
+    expect(formatImportProgressDetail(completed)).toBe('Checked 1 month of games on Chess.com')
   })
 
   test('keeps a visible final state when complete is the first event', () => {

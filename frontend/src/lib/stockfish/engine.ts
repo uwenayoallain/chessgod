@@ -15,12 +15,27 @@ type AnalyzeOptions = {
   force?: boolean
 }
 
+function parseBestMove(line: string): string | null {
+  const move = line.split(' ')[1]
+  return !move || move === '(none)' || move === '0000' ? null : move
+}
+
 export class StockfishEngine {
   private worker: Worker | null = null
   private callbacks: EngineCallbacks
   private initStarted = false
   private initPromise: Promise<void> | null = null
   private lastAnalyzeKey: string | null = null
+  private nextSearchId = 0
+  private activeSearchId: number | null = null
+  // A search whose lines go to a caller choosing a move to *play*, not to the
+  // analysis callbacks: a sparring search is shallow by design, so it must
+  // never be cached or uploaded as an evaluation.
+  private pendingPlay: {
+    searchId: number
+    lines: Map<number, UCIInfo>
+    resolve: (lines: UCIInfo[] | null) => void
+  } | null = null
 
   constructor(callbacks: EngineCallbacks) {
     this.callbacks = callbacks
@@ -37,7 +52,7 @@ export class StockfishEngine {
     }
     this.worker.onerror = (event) => {
       event.preventDefault()
-      this.callbacks.onError(event.message || 'Stockfish worker error.')
+      this.callbacks.onError(event.message || 'Analysis worker error.')
     }
 
     return this.worker
@@ -61,6 +76,26 @@ export class StockfishEngine {
       return
     }
 
+    if (this.pendingPlay && event.searchId === this.pendingPlay.searchId) {
+      if (event.line.startsWith('info depth')) {
+        const info = parseUCIInfoLine(event.line)
+        if (info) this.pendingPlay.lines.set(info.multipv, info)
+        return
+      }
+      if (event.line.startsWith('bestmove')) {
+        const { lines, resolve } = this.pendingPlay
+        this.pendingPlay = null
+        resolve(
+          parseBestMove(event.line)
+            ? [...lines.values()].sort((a, b) => a.multipv - b.multipv)
+            : null,
+        )
+      }
+      return
+    }
+
+    if (this.activeSearchId === null || event.searchId !== this.activeSearchId) return
+
     if (event.line.startsWith('info depth')) {
       const info = parseUCIInfoLine(event.line)
       if (info) {
@@ -70,7 +105,9 @@ export class StockfishEngine {
     }
 
     if (event.line.startsWith('bestmove')) {
-      this.callbacks.onBestMove(event.line.split(' ')[1] || null)
+      this.activeSearchId = null
+      this.lastAnalyzeKey = null
+      this.callbacks.onBestMove(parseBestMove(event.line))
     }
   }
 
@@ -81,11 +118,23 @@ export class StockfishEngine {
 
     this.initStarted = true
     this.initPromise = Promise.resolve().then(() => {
-      this.post({
-        type: 'init',
-        hash,
-        threads,
-      })
+      try {
+        this.post({
+          type: 'init',
+          hash,
+          threads,
+        })
+      } catch (error) {
+        // The worker could not be created at all: no `Worker` outside a
+        // browser, or a module worker refused. A thrown constructor is the
+        // engine failing like any other error, so it goes through `onError`
+        // and the promise settles, instead of an unhandled rejection every
+        // caller of `init()` would have to catch. The flag resets so a later
+        // `init()` tries again rather than returning this failure forever.
+        this.initStarted = false
+        this.initPromise = null
+        this.callbacks.onError(error instanceof Error ? error.message : String(error))
+      }
     })
 
     return this.initPromise
@@ -100,24 +149,58 @@ export class StockfishEngine {
       return
     }
 
+    // The worker swallows the bestmove of a search it stops for a newer one,
+    // so a superseded play would otherwise never settle.
+    this.cancelPlay()
     this.lastAnalyzeKey = analysisKey
+    this.activeSearchId = ++this.nextSearchId
     this.post({
       type: 'analyze',
+      searchId: this.activeSearchId,
       depth,
       fen,
       multiPV,
     })
   }
 
+  /**
+   * Search `fen` for a move to play: `multiPV` candidate lines to `depth`, at
+   * full strength. Resolves with the final line per candidate, or null when
+   * there is no move or the search was superseded (a stop, or a newer search
+   * on the shared worker). Choosing among them is the caller's business.
+   */
+  play(fen: string, { depth, multiPV }: { depth: number; multiPV: number }) {
+    this.cancelPlay()
+    this.activeSearchId = null
+    this.lastAnalyzeKey = null
+    const searchId = ++this.nextSearchId
+    return new Promise<UCIInfo[] | null>((resolve) => {
+      this.pendingPlay = { searchId, lines: new Map(), resolve }
+      this.post({ type: 'analyze', searchId, fen, depth, multiPV })
+    })
+  }
+
+  private cancelPlay() {
+    if (!this.pendingPlay) return
+    const { resolve } = this.pendingPlay
+    this.pendingPlay = null
+    resolve(null)
+  }
+
   stop() {
-    this.post({ type: 'stop' })
+    this.cancelPlay()
+    this.activeSearchId = null
+    this.lastAnalyzeKey = null
+    this.worker?.postMessage({ type: 'stop' } satisfies EngineWorkerCommand)
   }
 
   destroy() {
+    this.cancelPlay()
     this.worker?.terminate()
     this.worker = null
     this.initStarted = false
     this.initPromise = null
     this.lastAnalyzeKey = null
+    this.activeSearchId = null
   }
 }

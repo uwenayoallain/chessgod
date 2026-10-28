@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
 import { getApiErrorMessage } from '@/lib/api-errors'
@@ -19,7 +19,9 @@ export type WorkspaceGame = {
   opening_name: string | null
   played_at: string
   num_moves: number | null
+  termination: string | null
   pgn: string | null
+  has_analysis?: boolean
 }
 
 export type PaginatedGames = {
@@ -80,11 +82,6 @@ type GamesFilters = {
   enabled?: boolean
 }
 
-const gamesCache = new Map<string, PaginatedGames>()
-const openingsCache = new Map<string, OpeningGroupsResponse>()
-const previewCache = new Map<string, OpeningPreview>()
-const trainingCache = new Map<string, TrainingLine>()
-
 export function usePaginatedGames({
   username,
   color = 'both',
@@ -96,65 +93,39 @@ export function usePaginatedGames({
   perPage = 20,
   enabled = true,
 }: GamesFilters) {
-  const [data, setData] = useState<PaginatedGames | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const query = useQuery({
+    enabled: enabled && Boolean(username),
+    gcTime: 30 * 60 * 1000,
+    queryKey: ['games', username, color, timeClass, openingName, eco, fen, page, perPage],
+    queryFn: async ({ signal }) => {
+      const response = await api.get<PaginatedGames>('/api/games', {
+        signal,
+        params: {
+          username,
+          color,
+          time_class: timeClass ?? undefined,
+          opening_name: openingName ?? undefined,
+          eco: eco ?? undefined,
+          fen: fen ?? undefined,
+          page,
+          per_page: perPage,
+        },
+      })
+      return response.data
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 2 * 60 * 1000,
+  })
 
-  useEffect(() => {
-    let cancelled = false
+  const hasData = query.data != null
 
-    async function load() {
-      if (!enabled || !username) {
-        setData(null)
-        setError(null)
-        return
-      }
-
-      const key = JSON.stringify({ username, color, timeClass, openingName, eco, fen, page, perPage })
-      if (gamesCache.has(key)) {
-        setData(gamesCache.get(key) ?? null)
-        setError(null)
-        return
-      }
-
-      setIsLoading(true)
-      setError(null)
-      try {
-        const response = await api.get<PaginatedGames>('/api/games', {
-          params: {
-            username,
-            color,
-            time_class: timeClass ?? undefined,
-            opening_name: openingName ?? undefined,
-            eco: eco ?? undefined,
-            fen: fen ?? undefined,
-            page,
-            per_page: perPage,
-          },
-        })
-        if (!cancelled) {
-          gamesCache.set(key, response.data)
-          setData(response.data)
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(getApiErrorMessage(caught, 'Could not load games.'))
-          setData(null)
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
-      }
-    }
-
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [color, eco, enabled, fen, openingName, page, perPage, timeClass, username])
-
-  return { data, isLoading, error }
+  return {
+    data: query.data ?? null,
+    isLoading: query.isLoading && !hasData,
+    isRefreshing: query.isFetching && hasData,
+    isPlaceholderData: query.isPlaceholderData,
+    error: query.error ? getApiErrorMessage(query.error, 'Could not load games.') : null,
+  }
 }
 
 export function useOpeningGroups(
@@ -165,62 +136,36 @@ export function useOpeningGroups(
   perPage = 20,
   enabled = true,
 ) {
-  const [data, setData] = useState<OpeningGroupsResponse | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const query = useQuery({
+    enabled: enabled && Boolean(username),
+    gcTime: 30 * 60 * 1000,
+    queryKey: ['opening-groups', username, color, timeClass, page, perPage],
+    queryFn: async ({ signal }) => {
+      const response = await api.get<OpeningGroupsResponse>('/api/games/opening-groups', {
+        signal,
+        params: {
+          username,
+          color,
+          time_class: timeClass ?? undefined,
+          page,
+          per_page: perPage,
+        },
+      })
+      return response.data
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60 * 1000,
+  })
 
-  useEffect(() => {
-    let cancelled = false
+  const hasData = query.data != null
 
-    async function load() {
-      if (!enabled || !username) {
-        setData(null)
-        setError(null)
-        return
-      }
-
-      const key = JSON.stringify({ username, color, timeClass, page, perPage })
-      if (openingsCache.has(key)) {
-        setData(openingsCache.get(key) ?? null)
-        setError(null)
-        return
-      }
-
-      setIsLoading(true)
-      setError(null)
-      try {
-        const response = await api.get<OpeningGroupsResponse>('/api/games/opening-groups', {
-          params: {
-            username,
-            color,
-            time_class: timeClass ?? undefined,
-            page,
-            per_page: perPage,
-          },
-        })
-        if (!cancelled) {
-          openingsCache.set(key, response.data)
-          setData(response.data)
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(getApiErrorMessage(caught, 'Could not load opening groups.'))
-          setData(null)
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
-      }
-    }
-
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [color, enabled, page, perPage, timeClass, username])
-
-  return { data, isLoading, error }
+  return {
+    data: query.data ?? null,
+    isLoading: query.isLoading && !hasData,
+    isRefreshing: query.isFetching && hasData,
+    isPlaceholderData: query.isPlaceholderData,
+    error: query.error ? getApiErrorMessage(query.error, 'Could not load opening groups.') : null,
+  }
 }
 
 export function useOpeningPreview(
@@ -231,62 +176,37 @@ export function useOpeningPreview(
   timeClass: string | null,
   enabled = true,
 ) {
-  const [data, setData] = useState<OpeningPreview | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const query = useQuery({
+    enabled: enabled && Boolean(username && openingName),
+    queryKey: ['opening-preview', username, openingName, eco, color, timeClass],
+    queryFn: async ({ signal }) => {
+      const response = await api.get<OpeningPreview>('/api/games/opening-preview', {
+        signal,
+        params: {
+          username,
+          opening_name: openingName,
+          eco: eco ?? undefined,
+          color,
+          time_class: timeClass ?? undefined,
+        },
+      })
+      return response.data
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60 * 1000,
+  })
 
-  useEffect(() => {
-    let cancelled = false
+  const hasData = query.data != null
 
-    async function load() {
-      if (!enabled || !username || !openingName) {
-        setData(null)
-        setError(null)
-        return
-      }
-
-      const key = JSON.stringify({ username, openingName, eco, color, timeClass })
-      if (previewCache.has(key)) {
-        setData(previewCache.get(key) ?? null)
-        setError(null)
-        return
-      }
-
-      setIsLoading(true)
-      setError(null)
-      try {
-        const response = await api.get<OpeningPreview>('/api/games/opening-preview', {
-          params: {
-            username,
-            opening_name: openingName,
-            eco: eco ?? undefined,
-            color,
-            time_class: timeClass ?? undefined,
-          },
-        })
-        if (!cancelled) {
-          previewCache.set(key, response.data)
-          setData(response.data)
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(getApiErrorMessage(caught, 'Could not load the opening preview.'))
-          setData(null)
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
-      }
-    }
-
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [color, eco, enabled, openingName, timeClass, username])
-
-  return { data, isLoading, error }
+  return {
+    data: query.data ?? null,
+    isLoading: query.isLoading && !hasData,
+    isRefreshing: query.isFetching && hasData,
+    isPlaceholderData: query.isPlaceholderData,
+    error: query.error
+      ? getApiErrorMessage(query.error, 'Could not load the opening preview.')
+      : null,
+  }
 }
 
 export function useTrainingLine(
@@ -297,60 +217,40 @@ export function useTrainingLine(
   timeClass: string | null,
   enabled = true,
 ) {
-  const [data, setData] = useState<TrainingLine | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const query = useQuery({
+    enabled: enabled && Boolean(username && openingName),
+    queryKey: ['training-line', username, openingName, eco, color, timeClass],
+    queryFn: async ({ signal }) => {
+      const response = await api.get<TrainingLine>('/api/theory/training-line', {
+        signal,
+        params: {
+          username,
+          opening_name: openingName,
+          eco: eco ?? undefined,
+          color,
+          time_class: timeClass ?? undefined,
+        },
+      })
+      return response.data
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 10 * 60 * 1000,
+  })
 
-  useEffect(() => {
-    let cancelled = false
+  const hasData = query.data != null
 
-    async function load() {
-      if (!enabled || !username || !openingName) {
-        setData(null)
-        setError(null)
-        return
-      }
+  return {
+    data: query.data ?? null,
+    isLoading: query.isLoading && !hasData,
+    isRefreshing: query.isFetching && hasData,
+    isPlaceholderData: query.isPlaceholderData,
+    error: query.error
+      ? getApiErrorMessage(query.error, 'Could not load the training line.')
+      : null,
+  }
+}
 
-      const key = JSON.stringify({ username, openingName, eco, color, timeClass })
-      if (trainingCache.has(key)) {
-        setData(trainingCache.get(key) ?? null)
-        setError(null)
-        return
-      }
-
-      setIsLoading(true)
-      setError(null)
-      try {
-        const response = await api.get<TrainingLine>('/api/theory/training-line', {
-          params: {
-            username,
-            opening_name: openingName,
-            eco: eco ?? undefined,
-            color,
-            time_class: timeClass ?? undefined,
-          },
-        })
-        if (!cancelled) {
-          trainingCache.set(key, response.data)
-          setData(response.data)
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(getApiErrorMessage(caught, 'Could not load the training line.'))
-          setData(null)
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
-      }
-    }
-
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [color, eco, enabled, openingName, timeClass, username])
-
-  return { data, isLoading, error }
+export async function fetchWorkspaceGame(gameId: number, signal?: AbortSignal) {
+  const response = await api.get<WorkspaceGame>(`/api/games/${gameId}`, { signal })
+  return response.data
 }

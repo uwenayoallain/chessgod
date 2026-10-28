@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import logging
 from datetime import UTC, datetime, timedelta
@@ -11,10 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.engine_contract import ENGINE_NAME, ENGINE_VERSION
+from app.models.analysis import AnalysisResult
 from app.models.external_sync_state import ExternalSyncState
 from app.models.position import Position
 from app.models.position_move import PositionMove
-from app.services.theory import LichessExplorerClient, cache_is_stale, load_moves_for_position, refresh_master_data
+from app.services.theory import LichessExplorerClient, cache_is_stale, cache_master_stats
 from app.utils.fen import normalize_fen
 
 
@@ -56,7 +59,7 @@ def _is_cooldown_active(state: ExternalSyncState | None) -> bool:
 async def _set_cooldown(
     session: AsyncSession,
     *,
-    status_code: int,
+    status_code: int | None,
     error: str,
     duration_seconds: int,
 ) -> None:
@@ -127,18 +130,86 @@ def iter_opening_rows(data_dir: Path) -> list[dict[str, str]]:
     return rows
 
 
+BOOK_SEED_PROVIDER = "opening_book_seed"
+_FEN_CHUNK = 1000
+
+
+async def _book_already_seeded(session: AsyncSession, fingerprint: str) -> bool:
+    state = await session.get(ExternalSyncState, BOOK_SEED_PROVIDER)
+    return state is not None and state.last_error == fingerprint
+
+
+async def _mark_book_seeded(session: AsyncSession, fingerprint: str) -> None:
+    state = await session.get(ExternalSyncState, BOOK_SEED_PROVIDER)
+    if state is None:
+        state = ExternalSyncState(provider=BOOK_SEED_PROVIDER)
+        session.add(state)
+    state.last_error = fingerprint
+    state.updated_at = _now_utc()
+    await session.flush()
+
+
+async def _load_book_positions(
+    session: AsyncSession, fens: set[str]
+) -> dict[str, Position]:
+    positions_by_fen: dict[str, Position] = {}
+    fen_list = sorted(fens)
+    for start in range(0, len(fen_list), _FEN_CHUNK):
+        chunk = fen_list[start : start + _FEN_CHUNK]
+        result = await session.execute(select(Position).where(Position.fen.in_(chunk)))
+        for position in result.scalars().all():
+            positions_by_fen[position.fen] = position
+    return positions_by_fen
+
+
+async def _load_book_moves(
+    session: AsyncSession, position_ids: list[int]
+) -> dict[tuple[int, str], PositionMove]:
+    moves_by_key: dict[tuple[int, str], PositionMove] = {}
+    for start in range(0, len(position_ids), _FEN_CHUNK):
+        chunk = position_ids[start : start + _FEN_CHUNK]
+        result = await session.execute(
+            select(PositionMove).where(PositionMove.from_position_id.in_(chunk))
+        )
+        for move in result.scalars().all():
+            moves_by_key[(move.from_position_id, move.move_uci)] = move
+    return moves_by_key
+
+
 async def seed_opening_book(session: AsyncSession, data_dir: Path | None = None) -> int:
     source_dir = data_dir or opening_data_dir()
-    position_result = await session.execute(select(Position))
-    move_result = await session.execute(select(PositionMove))
+    rows = iter_opening_rows(source_dir)
 
-    positions_by_fen = {position.fen: position for position in position_result.scalars().all()}
-    moves_by_key = {
-        (move.from_position_id, move.move_uci): move for move in move_result.scalars().all()
-    }
+    # Skip marker: re-seeding is idempotent but expensive, and the bundled TSVs
+    # only change on deploys. Never load the whole positions/position_moves
+    # tables here — at millions of rows that blocked the event loop for tens
+    # of seconds and froze every request while the app started.
+    fingerprint = f"lines:{len(rows)}"
+    if await _book_already_seeded(session, fingerprint):
+        return 0
+
+    book_fens: set[str] = set()
+    for row_idx, row in enumerate(rows):
+        if row_idx % 50 == 0:
+            await asyncio.sleep(0)
+        board = chess.Board()
+        book_fens.add(normalize_fen(board.fen()))
+        for san in extract_san_moves(row["pgn"]):
+            try:
+                board.push(board.parse_san(san))
+            except ValueError:
+                break
+            book_fens.add(normalize_fen(board.fen()))
+
+    positions_by_fen = await _load_book_positions(session, book_fens)
+    moves_by_key = await _load_book_moves(
+        session, [position.id for position in positions_by_fen.values()]
+    )
 
     seeded_lines = 0
-    for row in iter_opening_rows(source_dir):
+    for row_idx, row in enumerate(rows):
+        if row_idx % 50 == 0:
+            await asyncio.sleep(0)
         board = chess.Board()
         san_moves = extract_san_moves(row["pgn"])
         if not san_moves:
@@ -222,6 +293,7 @@ async def seed_opening_book(session: AsyncSession, data_dir: Path | None = None)
                     existing_move.master_draws = 0
                     existing_move.master_black_wins = 0
 
+    await _mark_book_seeded(session, fingerprint)
     return seeded_lines
 
 
@@ -230,10 +302,20 @@ async def sync_stale_master_data(
     client: LichessExplorerClient,
     *,
     force: bool = False,
-    batch_size: int = 50,
     min_position_games: int = 0,
     max_positions: int | None = None,
 ) -> int:
+    """Fetch master stats for stale positions, committing on `session` as it goes.
+
+    No transaction is open while Lichess is called. Requests are paced seconds
+    apart, and the old loop held one transaction across ~50 of them (seen
+    "idle in transaction" for 2.5+ minutes), which pinned the xmin horizon so
+    autovacuum could clean nothing anywhere -- least of all `positions` and
+    `position_moves`, which this rewrites. The batch is read and committed
+    first, each fetch happens with the session idle, and each answer is
+    written in its own short transaction. Needs `expire_on_commit=False`, as
+    every session factory here sets: the work list is read after commits.
+    """
     sync_state = await _load_sync_state(session)
     if _is_cooldown_active(sync_state):
         logger.info(
@@ -245,31 +327,123 @@ async def sync_stale_master_data(
         )
         return 0
 
-    position_query = (
-        select(Position)
-        .join(PositionMove, PositionMove.from_position_id == Position.id)
-        .where(Position.total_games >= min_position_games)
-        .order_by(Position.total_games.desc(), Position.id.asc())
-        .distinct()
+    has_moves = (
+        select(PositionMove.id)
+        .where(PositionMove.from_position_id == Position.id)
+        .exists()
     )
-    if max_positions is not None and max_positions > 0:
-        position_query = position_query.limit(max_positions)
+    has_evaluation = (
+        select(AnalysisResult.id)
+        .where(
+            AnalysisResult.position_id == Position.id,
+            AnalysisResult.engine == ENGINE_NAME,
+            AnalysisResult.engine_version == ENGINE_VERSION,
+        )
+        .exists()
+    )
+    filters = [Position.total_games >= min_position_games, has_moves]
+    if not force:
+        # Staleness must live in SQL: with a Python-side check, a capped run
+        # kept re-reading the same already-fresh top rows and never advanced
+        # through the corpus (millions of positions here). A position fetched
+        # and found empty (master_total = 0) keeps its own, much longer TTL —
+        # 86% of fetches here came back with zero master games, and re-asking
+        # those monthly would spend the whole quota re-confirming nothing.
+        stale_cutoff = _now_utc() - timedelta(days=settings.lichess_cache_ttl_days)
+        empty_cutoff = _now_utc() - timedelta(days=settings.lichess_empty_ttl_days)
+        filters.append(
+            (Position.master_fetched_at.is_(None))
+            | ((Position.master_total > 0) & (Position.master_fetched_at < stale_cutoff))
+            | ((Position.master_total == 0) & (Position.master_fetched_at < empty_cutoff))
+        )
 
-    position_result = await session.execute(position_query)
+    # Positions with a stored engine evaluation come first: recurring-mistake
+    # detection needs master stats and an eval for the same position, so those
+    # rows are worth the Lichess quota most. Two queries instead of one ORDER BY
+    # has_evaluation: sorting the whole positions table on that expression took
+    # ~16s and starved the API at startup; driving off the small analysis_results
+    # set and topping up via the total_games index runs in well under a second.
+    cap = max_positions if max_positions is not None and max_positions > 0 else None
+    evaluated_query = (
+        select(Position)
+        .where(
+            Position.id.in_(
+                select(AnalysisResult.position_id)
+                .where(
+                    AnalysisResult.engine == ENGINE_NAME,
+                    AnalysisResult.engine_version == ENGINE_VERSION,
+                )
+                .distinct()
+            ),
+            *filters,
+        )
+        .order_by(Position.total_games.desc(), Position.id.asc())
+    )
+    if cap is not None:
+        evaluated_query = evaluated_query.limit(cap)
+    candidates = list((await session.execute(evaluated_query)).scalars().all())
+
+    remaining = None if cap is None else cap - len(candidates)
+    if remaining is None or remaining > 0:
+        fill_query = (
+            select(Position)
+            .where(~has_evaluation, *filters)
+            .order_by(Position.total_games.desc(), Position.id.asc())
+        )
+        if remaining is not None:
+            fill_query = fill_query.limit(remaining)
+        candidates.extend((await session.execute(fill_query)).scalars().all())
+
+    # Phase 1: everything the loop needs, read now and committed, so the
+    # loop itself never reads lazily or keeps a transaction open.
+    if not force:
+        candidates = [
+            position for position in candidates
+            if cache_is_stale(position.master_fetched_at, position.master_total)
+        ]
+    moves_by_position: dict[int, list[PositionMove]] = {}
+    if candidates:
+        move_rows = await session.execute(
+            select(PositionMove)
+            .where(PositionMove.from_position_id.in_([position.id for position in candidates]))
+            .order_by(PositionMove.game_count.desc(), PositionMove.move_san.asc())
+        )
+        for move in move_rows.scalars():
+            moves_by_position.setdefault(move.from_position_id, []).append(move)
+    work = [
+        (position, position.fen, moves_by_position[position.id])
+        for position in candidates
+        if moves_by_position.get(position.id)
+    ]
+    await session.commit()
+
     refreshed = 0
-
-    for position in position_result.scalars().all():
-        if not force and not cache_is_stale(position.master_fetched_at):
-            continue
-
-        moves = await load_moves_for_position(session, position.id)
-        if not moves:
-            continue
+    for idx, (position, fen, moves) in enumerate(work):
+        if idx % 100 == 0:
+            await asyncio.sleep(0)
 
         try:
-            await refresh_master_data(session, client, position, moves)
+            # Phase 2: the fetch, with no transaction open.
+            master_data = await client.get_master_stats(fen)
+        except httpx.RequestError:
+            await _set_cooldown(
+                session, status_code=None, error="network_unavailable",
+                duration_seconds=settings.lichess_sync_cooldown_rate_limit_seconds,
+            )
+            await session.commit()
+            logger.warning("Pausing master opening sync after network failure")
+            break
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code if exc.response is not None else None
+            if status_code is not None and 500 <= status_code < 600:
+                retry_after = _parse_retry_after_seconds(exc.response.headers.get("Retry-After"))
+                await _set_cooldown(
+                    session, status_code=status_code, error="upstream_unavailable",
+                    duration_seconds=max(settings.lichess_sync_cooldown_rate_limit_seconds, retry_after or 0),
+                )
+                await session.commit()
+                logger.warning("Pausing master opening sync after upstream failure", extra={"status_code": status_code})
+                break
             if exc.response is not None and exc.response.status_code in {401, 403}:
                 await _set_cooldown(
                     session,
@@ -277,9 +451,10 @@ async def sync_stale_master_data(
                     error="authorization",
                     duration_seconds=settings.lichess_sync_cooldown_auth_minutes * 60,
                 )
+                await session.commit()
                 logger.warning(
                     "Skipping master opening sync after authorization error",
-                    extra={"status_code": exc.response.status_code, "fen": position.fen},
+                    extra={"status_code": exc.response.status_code, "fen": fen},
                 )
                 break
             if status_code == 429:
@@ -294,21 +469,47 @@ async def sync_stale_master_data(
                     error="rate_limit",
                     duration_seconds=cooldown_seconds,
                 )
+                await session.commit()
                 logger.warning(
                     "Stopping master opening sync after rate limit response",
                     extra={
                         "status_code": status_code,
                         "retry_after": exc.response.headers.get("Retry-After") if exc.response else None,
-                        "fen": position.fen,
+                        "fen": fen,
                     },
                 )
                 break
             raise
+        # Phase 3: the answer, in a transaction lasting milliseconds.
+        await cache_master_stats(session, position, moves, master_data)
         refreshed += 1
         if refreshed == 1:
             await _clear_cooldown(session)
-
-        if refreshed % batch_size == 0:
-            await session.commit()
+        await session.commit()
 
     return refreshed
+
+
+async def seconds_until_sync_retry(session: AsyncSession) -> float | None:
+    """How long until a cooled-down explorer sync is worth attempting again.
+
+    The maintenance loop used to sleep `lichess_sync_interval_hours` after every
+    run whatever ended it, so a run cut short by a rate-limit cooldown -- which
+    is most of them, the explorer 429s after about twenty requests -- did not
+    retry for six hours. That capped master-data collection at roughly one
+    short burst per six hours, about 23 positions, regardless of how brief the
+    cooldown itself was: shortening the cooldown alone changed nothing.
+
+    Returns None when no cooldown is pending, in which case the caller keeps its
+    normal interval.
+    """
+
+    state = await _load_sync_state(session)
+    if not _is_cooldown_active(state):
+        return None
+    cooldown_until = state.cooldown_until
+    if cooldown_until.tzinfo is None:
+        cooldown_until = cooldown_until.replace(tzinfo=UTC)
+    # A second of slack, so waking up fractionally early does not spend the
+    # attempt re-reading an unexpired cooldown.
+    return max((cooldown_until - _now_utc()).total_seconds() + 1.0, 1.0)
