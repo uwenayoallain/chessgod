@@ -1,9 +1,13 @@
-import { useMemo } from 'react'
+import { lazy, Suspense, useMemo } from 'react'
+
+import { PageBoundary } from '@/components/ui/page-boundary'
 
 import { Header } from '@/components/layout/header'
 import { ThemeProvider } from '@/components/layout/theme-provider'
-import AdminObservabilityPage from '@/pages/admin-observability'
 import Dashboard from '@/pages/dashboard'
+
+// Operator-only. Loaded on its own route so the board never pays for it.
+const AdminObservabilityPage = lazy(() => import('@/pages/admin-observability'))
 
 export default function App() {
   const isAdminRoute = useMemo(() => {
@@ -18,7 +22,15 @@ export default function App() {
       <div className="app-shell">
         <Header />
         <main className="content">
-          {isAdminRoute ? <AdminObservabilityPage /> : <Dashboard />}
+          {isAdminRoute ? (
+            <PageBoundary>
+              <Suspense fallback={null}>
+                <AdminObservabilityPage />
+              </Suspense>
+            </PageBoundary>
+          ) : (
+            <Dashboard />
+          )}
         </main>
       </div>
     </ThemeProvider>

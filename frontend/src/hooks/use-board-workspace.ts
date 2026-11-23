@@ -5,11 +5,17 @@ import { api } from '@/lib/api'
 import { useTrainingLine, type WorkspaceGame } from '@/hooks/use-workspace-data'
 import { useEngineStore } from '@/store/engine-store'
 import { STARTING_FEN, useAppStore, type ReplayMove } from '@/store/app-store'
+import type { PersistedEngineAnalysis } from '@/store/engine-store'
 import { parsePgnToReplay } from '@/lib/chess-utils'
 
 export type OpeningSelection = {
   eco: string | null
   openingName: string
+}
+
+export type MistakeReviewSelection = {
+  game: WorkspaceGame
+  mistakePly: number
 }
 
 export function useBoardWorkspace({
@@ -29,19 +35,42 @@ export function useBoardWorkspace({
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null)
   const [selectedOpening, setSelectedOpening] = useState<OpeningSelection | null>(null)
   const [activeGame, setActiveGame] = useState<WorkspaceGame | null>(null)
+  const [activeMistakePly, setActiveMistakePly] = useState<number | null>(null)
   const bookPrefetchGeneration = useRef(0)
 
   function preloadReplayInsights(replay: ReplayMove[], initialBookPlies: number[] = []) {
-    const fenHistory = [STARTING_FEN, ...replay.map((move) => move.fen)]
-    void useEngineStore.getState().queueReplayAnalysis(fenHistory)
     useAppStore.getState().setBookPlies(initialBookPlies)
     bookPrefetchGeneration.current += 1
     const generation = bookPrefetchGeneration.current
+    const fenHistory = [STARTING_FEN, ...replay.map((move) => move.fen)]
+    const uniqueFens = [...new Set(fenHistory)]
+    void (async () => {
+      try {
+        // Long games exceed practical URL limits. Bounded batches also let
+        // switching games abandon stale work before it starts another search.
+        for (let start = 0; start < uniqueFens.length; start += 50) {
+          if (generation !== bookPrefetchGeneration.current) return
+          const response = await api.get<Record<string, PersistedEngineAnalysis>>(
+            '/api/analysis/evaluations',
+            { params: { fens: uniqueFens.slice(start, start + 50).join(','), min_depth: 22 } },
+          )
+          useEngineStore.getState().hydrateAnalysisCache(response.data)
+        }
+      } catch (error) {
+        console.warn('[chessgod] Saved analysis could not be loaded; using browser analysis', error)
+      } finally {
+        if (generation === bookPrefetchGeneration.current) {
+          void useEngineStore.getState().queueReplayAnalysis(uniqueFens, { depth: 22 })
+        }
+      }
+    })()
     void prefetchBookPlies({
       fenHistory,
       fetchTheoryCompare: async (fen) => {
         try {
-          const response = await api.get<{ master_moves: Array<{ san: string; uci?: string | null }> }>('/api/theory/compare', {
+          const response = await api.get<{
+            master_moves: Array<{ san: string; uci?: string | null }>
+          }>('/api/theory/compare', {
             params: { fen },
           })
           return response.data
@@ -50,15 +79,23 @@ export function useBoardWorkspace({
         }
       },
       replayMoves: replay,
-    }).then((result) => {
-      if (generation !== bookPrefetchGeneration.current) return
-      useAppStore.getState().setBookPlies(Array.from(new Set([...initialBookPlies, ...result.plies])).sort((a, b) => a - b))
-      if (result.hadErrors) {
-        console.warn('[chessgod] Book moves partially loaded — theory API returned errors for some positions.')
-      }
-    }).catch((err) => {
-      console.warn('[chessgod] Failed to load book moves:', err)
     })
+      .then((result) => {
+        if (generation !== bookPrefetchGeneration.current) return
+        useAppStore
+          .getState()
+          .setBookPlies(
+            Array.from(new Set([...initialBookPlies, ...result.plies])).sort((a, b) => a - b),
+          )
+        if (result.hadErrors) {
+          console.warn(
+            '[chessgod] Book moves partially loaded — theory API returned errors for some positions.',
+          )
+        }
+      })
+      .catch((err) => {
+        console.warn('[chessgod] Failed to load book moves:', err)
+      })
   }
 
   const trainingLine = useTrainingLine(
@@ -80,9 +117,17 @@ export function useBoardWorkspace({
       fen: m.resulting_fen,
     }))
 
-    loadReplay(replay)
-    preloadReplayInsights(replay, replay.map((move) => move.ply))
+    // Land on the end of the line: the position that defines the opening, with
+    // its last move highlighted. Landing on ply 0 left the board visibly
+    // unchanged, which read as the click not working; stepping back through
+    // the line is one key away.
+    loadReplay(replay, replay.length)
+    preloadReplayInsights(
+      replay,
+      replay.map((move) => move.ply),
+    )
     setActiveGame(null)
+    setActiveMistakePly(null)
     setSelectedGameId(null)
   }, [loadReplay, selectedOpening, trainingLine.data])
 
@@ -93,11 +138,11 @@ export function useBoardWorkspace({
 
   const gameFilters = useMemo(
     () => ({
-      openingName: selectedOpening?.openingName ?? null,
-      eco: selectedOpening?.eco ?? null,
-      fen: selectedOpening ? null : currentFen !== STARTING_FEN ? currentFen : null,
+      openingName: null,
+      eco: null,
+      fen: currentFen !== STARTING_FEN ? currentFen : null,
     }),
-    [currentFen, selectedOpening],
+    [currentFen],
   )
 
   function loadGame(game: WorkspaceGame) {
@@ -108,12 +153,28 @@ export function useBoardWorkspace({
     preloadReplayInsights(replay)
     setSelectedGameId(game.id)
     setActiveGame(game)
+    setActiveMistakePly(null)
     setSelectedOpening(null)
     useAppStore.getState().setIsLoadingGame(false)
   }
 
   function loadOpening(opening: OpeningSelection) {
+    setActiveMistakePly(null)
     setSelectedOpening(opening)
+  }
+
+  function loadMistakeReview(selection: MistakeReviewSelection) {
+    if (!selection.game.pgn) return
+    useAppStore.getState().setIsLoadingGame(true)
+    const replay = parsePgnToReplay(selection.game.pgn)
+    const startIndex = Math.max(0, selection.mistakePly - 1)
+    loadReplay(replay, startIndex, 'loaded')
+    preloadReplayInsights(replay)
+    setSelectedGameId(selection.game.id)
+    setActiveGame(selection.game)
+    setActiveMistakePly(selection.mistakePly)
+    setSelectedOpening(null)
+    useAppStore.getState().setIsLoadingGame(false)
   }
 
   function clearLoadedContext() {
@@ -121,6 +182,7 @@ export function useBoardWorkspace({
     setSelectedOpening(null)
     setSelectedGameId(null)
     setActiveGame(null)
+    setActiveMistakePly(null)
     clearLoadedLine()
   }
 
@@ -129,9 +191,11 @@ export function useBoardWorkspace({
     selectedGameId,
     selectedOpening,
     activeGame,
+    activeMistakePly,
     setSelectedGameId,
     loadGame,
     loadOpening,
+    loadMistakeReview,
     clearLoadedContext,
     gameFilters,
     trainingLine,

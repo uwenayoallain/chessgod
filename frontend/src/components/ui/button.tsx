@@ -11,7 +11,12 @@ type ButtonProps = PropsWithChildren<
 export function Button({ children, className, variant = 'default', ...props }: ButtonProps) {
   return (
     <button
-      className={cn('button', variant === 'primary' && 'button--primary', variant === 'ghost' && 'button--ghost', className)}
+      className={cn(
+        'button',
+        variant === 'primary' && 'button--primary',
+        variant === 'ghost' && 'button--ghost',
+        className,
+      )}
       {...props}
     >
       {children}

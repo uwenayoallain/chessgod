@@ -52,7 +52,16 @@ export function findHangingPieceThreat(fen: string): HangingPieceThreat | null {
   return captures[0] ?? null
 }
 
+// A pure function of the position, recomputed on every board render: it
+// generates every opponent move with chess.js (~20ms), which was the second
+// largest cost of stepping through a game.
+const opponentThreats = new Map<string, HangingPieceThreat | null>()
+
 export function findOpponentHangingPieceThreat(fen: string): HangingPieceThreat | null {
+  if (opponentThreats.has(fen)) return opponentThreats.get(fen)!
   const opponentFen = withOppositeTurn(fen)
-  return opponentFen ? findHangingPieceThreat(opponentFen) : null
+  const threat = opponentFen ? findHangingPieceThreat(opponentFen) : null
+  if (opponentThreats.size >= 512) opponentThreats.delete(opponentThreats.keys().next().value!)
+  opponentThreats.set(fen, threat)
+  return threat
 }

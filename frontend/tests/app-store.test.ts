@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test } from 'vite-plus/test'
 
 import { STARTING_FEN, useAppStore } from '../src/store/app-store'
 
@@ -9,7 +9,7 @@ function resetStore() {
     boardOrientation: 'white',
     keepUserOnBottom: false,
     colorFilter: 'both',
-    timeClassFilter: null,
+    timeClassFilter: 'rapid_blitz',
     importStatus: 'idle',
     importProgress: null,
   })
@@ -74,12 +74,26 @@ describe('useAppStore history', () => {
     expect(state.hasLoadedLine).toBe(false)
   })
 
+  test('loadPosition makes a drill position the navigation root', () => {
+    useAppStore.getState().loadPosition('training-fen')
+    useAppStore.getState().pushPosition('after-answer', 'e4', 'e2e4')
+    useAppStore.getState().goBack()
+
+    const state = useAppStore.getState()
+    expect(state.currentFen).toBe('training-fen')
+    expect(state.fenHistory).toEqual(['training-fen'])
+    expect(state.replayMoves).toEqual([])
+  })
+
   test('preserves the loaded game line when creating a branch', () => {
-    useAppStore.getState().loadReplay([
-      { ply: 1, san: 'e4', uci: 'e2e4', fen: 'fen-e4' },
-      { ply: 2, san: 'e5', uci: 'e7e5', fen: 'fen-e5' },
-      { ply: 3, san: 'Nf3', uci: 'g1f3', fen: 'fen-nf3' },
-    ], 2)
+    useAppStore.getState().loadReplay(
+      [
+        { ply: 1, san: 'e4', uci: 'e2e4', fen: 'fen-e4' },
+        { ply: 2, san: 'e5', uci: 'e7e5', fen: 'fen-e5' },
+        { ply: 3, san: 'Nf3', uci: 'g1f3', fen: 'fen-nf3' },
+      ],
+      2,
+    )
 
     useAppStore.getState().pushPosition('fen-alt', 'Bc4', 'f1c4')
 
@@ -111,5 +125,34 @@ describe('useAppStore history', () => {
     useAppStore.getState().alignBoardToUserColor('something-else')
 
     expect(useAppStore.getState().boardOrientation).toBe('white')
+  })
+
+  test('clearUsername removes the active player and import state', () => {
+    const { clearUsername, setUsername, setImportProgress, setImportStatus } =
+      useAppStore.getState()
+
+    setUsername('hikaru')
+    setImportStatus('complete')
+    setImportProgress({
+      archiveIndex: 1,
+      archiveNewGames: 2,
+      archiveSkippedGames: 3,
+      cached: false,
+      cachedArchives: 0,
+      complete: true,
+      currentArchive: '2026-01',
+      currentGameIndex: 4,
+      currentGameLabel: 'Game 4',
+      gamesInArchive: 10,
+      newGames: 2,
+      skippedGames: 3,
+      totalArchives: 1,
+    })
+
+    clearUsername()
+
+    expect(useAppStore.getState().username).toBeNull()
+    expect(useAppStore.getState().importStatus).toBe('idle')
+    expect(useAppStore.getState().importProgress).toBeNull()
   })
 })

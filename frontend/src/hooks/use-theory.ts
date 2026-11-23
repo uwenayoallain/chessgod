@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
 import { getApiErrorMessage } from '@/lib/api-errors'
@@ -27,78 +27,70 @@ export type TheoryDeviation = {
   eco?: string | null
   opening_name?: string | null
   severity: 'minor' | 'moderate' | 'major'
+  representative_game_id?: number | null
+  representative_game_ply?: number | null
+  representative_post_fen?: string | null
+  representative_played_at?: string | null
+  representative_user_result?: string | null
+}
+
+/** One cache entry per position, shared by the Theory panel, book markers and the sparring opponent. */
+export function theoryQuery(fen: string) {
+  return {
+    queryKey: ['theory', fen] as const,
+    queryFn: async ({ signal }: { signal?: AbortSignal }) => {
+      const response = await api.get<TheoryComparison>('/api/theory/compare', {
+        signal,
+        params: { fen },
+      })
+      return response.data
+    },
+    staleTime: 10 * 60 * 1000,
+  }
 }
 
 export function useTheory(fen: string) {
-  const [data, setData] = useState<TheoryComparison | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
+  const query = useQuery({
+    ...theoryQuery(fen),
+    placeholderData: keepPreviousData,
+  })
 
-  useEffect(() => {
-    let cancelled = false
+  const hasData = query.data != null
 
-    async function load() {
-      setIsLoading(true)
-      setError(null)
-      try {
-        const response = await api.get<TheoryComparison>('/api/theory/compare', { params: { fen } })
-        if (!cancelled) {
-          setData(response.data)
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(new Error(getApiErrorMessage(caught, 'Could not load theory data.')))
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
-      }
-    }
-
-    load()
-    return () => {
-      cancelled = true
-    }
-  }, [fen])
-
-  return { data, isLoading, error }
+  return {
+    data: query.data ?? null,
+    isLoading: query.isLoading && !hasData,
+    isRefreshing: query.isFetching && hasData,
+    isPlaceholderData: query.isPlaceholderData,
+    error: query.error
+      ? new Error(getApiErrorMessage(query.error, 'Could not load theory data.'))
+      : null,
+  }
 }
 
 export function useTheoryDeviations(color: 'white' | 'black', minGames = 2) {
-  const [data, setData] = useState<TheoryDeviation[]>([])
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<Error | null>(null)
+  const query = useQuery({
+    queryKey: ['theory-deviations', color, minGames],
+    queryFn: async ({ signal }) => {
+      const response = await api.get<TheoryDeviation[]>('/api/theory/deviations', {
+        signal,
+        params: { color, min_games: minGames },
+      })
+      return response.data
+    },
+    placeholderData: keepPreviousData,
+    staleTime: 5 * 60 * 1000,
+  })
 
-  useEffect(() => {
-    let cancelled = false
+  const hasData = query.data != null
 
-    async function load() {
-      setIsLoading(true)
-      setError(null)
-      try {
-        const response = await api.get<TheoryDeviation[]>('/api/theory/deviations', {
-          params: { color, min_games: minGames },
-        })
-        if (!cancelled) {
-          setData(response.data)
-        }
-      } catch (caught) {
-        if (!cancelled) {
-          setError(new Error(getApiErrorMessage(caught, 'Could not load theory deviations.')))
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
-      }
-    }
-
-    load()
-    return () => {
-      cancelled = true
-    }
-  }, [color, minGames])
-
-  return { data, isLoading, error }
+  return {
+    data: query.data ?? [],
+    isLoading: query.isLoading && !hasData,
+    isRefreshing: query.isFetching && hasData,
+    isPlaceholderData: query.isPlaceholderData,
+    error: query.error
+      ? new Error(getApiErrorMessage(query.error, 'Could not load theory deviations.'))
+      : null,
+  }
 }

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 
 import { clearTheoryCache, prefetchBookPlies } from './book-moves'
 
@@ -8,7 +8,12 @@ describe('prefetchBookPlies', () => {
   it('marks consecutive book plies and stops at first deviation', async () => {
     const fetchTheoryCompare = vi
       .fn()
-      .mockResolvedValueOnce({ master_moves: [{ san: 'e4', uci: 'e2e4' }, { san: 'd4', uci: 'd2d4' }] })
+      .mockResolvedValueOnce({
+        master_moves: [
+          { san: 'e4', uci: 'e2e4' },
+          { san: 'd4', uci: 'd2d4' },
+        ],
+      })
       .mockResolvedValueOnce({ master_moves: [{ san: 'Nc6', uci: 'b8c6' }] })
 
     const result = await prefetchBookPlies({

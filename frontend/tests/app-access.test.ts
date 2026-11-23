@@ -1,19 +1,25 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test } from 'vite-plus/test'
 
 import { getAppAccessState } from '../src/lib/app-access'
 import { getEngineStatusMessage } from '../src/lib/engine-status'
 
 describe('getAppAccessState', () => {
   test('returns missing_username when no player is selected', () => {
-    expect(getAppAccessState({ username: null, isLoading: false, totalGames: null }).state).toBe('missing_username')
+    expect(getAppAccessState({ username: null, isLoading: false, totalGames: null }).state).toBe(
+      'missing_username',
+    )
   })
 
   test('returns empty when a player exists but no imported games are available', () => {
-    expect(getAppAccessState({ username: 'hikaru', isLoading: false, totalGames: 0 }).state).toBe('empty')
+    expect(getAppAccessState({ username: 'hikaru', isLoading: false, totalGames: 0 }).state).toBe(
+      'empty',
+    )
   })
 
   test('returns ready when imported games exist', () => {
-    expect(getAppAccessState({ username: 'hikaru', isLoading: false, totalGames: 12 }).state).toBe('ready')
+    expect(getAppAccessState({ username: 'hikaru', isLoading: false, totalGames: 12 }).state).toBe(
+      'ready',
+    )
   })
 })
 
@@ -71,7 +77,7 @@ describe('getEngineStatusMessage', () => {
         isLoadingNnue: true,
         isReady: false,
       }),
-    ).toBe('Loading NNUE…')
+    ).toBe('Loading analysis model…')
   })
 
   test('returns depth-aware ready message', () => {
@@ -85,6 +91,6 @@ describe('getEngineStatusMessage', () => {
         isLoadingNnue: false,
         isReady: true,
       }),
-    ).toBe('Engine ready at depth 22.')
+    ).toBe('Ready at depth 22.')
   })
 })

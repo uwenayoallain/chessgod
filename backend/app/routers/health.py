@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -12,6 +12,7 @@ from app.schemas.observability import (
     ObservabilitySnapshot,
 )
 from app.services.observability import get_observability_store
+from app.services.theory import load_lichess_sync_state
 
 router = APIRouter()
 
@@ -35,15 +36,32 @@ async def health_observability(
     request: Request,
     session: AsyncSession = Depends(get_db),
     x_admin_passphrase: str | None = Header(default=None),
+    events_limit: int = Query(default=200, ge=1, le=500),
+    events_offset: int = Query(default=0, ge=0),
 ) -> ObservabilitySnapshot:
     _authorize_admin(x_admin_passphrase)
+    store = get_observability_store()
     try:
-        await get_observability_store().persist_queued_events(session, max_items=500)
-        await get_observability_store().purge_expired_events(session)
+        await store.persist_queued_events(session, max_items=500)
+        await store.purge_expired_events(session)
     except Exception:
         pass
-    runtime = get_observability_store().runtime_snapshot()
-    persistent = await get_observability_store().persistent_snapshot(session)
+    try:
+        lichess_state = await load_lichess_sync_state(session)
+        store.update_external_state("lichess", lichess_state)
+    except Exception:
+        pass
+    runtime = store.runtime_snapshot()
+    persistent = await store.persistent_snapshot(
+        session,
+        events_limit=events_limit,
+        events_offset=events_offset,
+    )
+    runtime_background = {item["name"]: item for item in runtime.get("background_tasks", []) if isinstance(item, dict) and "name" in item}
+    for item in persistent.get("background_tasks", []):
+        if isinstance(item, dict) and "name" in item and item["name"] not in runtime_background:
+            runtime_background[item["name"]] = item
+    runtime["background_tasks"] = list(runtime_background.values())
     return ObservabilitySnapshot(
         request_id=request.state.request_id,
         generated_at=datetime.now(UTC).isoformat(),

@@ -25,3 +25,7 @@ class ImportSummary(BaseModel):
     total_games: int
     date_range: dict[str, str | None]
     games_by_time_class: dict[str, int]
+    # The player's rating in their most recent game of each time control. It is
+    # where the sparring opponent starts, so that "your level" means the level
+    # the player is at now rather than an average over years of improvement.
+    current_ratings: dict[str, int] = {}

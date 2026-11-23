@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.import_archive import ImportArchive
+
+
+def _upsert_for_session(session: AsyncSession):
+    bind = session.bind
+    if bind is not None and bind.dialect.name == "sqlite":
+        return sqlite_insert
+    return pg_insert
 
 
 def archive_month_from_url(archive_url: str) -> str:
@@ -44,7 +53,7 @@ async def get_cached_archive(
         select(ImportArchive).where(
             ImportArchive.username == username,
             ImportArchive.archive_url == archive_url,
-        )
+        ).execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
@@ -60,6 +69,8 @@ async def should_fetch_archive(
     cached_archive = await get_cached_archive(session, username, archive_url)
     if cached_archive is None:
         return True
+    if cached_archive.ownership_version < 2:
+        return True
 
     archive_month = _parse_archive_year_month(archive_url)
     if archive_month is None:
@@ -73,21 +84,25 @@ async def mark_archive_cached(
     username: str,
     archive_url: str,
     games_in_archive: int,
-) -> ImportArchive:
-    cached_archive = await get_cached_archive(session, username, archive_url)
+) -> None:
     archive_month = archive_month_from_url(archive_url)
-
-    if cached_archive is None:
-        cached_archive = ImportArchive(
+    insert_stmt = _upsert_for_session(session)
+    stmt = (
+        insert_stmt(ImportArchive)
+        .values(
             username=username,
             archive_url=archive_url,
             archive_month=archive_month,
             games_in_archive=games_in_archive,
+            ownership_version=2,
         )
-        session.add(cached_archive)
-    else:
-        cached_archive.archive_month = archive_month
-        cached_archive.games_in_archive = games_in_archive
-
-    await session.flush()
-    return cached_archive
+        .on_conflict_do_update(
+            index_elements=["username", "archive_url"],
+            set_={
+                "games_in_archive": games_in_archive,
+                "ownership_version": 2,
+                "fetched_at": func.now(),
+            },
+        )
+    )
+    await session.execute(stmt)

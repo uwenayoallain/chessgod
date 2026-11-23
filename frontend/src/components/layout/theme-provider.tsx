@@ -12,7 +12,7 @@ const ThemeContext = createContext<ThemeContextValue | null>(null)
 
 export function ThemeProvider({ children }: PropsWithChildren) {
   const [theme, setThemeState] = useState<Theme>(
-    () => (localStorage.getItem('chessgod-theme') as Theme) || 'system'
+    () => (localStorage.getItem('chessgod-theme') as Theme) || 'system',
   )
 
   useEffect(() => {
@@ -21,7 +21,9 @@ export function ThemeProvider({ children }: PropsWithChildren) {
     root.classList.remove('light', 'dark')
 
     if (theme === 'system') {
-      const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+      const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches
+        ? 'dark'
+        : 'light'
       root.classList.add(systemTheme)
       root.style.colorScheme = systemTheme
       return
@@ -63,11 +65,7 @@ export function ThemeProvider({ children }: PropsWithChildren) {
     cycleTheme,
   }
 
-  return (
-    <ThemeContext.Provider value={value}>
-      {children}
-    </ThemeContext.Provider>
-  )
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
 }
 
 export function useTheme() {

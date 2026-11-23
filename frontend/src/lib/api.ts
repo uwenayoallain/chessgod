@@ -1,6 +1,11 @@
 import axios from 'axios'
 
-import { getCurrentRequestId, getTelemetryNowMs, reportFrontendEvent, setCurrentRequestId } from '@/lib/telemetry'
+import {
+  getCurrentRequestId,
+  getTelemetryNowMs,
+  reportFrontendEvent,
+  setCurrentRequestId,
+} from '@/lib/telemetry'
 
 export const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? '',
@@ -17,7 +22,10 @@ api.interceptors.request.use((config) => {
   if (
     adminPassphrase &&
     config.url?.includes('/api/health/observability') &&
-    !(typeof config.headers['X-Admin-Passphrase'] === 'string' && config.headers['X-Admin-Passphrase'].trim())
+    !(
+      typeof config.headers['X-Admin-Passphrase'] === 'string' &&
+      config.headers['X-Admin-Passphrase'].trim()
+    )
   ) {
     config.headers['X-Admin-Passphrase'] = adminPassphrase
   }
@@ -43,19 +51,32 @@ api.interceptors.response.use(
         message: `${response.config.method?.toUpperCase() ?? 'GET'} ${response.config.url ?? ''}`,
         status_code: response.status,
         duration_ms: durationMs,
-        request_id: typeof responseRequestId === 'string' ? responseRequestId : getCurrentRequestId() ?? undefined,
+        request_id:
+          typeof responseRequestId === 'string'
+            ? responseRequestId
+            : (getCurrentRequestId() ?? undefined),
         url: window.location.href,
       })
     }
     return response
   },
   (error) => {
-    const config = error?.config as { url?: string; method?: string; metadata?: { startedAtMs: number } } | undefined
-    const durationMs = config?.metadata ? getTelemetryNowMs() - config.metadata.startedAtMs : undefined
-    const statusCode = typeof error?.response?.status === 'number' ? error.response.status : undefined
-    const responseRequestId = typeof error?.response?.headers?.['x-request-id'] === 'string'
-      ? error.response.headers['x-request-id']
-      : getCurrentRequestId() ?? undefined
+    // A cancelled request is TanStack Query dropping a response nobody needs
+    // any more (the board moved on) — not a failure. Reported as one, it made
+    // up most of the "failed requests" in the observability panel.
+    if (error?.code === 'ERR_CANCELED') return Promise.reject(error)
+    const config = error?.config as
+      | { url?: string; method?: string; metadata?: { startedAtMs: number } }
+      | undefined
+    const durationMs = config?.metadata
+      ? getTelemetryNowMs() - config.metadata.startedAtMs
+      : undefined
+    const statusCode =
+      typeof error?.response?.status === 'number' ? error.response.status : undefined
+    const responseRequestId =
+      typeof error?.response?.headers?.['x-request-id'] === 'string'
+        ? error.response.headers['x-request-id']
+        : (getCurrentRequestId() ?? undefined)
 
     reportFrontendEvent({
       kind: 'error',

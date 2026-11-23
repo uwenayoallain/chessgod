@@ -2,14 +2,18 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-RUN corepack enable
+ENV PATH="/app/node_modules/.bin:${PATH}"
 
-COPY package.json pnpm-lock.yaml ./
+RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY scripts ./scripts
-RUN SKIP_STOCKFISH_NNUE_DOWNLOAD=1 pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    SKIP_STOCKFISH_NNUE_DOWNLOAD=1 pnpm install --frozen-lockfile --ignore-scripts && \
+    node scripts/sync-stockfish-assets.mjs
 
 COPY . .
 
 EXPOSE 5173
 
-CMD ["pnpm", "dev", "--host", "0.0.0.0"]
+CMD ["vp", "dev", "--host", "0.0.0.0"]

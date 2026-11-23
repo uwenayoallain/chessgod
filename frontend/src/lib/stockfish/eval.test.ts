@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vite-plus/test'
 
 import { scoreToWhitePerspective } from './eval'
 
@@ -22,11 +22,9 @@ describe('scoreToWhitePerspective', () => {
   })
 
   it('flips mate scores when black is to move', () => {
-    expect(
-      scoreToWhitePerspective(
-        { type: 'mate', value: 3 },
-        '8/8/8/8/8/8/8/8 b - -',
-      ),
-    ).toEqual({ type: 'mate', value: -3 })
+    expect(scoreToWhitePerspective({ type: 'mate', value: 3 }, '8/8/8/8/8/8/8/8 b - -')).toEqual({
+      type: 'mate',
+      value: -3,
+    })
   })
 })

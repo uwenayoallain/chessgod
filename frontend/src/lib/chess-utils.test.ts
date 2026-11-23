@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vite-plus/test'
 
-import { parsePgnToReplay } from './chess-utils'
+import { parsePgnToReplay, uciToSan } from './chess-utils'
 
 describe('parsePgnToReplay', () => {
   it('includes the played uci for each replay move', () => {
@@ -32,5 +32,16 @@ describe('parsePgnToReplay', () => {
         fen: 'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -',
       },
     ])
+  })
+})
+
+describe('uciToSan', () => {
+  it('writes an engine move the way a player reads it', () => {
+    const afterE4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -'
+    expect(uciToSan(afterE4, 'e7e5')).toBe('e5')
+    expect(uciToSan(afterE4, 'g8f6')).toBe('Nf6')
+    expect(uciToSan('8/P6k/8/8/8/8/8/K7 w - -', 'a7a8q')).toBe('a8=Q')
+    // A move that does not play here is shown as it came, not dropped.
+    expect(uciToSan(afterE4, 'e2e4')).toBe('e2e4')
   })
 })

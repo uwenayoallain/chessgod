@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
 
@@ -7,57 +7,32 @@ export type ImportSummary = {
   total_games: number
   date_range: { from: string | null; to: string | null }
   games_by_time_class: Record<string, number>
+  /** The player's rating in their newest game of each time control. */
+  current_ratings?: Record<string, number>
 }
 
-const summaryCache = new Map<string, ImportSummary | null>()
-
 export function useImportSummary(username: string | null, refreshKey: string | number = 0) {
-  const hasCachedSummary = Boolean(username && summaryCache.has(username))
-  const [data, setData] = useState<ImportSummary | null>(username ? summaryCache.get(username) ?? null : null)
-  const [isLoading, setIsLoading] = useState(Boolean(username && !hasCachedSummary))
+  const query = useQuery({
+    enabled: Boolean(username),
+    queryKey: ['import-summary', username, refreshKey],
+    queryFn: async ({ signal }) => {
+      const response = await api.get<ImportSummary>(`/api/import/${username}/summary`, { signal })
+      return response.data
+    },
+    retry: false,
+    // The refresh key changes when an import starts, which swaps the query key
+    // and would otherwise drop `data` to undefined mid-resync. That reads as
+    // "this account has no games" and throws the user back to the import form
+    // while their library is still there.
+    placeholderData: keepPreviousData,
+    staleTime: refreshKey === 0 ? 5 * 60 * 1000 : 0,
+  })
 
-  useEffect(() => {
-    let cancelled = false
-
-    async function load() {
-      if (!username) {
-        setData(null)
-        setIsLoading(false)
-        return
-      }
-
-      if (summaryCache.has(username) && refreshKey === 0) {
-        setData(summaryCache.get(username) ?? null)
-        setIsLoading(false)
-        return
-      }
-
-      setIsLoading(true)
-      try {
-        const response = await api.get<ImportSummary>(`/api/import/${username}/summary`)
-        if (!cancelled) {
-          summaryCache.set(username, response.data)
-          setData(response.data)
-        }
-      } catch {
-        if (!cancelled) {
-          if (!summaryCache.has(username)) {
-            summaryCache.set(username, null)
-            setData(null)
-          }
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
-      }
-    }
-
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [username, refreshKey])
-
-  return { data, isLoading }
+  return {
+    data: query.data ?? null,
+    isLoading: query.isLoading,
+    error: query.error,
+    refetch: query.refetch,
+    isRefetching: query.isRefetching,
+  }
 }

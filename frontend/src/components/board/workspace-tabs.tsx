@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 type Tab = {
   id: string
   label: string
+  icon?: ReactNode
   content: ReactNode
 }
 
@@ -48,13 +49,12 @@ export function WorkspaceTabs({
             type="button"
             variant={tab.id === selected.id ? 'primary' : 'ghost'}
           >
+            {tab.icon}
             {tab.label}
           </Button>
         ))}
       </div>
-      {!collapsed ? (
-        <div className="workspace-sidebar__body">{selected?.content}</div>
-      ) : null}
+      {!collapsed ? <div className="workspace-sidebar__body">{selected?.content}</div> : null}
     </div>
   )
 }

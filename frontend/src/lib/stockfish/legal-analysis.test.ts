@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vite-plus/test'
 
-import { isLegalEngineMove, isLegalEngineLine } from './legal-analysis'
+import { getTerminalOutcome, isLegalEngineMove, isLegalEngineLine } from './legal-analysis'
 import type { UCIInfo } from './uci'
 
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -'
@@ -20,6 +20,40 @@ function line(pv: string[]): UCIInfo {
 }
 
 describe('legal Stockfish analysis guards', () => {
+  it('rejects mate-zero scores paired with a playable variation', () => {
+    expect(
+      isLegalEngineLine(START_FEN, {
+        ...line(['e2e4']),
+        score: { type: 'mate', value: 0 },
+      }),
+    ).toBe(false)
+  })
+
+  it.each([-3, 3])('keeps truncated variations with nonzero mate scores (%s)', (value) => {
+    expect(
+      isLegalEngineLine(START_FEN, {
+        ...line(['e2e4']),
+        score: { type: 'mate', value },
+      }),
+    ).toBe(true)
+  })
+
+  it('recognizes mate and stalemate without guessing draw claims from a FEN', () => {
+    expect(getTerminalOutcome('k7/1Q6/2K5/8/8/8/8/8 b - -')).toEqual({
+      whiteResult: 1,
+      reason: 'checkmate',
+    })
+    expect(getTerminalOutcome('8/8/8/8/8/2k5/1q6/K7 w - -')).toEqual({
+      whiteResult: -1,
+      reason: 'checkmate',
+    })
+    expect(getTerminalOutcome('k7/2Q5/2K5/8/8/8/8/8 b - -')).toEqual({
+      whiteResult: 0,
+      reason: 'stalemate',
+    })
+    expect(getTerminalOutcome(`${START_FEN} 100 90`)).toBeNull()
+    expect(getTerminalOutcome('invalid')).toBeNull()
+  })
   it('accepts legal best moves for the current FEN', () => {
     expect(isLegalEngineMove(START_FEN, 'e2e4')).toBe(true)
   })

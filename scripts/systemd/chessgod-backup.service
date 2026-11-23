@@ -1,0 +1,12 @@
+[Unit]
+Description=Dump the ChessGod database to backups/ (make db-backup)
+# The dump goes through the postgres container, so Docker has to be up.
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/rca/projects/personal/chessgod
+ExecStart=/usr/bin/flock -n %t/chessgod-backup.lock /usr/bin/make db-backup
+Nice=15
+IOSchedulingClass=idle

@@ -41,7 +41,7 @@ export function getTelemetryNowMs() {
 }
 
 export function setCurrentRequestId(requestId: string | null) {
-  currentRequestId = requestId ? sanitizeText(requestId, 128) ?? null : null
+  currentRequestId = requestId ? (sanitizeText(requestId, 128) ?? null) : null
 }
 
 export function getCurrentRequestId() {
@@ -96,7 +96,11 @@ function normalizeEvent(event: TelemetryEvent): TelemetryEvent | null {
   if (url) {
     normalized.url = url
   }
-  if (typeof event.duration_ms === 'number' && Number.isFinite(event.duration_ms) && event.duration_ms >= 0) {
+  if (
+    typeof event.duration_ms === 'number' &&
+    Number.isFinite(event.duration_ms) &&
+    event.duration_ms >= 0
+  ) {
     normalized.duration_ms = Math.round(event.duration_ms * 100) / 100
   }
   if (typeof event.status_code === 'number') {
@@ -145,7 +149,11 @@ function postBatch(events: TelemetryEvent[], preferBeacon: boolean) {
   const url = getTelemetryUrl()
   const payload = JSON.stringify({ events })
 
-  if (preferBeacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+  if (
+    preferBeacon &&
+    typeof navigator !== 'undefined' &&
+    typeof navigator.sendBeacon === 'function'
+  ) {
     const blob = new Blob([payload], { type: 'application/json' })
     const accepted = navigator.sendBeacon(url, blob)
     if (accepted) {

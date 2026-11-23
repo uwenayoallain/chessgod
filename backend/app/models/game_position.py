@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Integer, Text, UniqueConstraint
+from sqlalchemy import Float, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
@@ -16,3 +16,5 @@ class GamePosition(Base):
     ply: Mapped[int] = mapped_column(Integer)
     move_san: Mapped[str | None] = mapped_column(Text, nullable=True)
     move_uci: Mapped[str | None] = mapped_column(Text, nullable=True)
+    clock_seconds_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    think_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)

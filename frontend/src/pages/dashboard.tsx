@@ -1,90 +1,213 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { BookOpen, GraduationCap } from 'lucide-react'
 
 import { BoardRail } from '@/components/board/board-rail'
+import { Medal } from '@/components/training/trophies'
+import type { EmblemName } from '@/lib/training/emblem-art'
 import { ChessBoard } from '@/components/board/chess-board'
 import { WorkspaceTabs } from '@/components/board/workspace-tabs'
-import { DeviationList } from '@/components/analysis/deviation-list'
-import { EngineLines } from '@/components/analysis/engine-lines'
 import { EvaluationProgress } from '@/components/analysis/evaluation-progress'
-import { ColorBreakdown } from '@/components/dashboard/color-breakdown'
-import { StatsOverview } from '@/components/dashboard/stats-overview'
-import { TimeClassChart } from '@/components/dashboard/time-class-chart'
-import { TopOpenings } from '@/components/dashboard/top-openings'
-import { OpeningRecommendations } from '@/components/explorer/opening-recommendations'
 import { ImportProgress } from '@/components/import/import-progress'
 import { UsernameForm } from '@/components/import/username-form'
-import { Card, CardBody, CardHeader } from '@/components/ui/card'
-import { DeviationTable } from '@/components/theory/deviation-table'
-import { TheoryComparison } from '@/components/theory/theory-comparison'
-import { MoveTreePanel } from '@/components/tree/move-tree-panel'
-import { OpeningGroupsPanel } from '@/components/workspace/opening-groups-panel'
-import { GameListPanel } from '@/components/workspace/game-list-panel'
+import { Button } from '@/components/ui/button'
+import { revealSection } from '@/components/ui/collapsible-section'
+import { ExplorePanel } from '@/components/workspace/explore-panel'
+import { ReviewPanel } from '@/components/workspace/review-panel'
 import { useBoardWorkspace } from '@/hooks/use-board-workspace'
-import { useEngine } from '@/hooks/use-engine'
-import { useGameStats } from '@/hooks/use-game-stats'
+import { useAutoAnalysis } from '@/hooks/use-engine'
+import { useEngineEvalSync } from '@/hooks/use-engine-eval-sync'
 import { useImportSummary } from '@/hooks/use-import-summary'
+import { useGameLine } from '@/hooks/use-game-line'
 import { useMoveAnnotations } from '@/hooks/use-move-annotations'
-import { useTheory, useTheoryDeviations } from '@/hooks/use-theory'
+import { useSparringController, useSparringRecorder, useStartSparring } from '@/hooks/use-sparring'
+import { useSyncOnReturn } from '@/hooks/use-sync-on-return'
+import { isServerUnreachable } from '@/lib/api-errors'
 import { getAppAccessState } from '@/lib/app-access'
-import { getDashboardLayoutStorage, readDashboardLayout, writeDashboardLayout } from '@/lib/dashboard-layout'
+import {
+  getDashboardLayoutStorage,
+  readDashboardLayout,
+  writeDashboardLayout,
+  RAIL_MAX,
+  RAIL_MIN,
+  SIDEBAR_MAX,
+  SIDEBAR_MIN,
+} from '@/lib/dashboard-layout'
+import { useRetryStore } from '@/components/analysis/retry-mistakes'
+import { OPEN_EXPLORE_EVENT } from '@/lib/explore-position'
 import { useAppStore } from '@/store/app-store'
+import { useIsSparring } from '@/store/spar-store'
+import { Celebrations, OPEN_TODAY_EVENT } from '@/components/training/training-widgets'
 
 export default function Dashboard() {
   const username = useAppStore((state) => state.username)
   const status = useAppStore((state) => state.importStatus)
-  const { data: summary, isLoading: isSummaryLoading } = useImportSummary(username, status)
+  const {
+    data: summary,
+    isLoading: isSummaryLoading,
+    error: summaryError,
+    refetch,
+    isRefetching,
+  } = useImportSummary(username, status)
+  // While an import is running or has just failed, the landing screen has to
+  // keep showing the form, its progress and its error — flipping to "checking
+  // your library" unmounts the form and loses the message the user needs.
+  const isMidImport = status === 'running' || status === 'error'
   const access = getAppAccessState({
     username,
-    isLoading: isSummaryLoading && !summary,
+    isLoading: isSummaryLoading && !summary && !isMidImport,
     totalGames: summary?.total_games ?? null,
+    unreachable: isServerUnreachable(summaryError),
   })
 
+  if (access.state === 'unreachable') {
+    return <Unreachable isRetrying={isRefetching} onRetry={() => void refetch()} />
+  }
+
   if (access.state !== 'ready') {
-    return (
-      <div className="page landing-state" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px' }}>
-        <div style={{ maxWidth: '480px', width: '100%', display: 'flex', flexDirection: 'column', gap: '24px' }}>
-          <Card>
-            <CardHeader>
-              <h2>{access.state === 'loading' ? 'Loading Your Chess Library' : 'Build Your Local Chess Library'}</h2>
-            </CardHeader>
-            <CardBody className="column">
-              <div className="muted" style={{ lineHeight: 1.6 }}>
-                {access.state === 'loading'
-                  ? 'Checking local stats so your dashboard can render without flashing empty state.'
-                  : 'Start with a Chess.com username. Games are written to the database while the import runs, so you can stop and resume without losing what already landed.'}
-              </div>
-            </CardBody>
-          </Card>
-          {access.state === 'loading' ? null : (
-            <div className="column" style={{ gap: '16px' }}>
-              <UsernameForm />
-              <ImportProgress />
-            </div>
-          )}
-        </div>
-      </div>
-    )
+    return <Landing isLoading={access.state === 'loading'} />
   }
 
   return <Workspace username={username!} />
 }
 
+/**
+ * The API could not be reached. Deliberately not the import form: the games
+ * are still stored, and offering to import them again reads as data loss.
+ */
+function Unreachable({ isRetrying, onRetry }: { isRetrying: boolean; onRetry: () => void }) {
+  const clearUsername = useAppStore((state) => state.clearUsername)
+
+  return (
+    <div className="page landing">
+      <div className="landing__inner">
+        <img alt="ChessGod" className="landing__mark" height={512} src="/logo.webp" width={512} />
+        <p className="landing__lede">
+          Can&rsquo;t reach the ChessGod server. Your games are safe. Check the backend is running,
+          then try again.
+        </p>
+        <div className="landing__actions">
+          <Button disabled={isRetrying} onClick={onRetry} type="button" variant="primary">
+            {isRetrying ? 'Trying\u2026' : 'Try again'}
+          </Button>
+          <Button onClick={clearUsername} type="button" variant="ghost">
+            Use a different account
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const LANDING_PROMISES: { emblem: EmblemName; title: string; detail: string }[] = [
+  {
+    emblem: 'eye',
+    title: 'Spot your blunders',
+    detail: 'Positions from your own games where one move cost you.',
+  },
+  {
+    emblem: 'shield',
+    title: 'Fix your openings',
+    detail: 'A repertoire built from what you already play. Only the moves that cost you change.',
+  },
+  {
+    emblem: 'crown',
+    title: 'Pawn to King',
+    detail: 'Quests, streaks and promotions for ten minutes a day.',
+  },
+]
+
+/** First screen. One job: get a Chess.com username into the box. */
+function Landing({ isLoading }: { isLoading: boolean }) {
+  const importStatus = useAppStore((state) => state.importStatus)
+
+  return (
+    <div className="page landing">
+      <div className="landing__inner">
+        <img alt="ChessGod" className="landing__mark" height={512} src="/logo.webp" width={512} />
+
+        {isLoading ? (
+          <div className="landing__loading">Checking your library…</div>
+        ) : (
+          <>
+            <p className="landing__lede">
+              Import your Chess.com games. ChessGod turns your own mistakes into ten minutes of
+              training a day.
+            </p>
+
+            <UsernameForm />
+
+            {importStatus === 'running' ? <ImportProgress /> : null}
+
+            {/* What the games become, in the training's own medals. */}
+            <ul aria-label="What you get" className="landing__promise">
+              {LANDING_PROMISES.map((item) => (
+                <li key={item.emblem}>
+                  <Medal earned emblem={item.emblem} label={item.title} progress={1} size={52} />
+                  <strong>{item.title}</strong>
+                  <span className="muted">{item.detail}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function Workspace({ username }: { username: string }) {
-  const currentFen = useAppStore((state) => state.currentFen)
   const colorFilter = useAppStore((state) => state.colorFilter)
   const timeClassFilter = useAppStore((state) => state.timeClassFilter)
   const status = useAppStore((state) => state.importStatus)
 
   const workspace = useBoardWorkspace({ username, color: colorFilter, timeClass: timeClassFilter })
-  const { isAnalyzing, lines, statusMessage } = useEngine()
-  const annotations = useMoveAnnotations()
-  const { data: theoryData } = useTheory(currentFen)
-  const theoryColor = colorFilter === 'black' ? 'black' as const : 'white' as const
-  const { data: deviations, isLoading: isDeviationsLoading } = useTheoryDeviations(theoryColor)
-  const { data: stats } = useGameStats(username, status)
-
   const [initialLayout] = useState(() => readDashboardLayout(getDashboardLayoutStorage()))
   const [activeTab, setActiveTab] = useState(initialLayout.activeTab)
+  // Off until Explore reports which page is showing; only its Engine page turns it on.
+  const [engineOpen, setEngineOpen] = useState(false)
+  // The header's training chip opens Review at the Today card.
+  useEffect(() => {
+    function openToday() {
+      setActiveTab('review')
+      // The panel mounts on the next render, so the reveal goes out after it:
+      // revealSection switches the Review view and page to Today and scrolls.
+      // Scrolling for .today-card directly only worked when Review was already
+      // open on the Today page.
+      window.setTimeout(() => revealSection('review-today'), 60)
+    }
+    // Any trainer's "Explore this position": the Explore tab at a section.
+    function openExplore(event: Event) {
+      const section = (event as CustomEvent<{ section?: string }>).detail?.section
+      setActiveTab('explore')
+      window.setTimeout(() => revealSection(section ?? 'explore-engine'), 60)
+    }
+    window.addEventListener(OPEN_TODAY_EVENT, openToday)
+    window.addEventListener(OPEN_EXPLORE_EVENT, openExplore)
+    return () => {
+      window.removeEventListener(OPEN_TODAY_EVENT, openToday)
+      window.removeEventListener(OPEN_EXPLORE_EVENT, openExplore)
+    }
+  }, [])
+  // Auto-analysis only runs while the Engine section is visible — avoids burning
+  // CPU on every FEN change when the user is looking at anything else.
+  // Nor while a sparring game is in progress: the evaluation is the answer.
+  const sparring = useIsSparring()
+  // Nor while a position is being asked (a retried mistake): the search is its answer.
+  const drillSolving = useAppStore((state) => state.drillSolving)
+  useAutoAnalysis(activeTab === 'explore' && engineOpen && !sparring && !drillSolving)
+  // Persist browser engine evals no matter which section produced them.
+  useEngineEvalSync()
+  // Owned here, not by the panel, so a game keeps moving whichever tab or
+  // section is showing.
+  useSparringController()
+  const { playOut } = useStartSparring(username, workspace.clearLoadedContext)
+  // The review covers the whole loaded game, wherever the board happens to be.
+  const gameLine = useGameLine()
+  const gameAnnotations = useMoveAnnotations(gameLine)
+  // Saves a finished engine game and sends its reviewed mistakes to drills.
+  useSparringRecorder(gameAnnotations, gameLine)
+  // Games played on Chess.com since the last look arrive on coming back.
+  useSyncOnReturn(username)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialLayout.sidebarCollapsed)
   const [sidebarWidth, setSidebarWidth] = useState(initialLayout.sidebarWidth)
   const [railWidth, setRailWidth] = useState(initialLayout.railWidth)
@@ -109,7 +232,7 @@ function Workspace({ username }: { username: string }) {
       if (!isResizing.current) return
       const delta = ev.clientX - lastX
       lastX = ev.clientX
-      setRailWidth((prev) => Math.min(400, Math.max(160, prev - delta)))
+      setRailWidth((prev) => Math.min(RAIL_MAX, Math.max(RAIL_MIN, prev - delta)))
     }
 
     function onMouseUp() {
@@ -135,7 +258,7 @@ function Workspace({ username }: { username: string }) {
       if (!isResizing.current) return
       const delta = ev.clientX - lastX
       lastX = ev.clientX
-      setSidebarWidth((prev) => Math.min(800, Math.max(260, prev - delta)))
+      setSidebarWidth((prev) => Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, prev - delta)))
     }
 
     function onMouseUp() {
@@ -152,46 +275,41 @@ function Workspace({ username }: { username: string }) {
     document.addEventListener('mouseup', onMouseUp)
   }, [])
 
-  const deviationRows = useMemo(
-    () =>
-      annotations
-        .filter((a) => a.cpLoss != null && a.label != null)
-        .filter(
-          (a) =>
-            a.label === 'Inaccuracy' ||
-            a.label === 'Mistake' ||
-            a.label === 'Blunder',
-        )
-        .map((a) => ({
-          fen: a.fen,
-          userMove: a.san,
-          bestMove: a.bestMove ?? 'Unknown',
-          cpLoss: a.cpLoss ?? 0,
-        })),
-    [annotations],
-  )
-
-  const hasTheoryContent = Boolean(
-    theoryData?.user_moves.length || theoryData?.master_moves.length || deviations.length || isDeviationsLoading,
-  )
-
   const loadedContextLabel = workspace.activeGame
-    ? 'Clear Game'
+    ? 'Clear game'
     : workspace.selectedOpening
-      ? 'Clear Opening'
-      : null
+      ? 'Clear opening'
+      : 'Clear board'
+  // One way out of any state: a fresh board at the start position. Clearing
+  // the line bumps the tree epoch, which ends a game against the engine and
+  // tells every trainer its line is gone; the retry, arrows and hint ring are
+  // the pieces that live beside the tree, so they go here.
+  const resetBoard = useCallback(() => {
+    workspace.clearLoadedContext()
+    useRetryStore.getState().end()
+    const store = useAppStore.getState()
+    store.setTrainerArrows([])
+    store.setHintSquare(null)
+  }, [workspace])
 
-  const effectiveSidebarWidth = sidebarCollapsed ? '120px' : `${sidebarWidth}px`
+  const effectiveSidebarWidth = sidebarCollapsed
+    ? '108px'
+    : `${Math.max(SIDEBAR_MIN, sidebarWidth)}px`
+  const effectiveRailWidth = Math.max(RAIL_MIN, railWidth)
 
   return (
     <div className="page">
+      <Celebrations />
       <div
         className="workspace"
+        data-active-tab={activeTab}
         ref={workspaceRef}
-        style={{
-          '--sidebar-width': effectiveSidebarWidth,
-          '--rail-width': `${railWidth}px`,
-        } as React.CSSProperties}
+        style={
+          {
+            '--sidebar-width': effectiveSidebarWidth,
+            '--rail-width': `${effectiveRailWidth}px`,
+          } as React.CSSProperties
+        }
       >
         <div className="workspace__board-shell">
           <div className="workspace__board-panel">
@@ -205,7 +323,7 @@ function Workspace({ username }: { username: string }) {
           <div className="resize-handle" onMouseDown={handleRailResizeStart} />
           <BoardRail
             loadedContextLabel={loadedContextLabel}
-            onClearLoadedContext={workspace.clearLoadedContext}
+            onClearLoadedContext={resetBoard}
             showColorFilter
             showTimeClassFilter
           />
@@ -218,100 +336,63 @@ function Workspace({ username }: { username: string }) {
           onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
           tabs={[
             {
-              id: 'openings',
-              label: 'Openings',
+              id: 'explore',
+              label: 'Explore',
+              icon: <BookOpen size={15} />,
               content: (
-                <OpeningGroupsPanel
+                <ExplorePanel
                   color={colorFilter}
-                  isLoadingPreview={workspace.trainingLine.isLoading}
-                  onSelectOpening={workspace.loadOpening}
-                  previewError={workspace.trainingLine.error}
-                  selectedOpening={workspace.selectedOpening}
+                  annotations={gameAnnotations}
+                  fenHistory={gameLine.fenHistory}
+                  userColor={
+                    workspace.activeGame?.user_color === 'black'
+                      ? 'black'
+                      : workspace.activeGame
+                        ? 'white'
+                        : null
+                  }
+                  engineOpen={engineOpen}
+                  onEngineOpenChange={setEngineOpen}
+                  timeClass={timeClassFilter}
+                  username={username}
+                  workspace={workspace}
+                />
+              ),
+            },
+            {
+              id: 'review',
+              label: 'Review',
+              icon: <GraduationCap size={16} />,
+              content: (
+                <ReviewPanel
+                  color={colorFilter}
+                  importStatus={status}
+                  onBeginDrill={workspace.clearLoadedContext}
+                  onPlayOut={(position) => {
+                    // The game's controls and move list live on Explore.
+                    setActiveTab('explore')
+                    playOut(position)
+                  }}
+                  onOpenGame={(game) => {
+                    setActiveTab('explore')
+                    workspace.loadGame(game)
+                    window.setTimeout(() => revealSection('explore-game-review'), 60)
+                  }}
+                  onOpenExplore={(section) => {
+                    setActiveTab('explore')
+                    // The tab mounts its sections on the next render.
+                    window.setTimeout(() => revealSection(section), 60)
+                  }}
                   timeClass={timeClassFilter}
                   username={username}
                 />
-              ),
-            },
-            {
-              id: 'games',
-              label: 'Games',
-              content: (
-                <GameListPanel
-                  color={colorFilter}
-                  currentFen={workspace.currentFen}
-                  eco={workspace.gameFilters.eco}
-                  onSelectGame={workspace.loadGame}
-                  openingName={workspace.gameFilters.openingName}
-                  selectedGameId={workspace.selectedGameId}
-                  timeClass={timeClassFilter}
-                  username={username}
-                />
-              ),
-            },
-            {
-              id: 'tree',
-              label: 'Tree',
-              content: <MoveTreePanel />,
-            },
-            {
-              id: 'theory',
-              label: 'Theory',
-              content: hasTheoryContent ? (
-                <div className="column" style={{ gap: 16 }}>
-                  <TheoryComparison data={theoryData} />
-                  <DeviationTable deviations={deviations} isLoading={isDeviationsLoading} />
-                </div>
-              ) : (
-                <Card>
-                  <CardHeader>
-                    <h2>Theory</h2>
-                  </CardHeader>
-                  <CardBody>
-                    <div className="muted">Load a game or opening line to compare your moves with master theory.</div>
-                  </CardBody>
-                </Card>
-              ),
-            },
-            {
-              id: 'recommendations',
-              label: 'Needs Work',
-              content: (
-                <OpeningRecommendations
-                  onSelectOpening={workspace.loadOpening}
-                />
-              ),
-            },
-            {
-              id: 'engine',
-              label: 'Engine',
-              content: (
-                <div className="column" style={{ gap: 16 }}>
-                  <EngineLines isAnalyzing={isAnalyzing} lines={lines} statusMessage={statusMessage} />
-                  <DeviationList rows={deviationRows} />
-                </div>
-              ),
-            },
-            {
-              id: 'stats',
-              label: 'Stats',
-              content: stats ? (
-                <div className="stats-layout">
-                  <StatsOverview stats={stats} />
-                  <div className="stats-panel-grid">
-                    <ColorBreakdown stats={stats} />
-                    <TimeClassChart byTimeClass={stats.by_time_class} />
-                    <TopOpenings openings={stats.by_opening} />
-                  </div>
-                </div>
-              ) : (
-                <div className="muted">Loading stats...</div>
               ),
             },
           ]}
         />
       </div>
       <EvaluationProgress />
-      {status === 'running' ? <ImportProgress /> : null}
+      <ImportProgress />
     </div>
   )
 }
