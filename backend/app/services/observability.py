@@ -10,8 +10,9 @@ from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session, SessionTransaction
 
 from app.config import settings
 from app.models.observability_event import ObservabilityEvent
@@ -25,6 +26,7 @@ MAX_RECENT_SLOW_REQUESTS = 100
 MAX_RECENT_SLOW_QUERIES = 100
 MAX_QUERY_TEMPLATES = 50
 MAX_EXTERNAL_CALL_KEYS = 50
+MAX_RECENT_USERS = 128
 ROUTE_SAMPLE_WINDOW = 256
 QUERY_SAMPLE_WINDOW = 128
 EXTERNAL_SAMPLE_WINDOW = 128
@@ -38,6 +40,7 @@ LAG_SAMPLES = 30
 MACHINE_REQUEST_PREFIXES = (
     "/api/health",
     "/api/games/unanalyzed-fens",
+    "/api/games/trainer-multipv-fens",
     "/api/analysis/evaluations",
 )
 
@@ -45,6 +48,24 @@ MACHINE_REQUEST_PREFIXES = (
 _query_count_var: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
     "_chessgod_query_count", default=None
 )
+_PENDING_EVENTS = "observability_pending_events"
+
+
+@event.listens_for(Session, "after_commit")
+def _acknowledge_persisted_events(session: Session) -> None:
+    pending = session.info.get(_PENDING_EVENTS, {})
+    transaction = session.get_nested_transaction() or session.get_transaction()
+    batches = pending.pop(transaction, [])
+    if batches and transaction.nested:
+        pending.setdefault(transaction.parent, []).extend(batches)
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _restore_uncommitted_events(session: Session, transaction: SessionTransaction) -> None:
+    pending = session.info.get(_PENDING_EVENTS, {})
+    for store, events in reversed(pending.pop(transaction, [])):
+        with store._lock:
+            store._persist_queue.extendleft(reversed(events))
 
 
 def _now_utc() -> datetime:
@@ -155,6 +176,7 @@ class ObservabilityStore:
         # middle of a session keeps warming; an unattended box falls quiet on
         # its own once the window passes with nobody asking for anything.
         self._last_interactive_request_at = self._started_at
+        self._active_users: OrderedDict[str, datetime] = OrderedDict()
         self._backend_routes: dict[str, dict[str, Any]] = {}
         self._backend_recent_errors: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_BACKEND_ERRORS)
         self._recent_slow_requests: deque[dict[str, Any]] = deque(maxlen=MAX_RECENT_SLOW_REQUESTS)
@@ -242,7 +264,7 @@ class ObservabilityStore:
 
     # ---- backend request recording ------------------------------------
 
-    def note_interactive_request(self, path: str) -> None:
+    def note_interactive_request(self, path: str, username: str | None = None) -> None:
         """Record that a *person* asked for something, if this path is one.
 
         Machine traffic is excluded, because the whole point of the signal is
@@ -254,8 +276,23 @@ class ObservabilityStore:
         """
         if any(path.startswith(prefix) for prefix in MACHINE_REQUEST_PREFIXES):
             return
+        now = _now_utc()
         with self._lock:
-            self._last_interactive_request_at = _now_utc()
+            self._last_interactive_request_at = now
+            if username:
+                username = username.lower()
+                self._active_users[username] = now
+                self._active_users.move_to_end(username)
+                if len(self._active_users) > MAX_RECENT_USERS:
+                    self._active_users.popitem(last=False)
+
+    def recently_active_usernames(self, max_age_seconds: float, *, limit: int = 5) -> list[str]:
+        cutoff = _now_utc() - timedelta(seconds=max_age_seconds)
+        with self._lock:
+            return [
+                username for username, last_seen in reversed(self._active_users.items())
+                if last_seen >= cutoff
+            ][:limit]
 
     def seconds_since_interactive_request(self) -> float:
         """How long since a person last asked this backend for anything."""
@@ -272,8 +309,10 @@ class ObservabilityStore:
         duration_ms: float,
         request_id: str,
         query_count: int = 0,
+        route_path: str | None = None,
     ) -> None:
-        key = f"{method.upper()} {path}"
+        route_path = route_path or path
+        key = f"{method.upper()} {route_path}"
         now = _now_utc()
         bucket = _status_bucket(status_code)
         n_plus_one_threshold = settings.observability_n_plus_one_threshold
@@ -288,7 +327,7 @@ class ObservabilityStore:
                 route = {
                     "key": key,
                     "method": method.upper(),
-                    "path": path,
+                    "path": route_path,
                     "count": 0,
                     "errors": 0,
                     "avg_duration_ms": 0.0,
@@ -354,7 +393,7 @@ class ObservabilityStore:
             # few seconds: 72-86% of every stored request row, and nothing
             # anyone reads. It still counts in the live metrics above; only a
             # failing one is worth keeping.
-            if path.startswith("/api/health") and status_code < 500 and not path.startswith("/api/health/"):
+            if path in ("/api/health", "/api/health/ready") and status_code < 500:
                 return
 
             self._persist_queue.append(
@@ -708,7 +747,22 @@ class ObservabilityStore:
 
     async def persist_queued_events(self, session: AsyncSession, max_items: int = 500) -> int:
         pending = self._drain_persist_queue(max_items=max_items)
-        await self.persist_events(session, pending)
+        if not pending:
+            return 0
+        # Keep the dequeued batch attached to the transaction until its
+        # caller commits. Failed flushes, commits and session closes restore it.
+        sync_session = session.sync_session
+        transaction = (
+            sync_session.get_nested_transaction() or sync_session.get_transaction()
+            or sync_session.begin()
+        )
+        batches = sync_session.info.setdefault(_PENDING_EVENTS, {}).setdefault(transaction, [])
+        batches.append((self, pending))
+        try:
+            await self.persist_events(session, pending)
+        except Exception:
+            await session.rollback()
+            raise
         return len(pending)
 
     # ---- snapshot -----------------------------------------------------
@@ -865,37 +919,26 @@ class ObservabilityStore:
             }
 
     async def persist_events(self, session: AsyncSession, events: list[dict[str, Any]]) -> None:
-        if not events:
-            return
-        try:
-            session.add_all(
-                [
-                    ObservabilityEvent(
-                        source=event["source"],
-                        kind=event["kind"],
-                        name=event["name"],
-                        severity=event.get("severity"),
-                        request_id=event.get("request_id"),
-                        method=event.get("method"),
-                        path=event.get("path"),
-                        status_code=event.get("status_code"),
-                        duration_ms=event.get("duration_ms"),
-                        message=event.get("message"),
-                        url=event.get("url"),
-                        metadata_json=json.dumps(event["meta"]) if event.get("meta") is not None else None,
-                    )
-                    for event in events
-                ]
-            )
-            await session.flush()
-        except Exception:
-            with self._lock:
-                for event in reversed(events):
-                    self._persist_queue.appendleft(event)
-            try:
-                await session.rollback()
-            except Exception:
-                pass
+        session.add_all(
+            [
+                ObservabilityEvent(
+                    source=event["source"],
+                    kind=event["kind"],
+                    name=event["name"],
+                    severity=event.get("severity"),
+                    request_id=event.get("request_id"),
+                    method=event.get("method"),
+                    path=event.get("path"),
+                    status_code=event.get("status_code"),
+                    duration_ms=event.get("duration_ms"),
+                    message=event.get("message"),
+                    url=event.get("url"),
+                    metadata_json=json.dumps(event["meta"]) if event.get("meta") is not None else None,
+                )
+                for event in events
+            ]
+        )
+        await session.flush()
 
     async def purge_expired_events(self, session: AsyncSession) -> int:
         try:

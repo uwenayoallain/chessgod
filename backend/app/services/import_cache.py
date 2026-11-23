@@ -58,25 +58,41 @@ async def get_cached_archive(
     return result.scalar_one_or_none()
 
 
+def _needs_fetch(cached_archive: ImportArchive | None, archive_url: str) -> bool:
+    if cached_archive is None or cached_archive.ownership_version < 2:
+        return True
+    archive_month = _parse_archive_year_month(archive_url)
+    if archive_month is None:
+        return False
+    return archive_month in _recent_archive_months()
+
+
+async def archive_fetch_decision(
+    session: AsyncSession,
+    username: str,
+    archive_url: str,
+    force: bool = False,
+) -> tuple[bool, int]:
+    """Whether to fetch the archive, and its cached game count, from one lookup.
+
+    A skipped archive reports its cached game count, which the import used to
+    read with a second identical query right after deciding to skip.
+    """
+    if force:
+        return True, 0
+    cached_archive = await get_cached_archive(session, username, archive_url)
+    cached_games = cached_archive.games_in_archive if cached_archive else 0
+    return _needs_fetch(cached_archive, archive_url), cached_games
+
+
 async def should_fetch_archive(
     session: AsyncSession,
     username: str,
     archive_url: str,
     force: bool = False,
 ) -> bool:
-    if force:
-        return True
-    cached_archive = await get_cached_archive(session, username, archive_url)
-    if cached_archive is None:
-        return True
-    if cached_archive.ownership_version < 2:
-        return True
-
-    archive_month = _parse_archive_year_month(archive_url)
-    if archive_month is None:
-        return False
-
-    return archive_month in _recent_archive_months()
+    fetch, _ = await archive_fetch_decision(session, username, archive_url, force=force)
+    return fetch
 
 
 async def mark_archive_cached(

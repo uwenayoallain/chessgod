@@ -4,6 +4,8 @@ import {
   buildUciSearchCommands,
   chooseEngineMode,
   completeReplayJob,
+  DEEP_MOVETIME_MS,
+  INTERACTIVE_MOVETIME_MS,
   handleReplayTimeout,
   enqueueAnalysisJob,
   type AnalysisJob,
@@ -24,18 +26,25 @@ function job(overrides: Partial<AnalysisJob>): AnalysisJob {
 }
 
 describe('Stockfish analysis policy', () => {
-  it('uses a fast quick pass for changed current positions before standard analysis', () => {
+  it('puts a time limit on every look at the board, a longer one on a deep look', () => {
     expect(chooseEngineMode({ requestedDepth: 22, source: 'interactive', stable: false })).toEqual({
       depth: 18,
       mode: 'quick',
       multiPV: 1,
+      movetime: INTERACTIVE_MOVETIME_MS,
     })
 
     expect(chooseEngineMode({ requestedDepth: 22, source: 'interactive', stable: true })).toEqual({
       depth: 22,
       mode: 'standard',
       multiPV: 2,
+      movetime: INTERACTIVE_MOVETIME_MS,
     })
+
+    expect(
+      chooseEngineMode({ requestedDepth: 30, source: 'interactive', stable: true, deep: true }),
+    ).toEqual({ depth: 30, mode: 'deep', multiPV: 3, movetime: DEEP_MOVETIME_MS })
+    expect(DEEP_MOVETIME_MS).toBeGreaterThan(INTERACTIVE_MOVETIME_MS)
   })
 
   it('keeps background replay jobs single-PV even at deeper depths', () => {
@@ -104,5 +113,14 @@ describe('Stockfish analysis policy', () => {
       `position fen ${START_FEN}`,
       'go depth 20',
     ])
+  })
+
+  it('stops at a time limit when one is given, whichever comes first', () => {
+    expect(
+      buildUciSearchCommands({ depth: 26, fen: START_FEN, multiPV: 2, movetime: 12_000 }).at(-1),
+    ).toBe('go depth 26 movetime 12000')
+    expect(
+      buildUciSearchCommands({ depth: 26, fen: START_FEN, multiPV: 2, movetime: 0 }).at(-1),
+    ).toBe('go depth 26')
   })
 })

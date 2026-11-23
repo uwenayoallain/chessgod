@@ -1,7 +1,11 @@
 /** Bounded crawler requests, including time spent reading the response body. */
-export async function requestJson(url, { timeoutMs = 30_000, ...options } = {}) {
+export async function requestJson(url, { timeoutMs = 30_000, signal, ...options } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('crawler request timed out')), timeoutMs)
+  // A caller's signal (the crawler shutting down) ends the request as well.
+  const onAbort = () => controller.abort(signal.reason ?? new Error('crawler request aborted'))
+  if (signal?.aborted) onAbort()
+  else signal?.addEventListener('abort', onAbort, { once: true })
   try {
     const response = await fetch(url, { ...options, signal: controller.signal })
     if (!response.ok) {
@@ -23,5 +27,6 @@ export async function requestJson(url, { timeoutMs = 30_000, ...options } = {}) 
     return await response.json()
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', onAbort)
   }
 }

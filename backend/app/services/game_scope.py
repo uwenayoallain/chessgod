@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import case, select
+from sqlalchemy import case, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -66,22 +66,24 @@ async def player_rating_floor(session: AsyncSession, username: str) -> int:
         (Game.user_color == "white", Game.white_rating),
         else_=Game.black_rating,
     )
-    current: list[int] = []
-    for time_class in ("rapid", "blitz"):
-        latest = (
-            await session.execute(
-                select(rating)
-                .where(
-                    Game.username == username,
-                    Game.time_class == time_class,
-                    rating.is_not(None),
-                )
-                .order_by(Game.played_at.desc())
-                .limit(1)
+    def latest_rating(time_class: str):
+        return (
+            select(rating.label("rating"))
+            .where(
+                Game.username == username,
+                Game.time_class == time_class,
+                rating.is_not(None),
             )
-        ).scalar_one_or_none()
-        if latest is not None:
-            current.append(int(latest))
+            .order_by(Game.played_at.desc(), Game.id.desc())
+            .limit(1)
+            .subquery()
+        )
+
+    rapid = latest_rating("rapid")
+    blitz = latest_rating("blitz")
+    current = (await session.scalars(
+        union_all(select(rapid.c.rating), select(blitz.c.rating))
+    )).all()
     if not current:
         return DEFAULT_MIN_USER_RATING
     return max(

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vite-plus/test'
 
 import { STARTING_FEN, type MoveNode } from '@/store/app-store'
-import { buildActiveReplayLine, buildFullGameLine } from './active-line'
+import { buildActiveReplayLine, buildFullGameLine, mainLineLeafId } from './active-line'
 
 function createNode(partial: Partial<MoveNode> & Pick<MoveNode, 'id' | 'fen' | 'ply'>): MoveNode {
   return {
@@ -127,5 +127,86 @@ describe('buildFullGameLine', () => {
       a: { id: 'a', parentId: 'root', children: ['a'], fen: 'f1', ply: 1, san: 'e4', uci: 'e2e4' },
     } as unknown as Parameters<typeof buildFullGameLine>[0]
     expect(buildFullGameLine(cyclic, 'root').fenHistory).toEqual(['f0', 'f1'])
+  })
+
+  it('returns one line object for every cursor position inside a game', () => {
+    // Stepping through a game must not rebuild its line: everything a review
+    // derives from it (the graph, the summary, the retry list) is keyed on it.
+    const fromRoot = buildFullGameLine(nodes, 'root')
+    expect(buildFullGameLine(nodes, 'a')).toBe(fromRoot)
+    expect(buildFullGameLine(nodes, 'b')).toBe(fromRoot)
+    expect(buildFullGameLine(nodes, 'c')).toBe(fromRoot)
+  })
+
+  it('builds a new line when the tree is replaced', () => {
+    const before = buildFullGameLine(nodes, 'root')
+    const grown = {
+      ...nodes,
+      c: { ...nodes.c, children: ['d'] },
+      d: { id: 'd', parentId: 'c', children: [], fen: 'fen4', ply: 4, san: 'Nc6', uci: 'b8c6' },
+    } as unknown as Parameters<typeof buildFullGameLine>[0]
+    const after = buildFullGameLine(grown, 'root')
+    expect(after).not.toBe(before)
+    expect(after.replayMoves.map((m) => m.san)).toEqual(['e4', 'e5', 'Nf3', 'Nc6'])
+  })
+})
+
+describe('mainLineLeafId', () => {
+  const nodes = {
+    root: { id: 'root', parentId: null, children: ['a'], fen: 'f0', ply: 0, san: null, uci: null },
+    a: {
+      id: 'a',
+      parentId: 'root',
+      children: ['b', 's'],
+      fen: 'f1',
+      ply: 1,
+      san: 'e4',
+      uci: 'e2e4',
+    },
+    b: { id: 'b', parentId: 'a', children: [], fen: 'f2', ply: 2, san: 'e5', uci: 'e7e5' },
+    s: { id: 's', parentId: 'a', children: ['t'], fen: 'f3', ply: 2, san: 'c5', uci: 'c7c5' },
+    t: { id: 't', parentId: 's', children: [], fen: 'f4', ply: 3, san: 'Nf3', uci: 'g1f3' },
+  } as unknown as Parameters<typeof mainLineLeafId>[0]
+
+  it('is the same for every position on the main line', () => {
+    expect(mainLineLeafId(nodes, 'root')).toBe('b')
+    expect(mainLineLeafId(nodes, 'a')).toBe('b')
+    expect(mainLineLeafId(nodes, 'b')).toBe('b')
+  })
+
+  it('follows a side line to its own end once the cursor is on it', () => {
+    expect(mainLineLeafId(nodes, 's')).toBe('t')
+    expect(mainLineLeafId(nodes, 't')).toBe('t')
+  })
+
+  it('returns the id it was given for a node that does not exist', () => {
+    expect(mainLineLeafId(nodes, 'missing')).toBe('missing')
+  })
+})
+
+describe('a long line', () => {
+  it('is walked root first without losing order', () => {
+    const nodes: Record<string, MoveNode> = {
+      root: createNode({ id: 'root', fen: 'f0', ply: 0, children: ['n1'] }),
+    }
+    const plies = 400
+    for (let ply = 1; ply <= plies; ply += 1) {
+      nodes[`n${ply}`] = createNode({
+        id: `n${ply}`,
+        fen: `f${ply}`,
+        ply,
+        parentId: ply === 1 ? 'root' : `n${ply - 1}`,
+        san: `m${ply}`,
+        uci: 'a1a2',
+        children: ply < plies ? [`n${ply + 1}`] : [],
+      })
+    }
+    const line = buildActiveReplayLine(nodes, `n${plies}`)
+    expect(line.fenHistory).toHaveLength(plies + 1)
+    expect(line.fenHistory[0]).toBe('f0')
+    expect(line.fenHistory[plies]).toBe(`f${plies}`)
+    expect(line.replayMoves.map((move) => move.ply)).toEqual(
+      Array.from({ length: plies }, (_, index) => index + 1),
+    )
   })
 })

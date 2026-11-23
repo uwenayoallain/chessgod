@@ -59,7 +59,9 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://chessgod:chessgod@postgres:5432/chessgod}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:15173"]}
+      # 127.0.0.1 beside localhost: they are different origins to a browser,
+      # and a page opened on one was refused by the API listed under the other.
+      CORS_ORIGINS: ${CORS_ORIGINS:-["https://chess.uwe.rw","http://localhost:15173","http://127.0.0.1:15173"]}
       OBSERVABILITY_RETENTION_DAYS: ${OBSERVABILITY_RETENTION_DAYS:-14}
       OBSERVABILITY_ADMIN_PASSPHRASE_SHA256: ${OBSERVABILITY_ADMIN_PASSPHRASE_SHA256:-3f665a20748df42949e495a1b363194e5c5ab24b12080232a8ec3263fcb2145e}
       # The Opening Explorer requires OAuth (`security: OAuth2` on the masters
@@ -103,8 +105,13 @@ services:
     # running `alembic upgrade head` is, to the crawler, indistinguishable from
     # one that is down. `start_period` covers the migration; python3 is the only
     # HTTP client in the image (no curl, no wget).
+    #
+    # It asks /api/health/ready, which runs a bounded `SELECT 1`, rather than
+    # /api/health, which answers as soon as the process is listening: a backend
+    # that has lost Postgres can serve nothing, and must not read as healthy.
+    # urlopen raises on the 503 it gets then, so the check fails.
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health/ready', timeout=3)"]
       # Each check starts a Python interpreter (~120ms of CPU): every 30s once
       # up, every 3s while the migration runs so the crawler is not kept waiting.
       interval: 30s
@@ -136,7 +143,10 @@ services:
     # took the workspace from 0.3s to 0.6s to appear. FRONTEND_MODE=dev brings
     # the hot-reloading dev server back for working on the frontend.
     environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:18000}
+      # Same-origin /api by default so both http://localhost:15173 and
+      # https://chess.uwe.rw route through Vite's /api proxy without CORS
+      # failures or baking localhost:18000 into the public bundle.
+      VITE_API_URL: ${VITE_API_URL:-}
       API_PROXY_TARGET: http://backend:8000
       FRONTEND_MODE: ${FRONTEND_MODE:-production}
     command: >
@@ -145,8 +155,10 @@ services:
       if [ \"$$FRONTEND_MODE\" = dev ]; then vp dev --host 0.0.0.0;
       else vp build && vp preview --host 0.0.0.0 --port 5173; fi"
 
-  # Opt-in: `docker compose --profile crawl up crawl`. Never starts with the
-  # normal stack, because it is the one service that will happily eat a core.
+  # Opt-in: `docker compose --profile crawl up crawl`. `make run` adds the
+  # profile by itself when CRAWL_USERNAME is set in .env, so a restart of the
+  # stack brings the crawler back with it; without a username it never starts,
+  # because it is the one service that will happily eat a core.
   # The reservation is a hard ceiling, not a request: one core at most, and the
   # crawler additionally stands down whenever load per core rises above
   # CRAWL_MAX_LOAD, so it yields the machine rather than competing for it.
@@ -224,12 +236,16 @@ services:
       backend:
         condition: service_healthy
     # unless-stopped, so a crash, an OOM, a daemon restart or a host reboot all
-    # bring the crawl back — it runs for days at a stretch, and the failure mode
+    # bring the crawl back: it runs for days at a stretch, and the failure mode
     # that matters is nobody noticing it stopped. This was on-failure while the
     # crawler still exited 0 on a stall, which would have restart-looped; it now
     # waits a stall out instead, so the only clean exit is a deliberate stop,
     # and `unless-stopped` leaves those alone.
     restart: unless-stopped
+    # On SIGTERM the crawler stops its engines, uploads the searches it has
+    # finished and exits. Docker's default 10s was shorter than one upload to a
+    # loaded backend, so a stop could kill it mid-upload and lose the batch.
+    stop_grace_period: 90s
     volumes:
       - ./scripts:/app/scripts:ro
       - ./frontend/public/stockfish:/app/frontend/public/stockfish:ro

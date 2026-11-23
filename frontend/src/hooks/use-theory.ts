@@ -49,9 +49,11 @@ export function theoryQuery(fen: string) {
   }
 }
 
-export function useTheory(fen: string) {
+export function useTheory(fen: string, options?: { enabled?: boolean }) {
+  const enabled = options?.enabled ?? true
   const query = useQuery({
     ...theoryQuery(fen),
+    enabled: enabled && Boolean(fen),
     placeholderData: keepPreviousData,
   })
 

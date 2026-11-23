@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -66,7 +67,7 @@ def test_analysis_queue_bounds_exclusion_payload(excluded) -> None:
 
 def test_queue_skips_positions_the_evaluations_endpoint_cannot_store() -> None:
     # Stale castling rights (`kq` on a board whose king has left e8) parse
-    # fine, so the engine searches them happily — but the evaluations
+    # fine, so the engine searches them happily, but the evaluations
     # validator rejects them, and the queue would re-offer them every batch
     # forever. The storable side of the same pair is still offered.
     assert not _is_storable_fen("3rnkrb/qp1ppp2/8/p6p/8/P2N4/QP1PPP1P/3RRK1B b kq -")
@@ -625,8 +626,8 @@ async def test_unanalyzed_fens_advances_past_completed_recent_pairs(monkeypatch)
         assert payload["fens"] == ["end-parent", "end-child"]
         # Equal timestamps must advance by ID, and every page stays bounded, so
         # the walk terminates instead of re-reading the newest game forever.
-        # The exact number of pages is not the contract — it drops as the walk
-        # gets better at filling its target from one page — but it must be more
+        # The exact number of pages is not the contract (it drops as the walk
+        # gets better at filling its target from one page), but it must be more
         # than one, and each must be limited.
         assert len(game_scans) == 3  # two games, then the empty end-of-history page
         assert all("LIMIT" in statement for statement in game_scans)
@@ -765,7 +766,7 @@ async def test_unanalyzed_fens_rotates_across_eras_of_the_players_history() -> N
     A newest-first walk fills up long before it reaches old games: measured on
     the real library after a crawl session, the current month held 379 distinct
     covered decisions against 19-42 for every earlier month. That is not just
-    unfair to old games, it makes the library untestable — scoring the drill
+    unfair to old games, it makes the library untestable: scoring the drill
     ranking compares an older window against a recent one, and the older window
     stays empty forever, so the answer is always "insufficient evidence".
     """
@@ -829,7 +830,7 @@ def test_the_opening_bucket_keeps_recency_and_is_not_reordered() -> None:
     # decision *instances* per batch but the same number of distinct decisions,
     # and it steered coverage into the player's memorised main lines, where
     # measured mistake rates were 4.7% against 21.0% elsewhere. Think time does
-    # not take its place either — that signal was only measured after the
+    # not take its place either: that signal was only measured after the
     # opening. Newest first, and nothing else.
     fens, _, _ = games_router._phase_balanced_pair_fens(
         [pair(1, "newest-parent", 2, "newest-child", 5, 0.2),
@@ -971,7 +972,7 @@ async def test_game_stats_returns_result_breakdown_per_time_class() -> None:
     [
         # The parent was studied on the board at depth 30. Re-running it at the
         # review depth would be discarded by the browser's own depth-max cache,
-        # so the child is searched to 30 instead — the pair becomes gradeable
+        # so the child is searched to 30 instead: the pair becomes gradeable
         # and the measurement is better than it would have been at 22.
         (None, ["after-e4"], 30),
         (22, ["after-e4"], 30),
@@ -1056,7 +1057,7 @@ async def test_opening_groups_lead_with_the_openings_actually_played() -> None:
     """Frequency first, recency only as the tie-break.
 
     Ordered by recency the list opened with whatever was played last, so a line
-    played once sat above an opening played hundreds of times — and the list is
+    played once sat above an opening played hundreds of times, and the list is
     paginated, so the openings that describe a player's repertoire could be
     pages deep.
     """
@@ -1404,10 +1405,14 @@ async def test_a_short_pool_is_not_walked_again_on_every_request(monkeypatch) ->
         assert first["fens"] == second["fens"] == ["a-parent", "a-child"]
         assert len(walks) == 1, "a short pool was walked again inside its rest"
 
-        # Once the rest is over, a short pool is walked again.
+        # Once the rest is over, a short pool is walked again: behind the
+        # request that noticed, which is answered from the pool it has.
         for key in [key for key in get_shared_cache()._local if ":rebuilt:generation:" in key]:
             get_shared_cache()._remove_local(key)
-        await ask()
+        third = await ask()
+        assert third["fens"] == first["fens"]
+        assert len(walks) == 1, "the request waited for the walk"
+        await asyncio.gather(*list(games_router._pool_flights.values()))
         assert len(walks) == 2
     await engine.dispose()
 

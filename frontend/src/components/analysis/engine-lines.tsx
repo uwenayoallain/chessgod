@@ -64,6 +64,8 @@ function scoreLabel(score: UCIInfo['score'], fen: string): { text: string; white
   return { text: (white.value / 100).toFixed(2), whiteCp: white.value }
 }
 
+export const MAX_PV_CACHE_ENTRIES = 200
+
 export function EngineLines({
   hidden = false,
   hiddenReason = 'Hidden until the game ends.',
@@ -83,11 +85,17 @@ export function EngineLines({
   const highPerformance = useEngineStore((state) => state.highPerformance)
   const setHighPerformance = useEngineStore((state) => state.setHighPerformance)
 
-  // Cache pvToSan results keyed by fen+pv — avoids recreating Chess instances
-  // on every depth update. Scoped to this component instance, GC'd on unmount.
+  // Cache pvToSan results keyed by fen+pv to avoid recreating Chess instances
+  // on every depth update. Cleared when currentFen changes and bounded to
+  // MAX_PV_CACHE_ENTRIES.
   const pvCache = useRef<Map<string, SanMove[]>>(new Map())
+  const pvCacheFen = useRef<string>(currentFen)
 
   const parsed = useMemo(() => {
+    if (pvCacheFen.current !== currentFen) {
+      pvCache.current.clear()
+      pvCacheFen.current = currentFen
+    }
     const currentPly = nodes[currentNodeId]?.ply ?? 0
     return lines
       .map((line) => {
@@ -95,6 +103,12 @@ export function EngineLines({
         let moves = pvCache.current.get(cacheKey)
         if (!moves) {
           moves = pvToSan(currentFen, line.pv)
+          if (pvCache.current.size >= MAX_PV_CACHE_ENTRIES) {
+            const oldestKey = pvCache.current.keys().next().value
+            if (oldestKey !== undefined) {
+              pvCache.current.delete(oldestKey)
+            }
+          }
           pvCache.current.set(cacheKey, moves)
         }
         return { line, moves, score: scoreLabel(line.score, currentFen), startPly: currentPly }

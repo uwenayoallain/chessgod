@@ -148,7 +148,8 @@ export function ProgressCard({ username }: { username: string }) {
     staleTime: 10 * 60 * 1000,
   })
   if (progress.isLoading) return <PanelSkeleton label="Measuring your recent games" rows={4} />
-  if (progress.error || !progress.data) {
+  // A refetch that fails in the background keeps the numbers already shown.
+  if (progress.error && !progress.data) {
     return (
       <PanelError
         error={progress.error}
@@ -157,6 +158,7 @@ export function ProgressCard({ username }: { username: string }) {
       />
     )
   }
+  if (!progress.data) return <PanelSkeleton label="Measuring your recent games" rows={4} />
   const data = progress.data
   const { headline, detail } = describeProgress(data)
   const since = describeSinceTraining(data)
@@ -179,8 +181,12 @@ export function ProgressCard({ username }: { username: string }) {
             value={recent.forcing_errors.toFixed(1)}
           />
           <StatTile
+            // No Black games in the window is "not measured", never 0%: a null
+            // turned into 0 drew a change against a share nobody had.
             change={delta(
-              (recent.worse_after_opening.black ?? 0) * 100,
+              recent.worse_after_opening.black != null
+                ? recent.worse_after_opening.black * 100
+                : null,
               previous?.worse_after_opening.black != null
                 ? previous.worse_after_opening.black * 100
                 : null,

@@ -1,11 +1,16 @@
 from datetime import UTC, datetime, timedelta
 
+import chess
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.engine_contract import MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
+from app.models.analysis import AnalysisResult
 from app.models.base import Base
-from app.models.training import TrainingEvent
+from app.models.position import Position
+from app.models.training import LineMoveProgress, TrainingEvent
+from app.routers import training as routes
 from app.services import training
 from app.services.training import (
     LEVEL_INTERVALS,
@@ -18,6 +23,7 @@ from app.services.training import (
     record_line_review,
     title_for,
 )
+from app.utils.fen import normalize_fen
 
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 
@@ -369,3 +375,141 @@ async def test_a_game_review_pays_only_for_a_game_the_player_owns_once() -> None
         with pytest.raises(HTTPException):
             # Somebody else's game is not the player's to be paid for.
             await reviewed_game_request_id(session, "someone-else", {"sparring_game_id": spar_id})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["learn", "practice"])
+async def test_line_review_retry_returns_the_receipt_without_mutating_progress(mode) -> None:
+    engine, factory = await _session()
+    review = {
+        "username": "tester", "color": "black", "line": LINE, "mode": mode,
+        "played": {"after-e4": "e7e5", "after-nf3": "g8f6"}, "request_id": "a-review",
+    }
+
+    async def progress(session):
+        return (await session.execute(
+            select(
+                LineMoveProgress.reviews, LineMoveProgress.recalls, LineMoveProgress.lapses,
+                LineMoveProgress.level, LineMoveProgress.due_at, LineMoveProgress.last_reviewed_at,
+            ).order_by(LineMoveProgress.id)
+        )).all()
+
+    async with factory() as session:
+        outcome = await record_line_review(session, **review, now=NOW)
+        await session.commit()
+        before = await progress(session)
+
+    async with factory() as session:
+        replay = await record_line_review(session, **review, now=NOW + timedelta(days=7))
+        await session.commit()
+        assert replay == outcome
+        assert await progress(session) == before
+        assert [row.reviews for row in before] == [1, 1]
+        assert [row.recalls for row in before] == ([1, 0] if mode == "practice" else [0, 0])
+        assert [row.lapses for row in before] == ([0, 1] if mode == "practice" else [0, 0])
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("pool_name", "handler", "uci_key", "san_key"), [
+    ("cached_threat_pool", routes.threat_answer, "reply_uci", "reply_san"),
+    ("cached_punish_pool", routes.punish_answer, "answer_uci", "answer_san"),
+])
+async def test_trainers_accept_close_multipv_moves(monkeypatch, pool_name, handler, uci_key, san_key) -> None:
+    engine, factory = await _session()
+    board = chess.Board()
+    board.push_san("e4")
+    fen = normalize_fen(board.fen())
+    item = {
+        "position_id": 1, "fen": fen, uci_key: "c7c5", san_key: "c5", "kind": "check",
+        "better_san": "d4", "your_move_san": "Nf6",
+    }
+
+    async def pool(*args):
+        return [item]
+
+    monkeypatch.setattr(routes.threats, pool_name, pool)
+    depth = MIN_TRUSTED_DEPTH + MAX_PAIR_DEPTH_GAP + 1
+    async with factory() as session:
+        session.add(Position(id=1, fen=fen))
+        session.add_all([
+            AnalysisResult(
+                position_id=1, multipv_rank=rank, depth=search_depth, eval_cp=cp,
+                best_move_uci=uci, best_move_san=board.san(chess.Move.from_uci(uci)),
+            )
+            for rank, search_depth, cp, uci in [
+                (1, depth + MAX_PAIR_DEPTH_GAP + 1, -140, "c7c5"),
+                (1, depth, -140, "c7c5"),
+                (2, depth - MAX_PAIR_DEPTH_GAP, -110, "e7e5"),
+                (3, depth, -109, "d7d5"),
+                (4, depth - MAX_PAIR_DEPTH_GAP - 1, -140, "e7e6"),
+            ]
+        ])
+        await session.commit()
+
+        async def submit(uci):
+            return await handler(routes.ThreatAnswerIn(
+                username="tester", position_id=1, played_uci=uci, request_id=uci,
+            ), session=session)
+
+        accepted = await submit("e7e5")
+        assert accepted["correct"]
+        assert (accepted[uci_key], accepted[san_key]) == ("e7e5", "e5")
+        assert not (await submit("d7d5"))["correct"]
+        assert not (await submit("e7e6"))["correct"]
+        assert (await submit("c7c5"))["correct"]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_exact_trainer_answer_needs_no_evaluation_query() -> None:
+    assert await training.accepted_trainer_move_san(
+        None, position_id=1, fen="unused", expected_uci="c7c5", expected_san="c5", played_uci="c7c5",
+    ) == "c5"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("best_mate,alternative_mate,accepted", [(1, 1, True), (None, 1, True), (None, -1, False)])
+async def test_trainer_mate_acceptance(best_mate, alternative_mate, accepted) -> None:
+    engine, factory = await _session()
+    fen = "7k/5Q2/6K1/8/8/8/8/8 w - -"
+    async with factory() as session:
+        session.add(Position(id=1, fen=fen))
+        session.add_all([
+            AnalysisResult(
+                position_id=1, multipv_rank=rank, depth=MIN_TRUSTED_DEPTH,
+                eval_mate=mate, eval_cp=500 if mate is None else None,
+                best_move_uci=uci, best_move_san=san,
+            )
+            for rank, uci, san, mate in [(1, "f7f8", "Qf8#", best_mate), (2, "f7e8", "Qe8#", alternative_mate)]
+        ])
+        await session.commit()
+        assert await training.accepted_trainer_move_san(
+            session, position_id=1, fen=fen, expected_uci="f7f8", expected_san="Qf8#", played_uci="f7e8",
+        ) == ("Qe8#" if accepted else None)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_trainer_prefers_exact_depth_then_the_deepest_matched_pair() -> None:
+    engine, factory = await _session()
+    fen = normalize_fen(chess.STARTING_FEN)
+    depth = MIN_TRUSTED_DEPTH + 2
+    async with factory() as session:
+        session.add(Position(id=1, fen=fen))
+        session.add_all([
+            AnalysisResult(position_id=1, multipv_rank=rank, depth=search_depth,
+                           eval_cp=cp, best_move_uci=uci, best_move_san=san)
+            for rank, search_depth, cp, uci, san in [
+                (1, depth + 2, 120, "e2e4", "e4"),
+                (1, depth, 50, "e2e4", "e4"),
+                (2, depth, 40, "d2d4", "d4"),
+                (1, depth - 2, 120, "e2e4", "e4"),
+                (2, depth - 2, 40, "d2d4", "d4"),
+            ]
+        ])
+        await session.commit()
+        assert await training.accepted_trainer_move_san(
+            session, position_id=1, fen=fen, expected_uci="e2e4", expected_san="e4", played_uci="d2d4",
+        ) == "d4"
+    await engine.dispose()

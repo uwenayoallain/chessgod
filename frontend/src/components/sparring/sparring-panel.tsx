@@ -3,6 +3,7 @@ import { Flag, Minus, Plus, RotateCcw, Swords, Undo2 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
+  takeBackSparringMove,
   useOpenSparringGame,
   useSparringHistory,
   useStartSparring,
@@ -46,7 +47,6 @@ export function SparringPanel({
   const outcome = useSparStore((state) => state.outcome)
   const eloChange = useSparStore((state) => state.eloChange)
   const finish = useSparStore((state) => state.finish)
-  const markUnrated = useSparStore((state) => state.markUnrated)
   const close = useSparStore((state) => state.close)
 
   const currentFen = useAppStore((state) => state.currentFen)
@@ -104,16 +104,7 @@ export function SparringPanel({
   }
 
   function takeBack() {
-    const app = useAppStore.getState()
-    let node: MoveNode | undefined = app.nodes[app.currentNodeId]
-    // Step back at least one ply, to the last position where it was the
-    // player's turn.
-    do {
-      node = node?.parentId ? app.nodes[node.parentId] : undefined
-    } while (node && sideToMove(node.fen) !== userColor)
-    if (!node) return
-    markUnrated()
-    app.jumpToNode(node.id)
+    takeBackSparringMove()
   }
 
   if (status === 'idle') {

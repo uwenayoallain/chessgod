@@ -388,6 +388,18 @@ export type ChallengeBoard = TrainingReward & {
   paid: string[]
 }
 
+export type RatingForm = {
+  games: number
+  wins: number
+  draws: number
+  losses: number
+  score: number
+  /** Current rating minus the rating before the first of these games. */
+  rating_change: number
+  performance: number | null
+  days: number
+}
+
 export type RatingGoal = {
   time_class: 'rapid' | 'blitz'
   goal: number
@@ -395,11 +407,18 @@ export type RatingGoal = {
   change_30d?: number
   peak?: number
   peak_at?: string
+  /** Recency-weighted pace (21-day half-life) over the last 90 days. */
   pace_per_month?: number | null
+  /** The plain, unweighted 90-day line, for comparison. */
+  long_term_pace_per_month?: number | null
   pace_games?: number
   eta?: string | null
   vs_goal?: { games: number; score: number | null }
   vs_level?: { games: number; score: number | null }
+  /** Score against opponents 50 to 250 points above the player. */
+  vs_higher?: { games: number; score: number | null }
+  /** The last up to 20 games of the last 30 days; null with fewer than 5. */
+  form?: RatingForm | null
   band?: number
   points: { date: string; rating: number }[]
 }

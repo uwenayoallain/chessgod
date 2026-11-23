@@ -25,7 +25,7 @@ import {
   type SparColor,
 } from '@/lib/sparring/sparring'
 import { revealSection } from '@/components/ui/collapsible-section'
-import { useAppStore, type ReplayMove } from '@/store/app-store'
+import { useAppStore, type MoveNode, type ReplayMove } from '@/store/app-store'
 import { useEngineStore } from '@/store/engine-store'
 import { clockRemaining, resolveSparElo, useSparStore } from '@/store/spar-store'
 import { useApplyReward } from '@/hooks/use-training'
@@ -33,6 +33,84 @@ import { browserTimeZone } from '@/lib/training/progress'
 
 /** Give up on a move after this many searches came back empty. */
 const MAX_EMPTY_SEARCHES = 3
+
+/**
+ * Take back to the most recent position where it was the player's turn,
+ * truncating the taken-back moves from the board tree and returning the clock
+ * to the player's side so Stockfish's clock does not stay running on the
+ * player's turn and the panel shows "Your move".
+ */
+export function takeBackSparringMove() {
+  const app = useAppStore.getState()
+  const spar = useSparStore.getState()
+  const userColor = spar.userColor
+  let node: MoveNode | undefined = app.nodes[app.currentNodeId]
+  do {
+    node = node?.parentId ? app.nodes[node.parentId] : undefined
+  } while (node && sideToMove(node.fen) !== userColor)
+  if (!node) return
+
+  const targetNode = node
+  spar.markUnrated()
+  useEngineStore.getState().stop()
+
+  if (spar.clocks && spar.clockSide && spar.turnStartedAt != null && spar.status === 'playing') {
+    const now = Date.now()
+    const runningSide = spar.clockSide
+    if (runningSide !== userColor) {
+      spar.chargeMove(runningSide, now, targetNode.fen)
+    } else {
+      useSparStore.setState((state) => {
+        if (!state.clocks || state.turnStartedAt == null || state.status !== 'playing') return {}
+        return {
+          clocks: {
+            ...state.clocks,
+            [userColor]: Math.max(0, state.clocks[userColor] - (now - state.turnStartedAt)),
+          },
+          clockSide: userColor,
+          clockFen: targetNode.fen,
+          turnStartedAt: now,
+        }
+      })
+    }
+  }
+
+  const toDelete = new Set<string>()
+  const queue = [...(app.nodes[targetNode.id]?.children ?? [])]
+  while (queue.length > 0) {
+    const childId = queue.pop()!
+    if (toDelete.has(childId)) continue
+    toDelete.add(childId)
+    const child = app.nodes[childId]
+    if (child) queue.push(...child.children)
+  }
+
+  app.jumpToNode(targetNode.id)
+  if (toDelete.size > 0) {
+    useAppStore.setState((state) => {
+      const nextNodes: Record<string, MoveNode> = {}
+      for (const [id, entry] of Object.entries(state.nodes)) {
+        if (toDelete.has(id)) continue
+        nextNodes[id] =
+          id === targetNode.id
+            ? { ...entry, children: [] }
+            : entry.children.some((c) => toDelete.has(c))
+              ? { ...entry, children: entry.children.filter((c) => !toDelete.has(c)) }
+              : entry
+      }
+      const nextMainLine = state.mainLine.filter((id) => !toDelete.has(id))
+      const nextReplayMoves = nextMainLine
+        .map((id) => nextNodes[id])
+        .filter((n): n is MoveNode => Boolean(n?.san))
+        .map((n) => ({ ply: n.ply, san: n.san!, uci: n.uci ?? '', fen: n.fen }))
+      return {
+        nodes: nextNodes,
+        mainLine: nextMainLine,
+        replayMoves: nextReplayMoves,
+      }
+    })
+  }
+}
 
 /**
  * Drives a sparring game: ends it when the board says it is over or the line
@@ -63,18 +141,25 @@ export function useSparringController() {
   const isLeaf = (nodes[currentNodeId]?.children.length ?? 0) === 0
   const timed = useSparStore((state) => state.clocks !== null)
   const chargeMove = useSparStore((state) => state.chargeMove)
-  const chargedAt = useRef<{ epoch: number; nodeId: string } | null>(null)
+  const chargedAt = useRef<{ epoch: number; nodeId: string; ply: number } | null>(null)
 
   // A move that lands at the end of the line switches the clocks. Stepping
   // back and forward to the same leaf is not a move; playing a different
   // move after a takeback is, and it is charged to whoever made it.
   useEffect(() => {
     if (!playing || !timed || treeEpoch !== epoch || !isLeaf) return
+    const currentPly = nodes[currentNodeId]?.ply ?? 0
     const previous = chargedAt.current
-    chargedAt.current = { epoch, nodeId: currentNodeId }
-    if (!previous || previous.epoch !== epoch || previous.nodeId === currentNodeId) return
+    chargedAt.current = { epoch, nodeId: currentNodeId, ply: currentPly }
+    if (
+      !previous ||
+      previous.epoch !== epoch ||
+      previous.nodeId === currentNodeId ||
+      currentPly <= previous.ply
+    )
+      return
     chargeMove(sideToMove(currentFen) === 'white' ? 'black' : 'white', Date.now(), currentFen)
-  }, [chargeMove, currentFen, currentNodeId, epoch, isLeaf, playing, timed, treeEpoch])
+  }, [chargeMove, currentFen, currentNodeId, epoch, isLeaf, nodes, playing, timed, treeEpoch])
 
   // The flag: whoever's clock reaches zero loses, unless the other side
   // cannot mate. One timer set for the moment the running clock would reach
@@ -305,7 +390,7 @@ export function useSparringHistory(username: string | null) {
 
 /**
  * Keeps a finished game: saves it, reviews it at once, and sends the review's
- * mistakes to the drill pipeline — so a game against the engine ends up in
+ * mistakes to the drill pipeline, so a game against the engine ends up in
  * the Review tab next to the mistakes from imported games.
  */
 export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: ActiveReplayLine) {
@@ -449,9 +534,20 @@ export function useSparringRecorder(annotations: ReplayMoveAnnotation[], line: A
   ])
 }
 
-/** The moves of a saved game replayed from its start position, as the board loads them. */
+/** A FEN as positions are keyed across the app: its first four fields. */
+function positionKey(fen: string) {
+  return fen.trim().split(/\s+/).slice(0, 4).join(' ')
+}
+
+/**
+ * The moves of a saved game replayed from its start position, as the board
+ * loads them. Positions are four-field FENs, as live play pushes them and as
+ * `analysisByFen` is keyed: with the move counters left on, a reopened game
+ * matched none of its own cached evaluations and was searched again in full.
+ */
 export function replayOfSparringGame(startFen: string, movesUci: string[]): ReplayMove[] {
-  const board = new Chess(startFen.split(' ').length >= 6 ? startFen : `${startFen} 0 1`)
+  const fields = startFen.trim().split(/\s+/)
+  const board = new Chess([...fields.slice(0, 4), fields[4] ?? '0', fields[5] ?? '1'].join(' '))
   const moves: ReplayMove[] = []
   for (const [index, uci] of movesUci.entries()) {
     const move = board.move({
@@ -459,7 +555,7 @@ export function replayOfSparringGame(startFen: string, movesUci: string[]): Repl
       to: uci.slice(2, 4),
       promotion: uci.slice(4) || undefined,
     })
-    moves.push({ ply: index + 1, san: move.san, uci, fen: board.fen() })
+    moves.push({ ply: index + 1, san: move.san, uci, fen: positionKey(board.fen()) })
   }
   return moves
 }
@@ -477,7 +573,14 @@ export function useOpenSparringGame(onBeforeOpen: () => void) {
     ) => {
       onBeforeOpen()
       const app = useAppStore.getState()
-      app.loadReplay(replayOfSparringGame(game.start_fen, game.moves_uci))
+      // A played-out drill or boss fight starts from its own position, and
+      // the line has to be rooted there, not at the standard start.
+      app.loadReplay(
+        replayOfSparringGame(game.start_fen, game.moves_uci),
+        0,
+        'loaded',
+        positionKey(game.start_fen),
+      )
       app.alignBoardToUserColor(game.user_color)
       useSparStore
         .getState()

@@ -33,23 +33,21 @@ export function BoardRail({
   showColorFilter?: boolean
   showTimeClassFilter?: boolean
 }) {
-  const {
-    goBack,
-    goForward,
-    resetToStart,
-    flipBoard,
-    keepUserOnBottom,
-    setKeepUserOnBottom,
-    colorFilter,
-    setColorFilter,
-    timeClassFilter,
-    setTimeClassFilter,
-    nodes,
-    currentNodeId,
-    replayMoves: loadedReplayMoves,
-    analysisRequested,
-    setAnalysisRequested,
-  } = useAppStore()
+  const goBack = useAppStore((s) => s.goBack)
+  const goForward = useAppStore((s) => s.goForward)
+  const resetToStart = useAppStore((s) => s.resetToStart)
+  const flipBoard = useAppStore((s) => s.flipBoard)
+  const keepUserOnBottom = useAppStore((s) => s.keepUserOnBottom)
+  const setKeepUserOnBottom = useAppStore((s) => s.setKeepUserOnBottom)
+  const colorFilter = useAppStore((s) => s.colorFilter)
+  const setColorFilter = useAppStore((s) => s.setColorFilter)
+  const timeClassFilter = useAppStore((s) => s.timeClassFilter)
+  const setTimeClassFilter = useAppStore((s) => s.setTimeClassFilter)
+  const canGoBack = useAppStore((s) => Boolean(s.nodes[s.currentNodeId]?.parentId))
+  const canGoForward = useAppStore((s) => Boolean(s.nodes[s.currentNodeId]?.children.length))
+  const hasLoadedReplayMoves = useAppStore((s) => s.replayMoves.length > 0)
+  const analysisRequested = useAppStore((s) => s.analysisRequested)
+  const setAnalysisRequested = useAppStore((s) => s.setAnalysisRequested)
 
   const training = useTrainingMode()
   const activeMode = useEngineStore((state) => state.activeMode)
@@ -91,7 +89,7 @@ export function BoardRail({
         <div className="workspace-rail__buttons">
           <Button
             aria-label="Previous move (←)"
-            disabled={!nodes[currentNodeId]?.parentId || training.active}
+            disabled={!canGoBack || training.active}
             onClick={goBack}
             title="Previous move (←)"
             type="button"
@@ -100,7 +98,7 @@ export function BoardRail({
           </Button>
           <Button
             aria-label="Next move (→)"
-            disabled={!nodes[currentNodeId]?.children.length || training.active}
+            disabled={!canGoForward || training.active}
             onClick={goForward}
             title="Next move (→)"
             type="button"
@@ -125,7 +123,7 @@ export function BoardRail({
             <FlipVertical size={16} />
           </Button>
           {loadedContextLabel && onClearLoadedContext ? (
-            // Never disabled: this is the way out of every state — a drill, a
+            // Never disabled: this is the way out of every state: a drill, a
             // retry, a game against the engine, a line being learned.
             <Button
               aria-label={`${loadedContextLabel} and start again`}
@@ -192,7 +190,7 @@ export function BoardRail({
         </div>
       </div>
 
-      {loadedReplayMoves.length > 0 ? (
+      {hasLoadedReplayMoves ? (
         <div className="workspace-rail__section workspace-rail__section--line-training">
           <div className="workspace-rail__label">Training</div>
           <div className="workspace-rail__stack">

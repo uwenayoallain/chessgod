@@ -42,6 +42,7 @@ import { createOutage, formatDuration } from './outage.mjs'
 import { createIdleWait } from './idle.mjs'
 import { createSetAside } from './setaside.mjs'
 import { uploadEvaluations, uploadWithRetry } from './upload.mjs'
+import { enrichTrainerPositions, fetchTrainerFens, trainerFensUrl } from './enrich.mjs'
 import {
   targetWorkers, createLoadHistory, nextWorkers, parseCpuPressure, pressureLimit,
 } from './pool.mjs'
@@ -63,7 +64,7 @@ const TIME_CLASS = process.env.CRAWL_TIME_CLASS ?? 'rapid_blitz'
 const MIN_DEPTH_OVERRIDE = process.env.CRAWL_MIN_DEPTH
   ? Number(process.env.CRAWL_MIN_DEPTH)
   : null
-let minDepth = MIN_DEPTH_OVERRIDE ?? 22
+let minDepth = MIN_DEPTH_OVERRIDE ?? 20
 // The batch a *full* pool takes. What each batch actually asks for scales with
 // the pool that is running, so a batch takes roughly the same wall time whatever
 // the size -- a whole number of rounds, with no engine idle on the last one.
@@ -262,7 +263,23 @@ if (!USERNAME) {
   process.exit(2)
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+// Aborted on SIGTERM/SIGINT. Every wait in the loop -- an idle queue (up to
+// 30min), a queue outage (up to 5min), a stall (10min) -- used to be a plain
+// timer, so `docker compose stop` sat out its grace period and then killed the
+// process mid-batch, losing the searches already finished.
+const shutdown = new AbortController()
+
+/** A wait that ends early, and quietly, when the crawler is told to stop. */
+const sleep = (ms) => new Promise((resolve) => {
+  if (shutdown.signal.aborted) return resolve()
+  const done = () => {
+    clearTimeout(timer)
+    shutdown.signal.removeEventListener('abort', done)
+    resolve()
+  }
+  const timer = setTimeout(done, ms)
+  shutdown.signal.addEventListener('abort', done, { once: true })
+})
 
 const CORES = Math.max(os.cpus().length, 1)
 // The largest pool we have run inside the load average's own window, so a
@@ -462,8 +479,17 @@ const log = (...parts) => console.log(new Date().toISOString(), ...parts)
 let stopping = false
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    log(`${signal} received, finishing the current position`)
+    if (stopping) {
+      // Asked twice: whoever is asking has stopped waiting.
+      log(`${signal} received again, exiting now`)
+      process.exit(signal === 'SIGINT' ? 130 : 143)
+    }
+    log(`${signal} received, stopping the engines and uploading what is finished`)
     stopping = true
+    shutdown.abort()
+    // A search stopped short of its depth is not an answer; the ones already
+    // finished are in this batch's items and go up before the process exits.
+    for (const engine of pool) engine.stop?.()
   })
 }
 
@@ -528,7 +554,9 @@ const EXCLUDE_LIMIT = 512
 // the log say so when that is not enough.
 async function probeBackend() {
   try {
-    await ownWork.around(() => requestJson(new URL('/api/health', API), { timeoutMs: 5_000 }))
+    await ownWork.around(() => requestJson(new URL('/api/health', API), {
+      timeoutMs: 5_000, signal: shutdown.signal,
+    }))
     return 'up'
   } catch (error) {
     // A refused connection, a DNS failure or a timeout is the backend being
@@ -553,14 +581,142 @@ async function fetchBatch() {
   // again at the review depth rather than its partner at 34 (see _pair_work).
   url.searchParams.set('shallow_pairs', 'true')
   const excluded = [...unfinished.excluded(), ...rejected]
-  if (excluded.length === 0) return ownWork.around(() => requestJson(url, { timeoutMs: QUEUE_TIMEOUT_MS }))
+  // A queue request can take two minutes on a loaded machine; shutting down
+  // does not wait for one, since nothing has been searched from it yet.
+  const signal = shutdown.signal
+  if (excluded.length === 0) return ownWork.around(() => requestJson(url, { timeoutMs: QUEUE_TIMEOUT_MS, signal }))
   return ownWork.around(() => requestJson(url, {
     timeoutMs: QUEUE_TIMEOUT_MS,
+    signal,
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     // Keep the most recent failures when there are more than the cap allows.
     body: JSON.stringify({ exclude_fens: excluded.slice(-EXCLUDE_LIMIT) }),
   }))
+}
+
+/**
+ * The mid-batch guards, for whatever is searching: the library batch or the
+ * trainers' MultiPV alternatives. `limit` is how many engines may still take
+ * another position; it only ever falls while the guards run. Enrichment used
+ * to run without them, so a MultiPV-3 search started on a quiet machine kept
+ * every engine it was given through heat, pressure and somebody sitting down.
+ */
+function watchLiveLimit(active) {
+  // Waiting for the batch to end before reacting to pressure means 30-60s of
+  // full pool at exactly the moment someone starts using the machine. Poll
+  // during the batch instead: engines past the cut finish the position in hand
+  // and then stop taking new ones, so relief arrives in seconds without
+  // abandoning a search (an abandoned search does not stop the engine).
+  let liveLimit = active
+  const pressureTimer = setInterval(() => {
+    const now = cpuPressure()
+    const cut = pressureLimit({ active: liveLimit, pressure: now, maxPressure: MAX_PRESSURE, min: WORKERS_MIN })
+    if (cut < liveLimit) {
+      log(`cpu pressure ${now.toFixed(1)}% over ${MAX_PRESSURE}%, releasing ${liveLimit - cut} engine(s) mid-batch`)
+      liveLimit = cut
+    }
+  }, PRESSURE_POLL_MS)
+  pressureTimer.unref?.()
+
+  // Presence is checked on its own, faster clock and drops straight to the cap
+  // rather than halving: the point is that the person never feels a ramp-down,
+  // so there is nothing to ease into.
+  const presenceCutTimer = setInterval(() => {
+    const ceiling = presenceLimit()
+    if (ceiling < liveLimit) {
+      log(`machine in use (${(lastOtherCores ?? 0).toFixed(2)} cores), ` +
+          `releasing ${liveLimit - ceiling} engine(s) mid-batch`)
+      liveLimit = ceiling
+    }
+  }, PRESENCE_POLL_MS)
+  presenceCutTimer.unref?.()
+
+  // Heat is the one cut that cannot wait for the batch either, and for a
+  // different reason than presence: a batch is 30-60s, and that is long enough
+  // to take the package from its baseline to the throttling band and hold it
+  // there. Waiting would mean the guard never prevents a throttle, only records
+  // one. Like presence it drops straight to the ceiling -- which, when hot, is
+  // zero, because heat is shed by stopping rather than by running smaller.
+  const thermalCutTimer = setInterval(() => {
+    // The global sampler owns the clock; sampling here doubles the rate during work.
+    // Judged against what is running, so the warm band holds this batch where
+    // it is instead of reading as a cut down to the minimum. Only `hot` cuts
+    // mid-batch, and it cuts to zero.
+    const ceiling = thermalLimit(liveLimit)
+    if (ceiling < liveLimit) {
+      log(`package ${(lastTempC ?? 0).toFixed(0)}C, ` +
+          `releasing ${liveLimit - ceiling} engine(s) mid-batch`)
+      liveLimit = ceiling
+    }
+  }, THERMAL_POLL_MS)
+  thermalCutTimer.unref?.()
+
+  return {
+    get limit() { return liveLimit },
+    stop() {
+      clearInterval(pressureTimer)
+      clearInterval(presenceCutTimer)
+      clearInterval(thermalCutTimer)
+    },
+  }
+}
+
+// Trainer positions already given their MultiPV alternatives in this process.
+const enriched = new Set()
+const TRAINER_BATCH = 6
+
+/**
+ * With the main queue empty, give the trainers' positions their second and
+ * third moves before idling (see enrich.mjs). Resolves with the number of
+ * positions searched (zero means there was nothing to do and the crawler
+ * idles as before) and the engine limit the mid-batch guards left, which is
+ * below `active` when heat, pressure or presence stood engines down.
+ */
+async function enrichTrainers(active) {
+  let work
+  try {
+    work = await fetchTrainerFens(
+      (url) => ownWork.around(() => requestJson(url, { timeoutMs: QUEUE_TIMEOUT_MS, signal: shutdown.signal })),
+      trainerFensUrl(API, USERNAME, TRAINER_BATCH),
+    )
+  } catch (error) {
+    if (!stopping) log(`trainer alternatives unavailable (${error.message}); idling`)
+    return { searched: 0, limit: active }
+  }
+  if (!work || work.fens.every((fen) => enriched.has(fen))) return { searched: 0, limit: active }
+  const engines = await poolOf(active)
+  loadHistory.record(active)
+  // A MultiPV-3 search is the heaviest thing the crawler runs, so it answers
+  // to the same guards as a library batch, on the same clocks, and rests
+  // between positions the same way.
+  const guard = watchLiveLimit(active)
+  let outcome
+  try {
+    outcome = await enrichTrainerPositions({
+      fens: work.fens,
+      depth: work.reviewDepth ?? minDepth,
+      engines,
+      done: enriched,
+      stopping: () => stopping,
+      liveLimit: () => guard.limit,
+      restMs: REST_MS,
+      sleep,
+      log,
+      upload: async (items) => {
+        const stored = await uploadWithRetry(items, {
+          upload, stopping: () => stopping, sleep, busyMs: BUSY_MS,
+          maxRetryMs: UPLOAD_RETRY_MAX_MS, log,
+        })
+        if (stored) totalStored += stored.stored
+      },
+    })
+  } finally {
+    guard.stop()
+  }
+  const { searched, uploaded } = outcome
+  if (searched) log(`trainer alternatives: searched ${searched} position(s) at MultiPV 3, uploaded ${uploaded} rank-2/3 line(s)`)
+  return { searched, limit: guard.limit }
 }
 
 async function upload(items) {
@@ -643,6 +799,7 @@ while (!stopping) {
       continue
     }
   } catch (error) {
+    if (stopping) break
     // Probed rather than assumed: "fetch failed" alone sent nobody to the
     // backend for thirty-five hours.
     const report = outage.fail(error.message, { backend: await probeBackend() })
@@ -654,6 +811,23 @@ while (!stopping) {
   if (recovered) log(recovered.message)
 
   if (batch.fens.length === 0) {
+    // Idle engines first fill in the trainers' alternatives, if any want them.
+    const enrichment = await enrichTrainers(active)
+    // A cut made during enrichment carries on like one made during a batch.
+    const stoodDown = enrichment.limit < active
+    if (stoodDown) {
+      log(`pool ${active} -> ${enrichment.limit} engine(s) after standing down from trainer alternatives`)
+      active = enrichment.limit
+      quietStreak = 0
+    }
+    if (enrichment.searched > 0 || stoodDown) {
+      // Stood down with positions left: they are not marked done, so the next
+      // round offers them again once `waitForCapacity` says the machine is
+      // free. The short rest keeps a guard that flaps from spinning the loop.
+      if (enrichment.searched === 0) await sleep(RECHECK_MS)
+      idleWait.reset()
+      continue
+    }
     // Say what is being held back: "nothing queued" while positions are set
     // aside is not the same as a finished library, and reading it as one is
     // how thirty idle hours went unnoticed.
@@ -677,61 +851,14 @@ while (!stopping) {
   // contribution to the load average rather than reading it as other work.
   loadHistory.record(active)
 
-  // Waiting for the batch to end before reacting to pressure means 30-60s of
-  // full pool at exactly the moment someone starts using the machine. Poll
-  // during the batch instead: engines past the cut finish the position in hand
-  // and then stop taking new ones, so relief arrives in seconds without
-  // abandoning a search (an abandoned search does not stop the engine).
-  let liveLimit = active
-  const pressureTimer = setInterval(() => {
-    const now = cpuPressure()
-    const cut = pressureLimit({ active: liveLimit, pressure: now, maxPressure: MAX_PRESSURE, min: WORKERS_MIN })
-    if (cut < liveLimit) {
-      log(`cpu pressure ${now.toFixed(1)}% over ${MAX_PRESSURE}%, releasing ${liveLimit - cut} engine(s) mid-batch`)
-      liveLimit = cut
-    }
-  }, PRESSURE_POLL_MS)
-  pressureTimer.unref?.()
-
-  // Presence is checked on its own, faster clock and drops straight to the cap
-  // rather than halving: the point is that the person never feels a ramp-down,
-  // so there is nothing to ease into.
-  const presenceCutTimer = setInterval(() => {
-    const ceiling = presenceLimit()
-    if (ceiling < liveLimit) {
-      log(`machine in use (${(lastOtherCores ?? 0).toFixed(2)} cores), ` +
-          `releasing ${liveLimit - ceiling} engine(s) mid-batch`)
-      liveLimit = ceiling
-    }
-  }, PRESENCE_POLL_MS)
-  presenceCutTimer.unref?.()
-
-  // Heat is the one cut that cannot wait for the batch either, and for a
-  // different reason than presence: a batch is 30-60s, and that is long enough
-  // to take the package from its baseline to the throttling band and hold it
-  // there. Waiting would mean the guard never prevents a throttle, only records
-  // one. Like presence it drops straight to the ceiling -- which, when hot, is
-  // zero, because heat is shed by stopping rather than by running smaller.
-  const thermalCutTimer = setInterval(() => {
-    // The global sampler owns the clock; sampling here doubles the rate during work.
-    // Judged against what is running, so the warm band holds this batch where
-    // it is instead of reading as a cut down to the minimum. Only `hot` cuts
-    // mid-batch, and it cuts to zero.
-    const ceiling = thermalLimit(liveLimit)
-    if (ceiling < liveLimit) {
-      log(`package ${(lastTempC ?? 0).toFixed(0)}C, ` +
-          `releasing ${liveLimit - ceiling} engine(s) mid-batch`)
-      liveLimit = ceiling
-    }
-  }, THERMAL_POLL_MS)
-  thermalCutTimer.unref?.()
+  const guard = watchLiveLimit(active)
 
   await Promise.all(engines.map(async ({ analyse }, index) => {
     for (;;) {
       if (stopping) return
       // This engine is past the current cut: stand it down for the rest of the
       // batch rather than starting another position.
-      if (index >= liveLimit) return
+      if (index >= guard.limit) return
       const fen = queue.shift()
       if (fen === undefined) return
       // The server asks for the depth this position's partner already carries,
@@ -752,6 +879,8 @@ while (!stopping) {
           })
         }
       } catch (error) {
+        // Stopped for shutdown: neither finished nor a position to set aside.
+        if (error.cancelled) return
         // A worker that never acknowledged stop cannot safely search again.
         // Exit so the supervised container replaces the whole poisoned pool.
         if (error.fatal) throw error
@@ -764,14 +893,12 @@ while (!stopping) {
       await sleep(REST_MS)
     }
   }))
-  clearInterval(pressureTimer)
-  clearInterval(presenceCutTimer)
-  clearInterval(thermalCutTimer)
+  guard.stop()
   // Carry a mid-batch cut into the next round, so relief is not undone the
   // instant the batch ends. Growing back is the controller's job, on its clock.
-  if (liveLimit < active) {
-    log(`pool ${active} -> ${liveLimit} engine(s) after mid-batch pressure relief`)
-    active = liveLimit
+  if (guard.limit < active) {
+    log(`pool ${active} -> ${guard.limit} engine(s) after mid-batch pressure relief`)
+    active = guard.limit
     quietStreak = 0
   }
 
@@ -802,5 +929,8 @@ while (!stopping) {
   }
 }
 
+for (const engine of pool) engine.close?.()
+clearInterval(presenceTimer)
+clearInterval(thermalTimer)
 log(`stopped after storing ${totalStored} evaluations`)
 process.exit(0)

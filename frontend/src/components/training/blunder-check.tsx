@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button'
 import { formatGameDate } from '@/lib/format-date'
 import { useApplyReward, useThreatsOverview, useTrainingProfile } from '@/hooks/use-training'
 import { api } from '@/lib/api'
+import { hydrateEvaluationsForFens } from '@/lib/analysis/hydrate-evaluations'
 import {
   describeThreatsOverview,
   punishLesson,
@@ -142,14 +143,16 @@ const MODES = {
  * mistakes, opponent to move, and asks for the punishment: finding it is the
  * scan that would have stopped the move. "Their mistakes" (Punish it) shows
  * the position right after an opponent's big mistake the player handed
- * straight back, player to move, and asks for the move that keeps it — the
+ * straight back, player to move, and asks for the move that keeps it: the
  * largest habit measured (38.7% of opponents' mistakes given back). Either
  * way the player's side is at the bottom and each answer is scored on the
  * server.
  */
 export function BlunderCheck({ username, onBegin }: { username: string; onBegin?: () => void }) {
+  const [mode, setMode] = useState<BlunderMode>(readMode)
+  const [phase, setPhase] = useState<Phase>('idle')
   const profile = useTrainingProfile(username).data
-  const overview = useThreatsOverview(username).data
+  const overview = useThreatsOverview(username, { enabled: phase === 'idle' }).data
   const applyReward = useApplyReward(username)
   const loadPosition = useAppStore((state) => state.loadPosition)
   const alignBoardToUserColor = useAppStore((state) => state.alignBoardToUserColor)
@@ -159,8 +162,6 @@ export function BlunderCheck({ username, onBegin }: { username: string; onBegin?
   const session = useTrainingStore((state) => state.session)
   const endSession = useTrainingStore((state) => state.endSession)
 
-  const [mode, setMode] = useState<BlunderMode>(readMode)
-  const [phase, setPhase] = useState<Phase>('idle')
   const [questions, setQuestions] = useState<Asked[]>([])
   const [index, setIndex] = useState(0)
   const [spotted, setSpotted] = useState(0)
@@ -243,6 +244,19 @@ export function BlunderCheck({ username, onBegin }: { username: string; onBegin?
       setPhase('error')
     }
   }
+
+  // Every question was searched by the crawler before it could be asked, so
+  // its stored line is loaded while the set is being played: "What follows"
+  // then shows at once instead of starting the engine.
+  useEffect(() => {
+    if (!questions.length) return
+    const controller = new AbortController()
+    void hydrateEvaluationsForFens(
+      questions.map((item) => fullFen(item.fen)),
+      controller.signal,
+    )
+    return () => controller.abort()
+  }, [questions])
 
   // A course session taking the board ends the set.
   useEffect(() => {
@@ -360,7 +374,7 @@ export function BlunderCheck({ username, onBegin }: { username: string; onBegin?
           {lesson?.text ?? (phase === 'answered' ? 'Checking…' : config.waiting)}
         </p>
         {/* Once the answer is resolved, the engine says how the line plays
-            out — the same "what follows" line a finished drill gets.
+            out, the same "what follows" line a finished drill gets.
             Clicking a ply only explores: the answer effect requires the
             asking phase and a child of the question's root. */}
         {question && lesson ? <DrillContinuation active fen={fullFen(question.fen)} /> : null}

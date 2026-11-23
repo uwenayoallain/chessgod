@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import chess
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.analysis import AnalysisResult
@@ -70,12 +71,12 @@ class Library:
                 best_move_san=san, pv_uci=uci, multipv_rank=rank,
             ))
 
-    def score(self, sans: list[str], cp: int) -> None:
+    def score(self, sans: list[str], cp: int, *, depth: int = 20) -> None:
         fen = fen_after(sans)
         board = chess.Board(f"{fen} 0 1")
         move = next(iter(board.legal_moves))
         self.evals.append(AnalysisResult(
-            position_id=self.pid(fen), depth=20, eval_cp=cp, best_move_uci=move.uci(),
+            position_id=self.pid(fen), depth=depth, eval_cp=cp, best_move_uci=move.uci(),
             best_move_san=board.san(move), pv_uci=move.uci(), multipv_rank=1,
         ))
 
@@ -98,7 +99,7 @@ class Library:
             is_white_move=board.turn == chess.WHITE, master_game_count=games,
         ))
 
-    async def build(self, color: str = "black") -> dict:
+    async def build(self, color: str = "black", *, queries: list | None = None) -> dict:
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
@@ -112,6 +113,10 @@ class Library:
             session.add_all(self.marks)
             session.add_all(self.taught)
             await session.commit()
+            if queries is not None:
+                @event.listens_for(engine.sync_engine, "before_cursor_execute")
+                def record_query(_conn, _cursor, statement, params, _context, _executemany):
+                    queries.append((statement, params))
             result = await build_repertoire(
                 session, username="tester", color=color, time_class="rapid_blitz", min_user_rating=1000,
             )
@@ -304,3 +309,41 @@ async def test_a_tie_in_games_is_broken_the_same_way_on_every_build() -> None:
     other = await tied("c5", "e5").build()
     pick = lambda result: {line["moves"][1]["san"] for line in result["lines"]}  # noqa: E731
     assert pick(one) == pick(other) and len(pick(one)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compatible_score_exists", [False, True])
+async def test_child_fallback_uses_compatible_depths(compatible_score_exists) -> None:
+    library = Library()
+    library.game(["e4", "e5"])
+    library.lines(["e4"], ("c5", 0), ("e6", 20))
+    library.score(["e4", "e5"], 180, depth=24)
+    if compatible_score_exists:
+        library.score(["e4", "e5"], 180)
+
+    result = await library.build()
+    first = _yours(result["lines"][0])[0]
+    if compatible_score_exists:
+        assert (first["san"], first["status"], first["usual_loss_cp"]) == ("c5", "change", 180)
+    else:
+        assert (first["san"], first["reason"], first["usual_loss_cp"]) == ("e5", "unchecked", None)
+        assert fen_after(["e4", "e5"]) in result["needs_engine"]
+
+
+@pytest.mark.asyncio
+async def test_missing_fens_share_one_frontier_query() -> None:
+    library = Library()
+    replies = ["e4", "d4", "Nf3", "c4", "g3", "b3"]
+    for san in replies:
+        library.game([san])
+        library.lines([san], ("e5", 0))
+
+    queries = []
+    result = await library.build(queries=queries)
+    assert len(result["lines"]) == len(replies)
+    fen_queries = [
+        params for sql, params in queries
+        if "WHERE positions.fen" in sql
+    ]
+    assert len(fen_queries) == 1
+    assert set(fen_queries[0]) == {fen_after([san, "e5"]) for san in replies}

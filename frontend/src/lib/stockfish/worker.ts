@@ -54,6 +54,7 @@ function startAnalysis(command: SearchCommand) {
     depth: command.depth,
     fen: command.fen,
     multiPV: command.multiPV,
+    movetime: command.movetime,
   })) {
     stockfish.uci(uciCommand)
   }

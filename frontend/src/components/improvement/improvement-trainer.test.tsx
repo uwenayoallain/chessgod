@@ -135,17 +135,28 @@ const { mutate, refetch, planState } = vi.hoisted(() => {
       { key: 'concrete_line', label: 'A concrete line', prompt: 'I calculated one line.' },
     ],
   })
-  return { mutate: vi.fn(), refetch: vi.fn(), planState: { current: makePlan(), makePlan } }
+  return {
+    mutate: vi.fn(),
+    refetch: vi.fn(),
+    planState: {
+      current: makePlan(),
+      makePlan,
+      lastOptions: null as { enabled?: boolean } | null,
+    },
+  }
 })
 
 vi.mock('@/hooks/use-improvement', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/hooks/use-improvement')>()),
-  useImprovementPlan: () => ({
-    data: planState.current,
-    isLoading: false,
-    attempt: { mutate },
-    refetch,
-  }),
+  useImprovementPlan: (options: { enabled?: boolean }) => {
+    planState.lastOptions = options
+    return {
+      data: planState.current,
+      isLoading: false,
+      attempt: { mutate },
+      refetch,
+    }
+  },
 }))
 
 beforeEach(() => {
@@ -436,11 +447,23 @@ describe('ImprovementTrainer', () => {
     )
     expect(await screen.findByText('Found it.')).toBeTruthy()
     // The line is rendered ply by ply so the one the reader was asked for can be
-    // marked — reading "Nxe5 Nc6 Bxc6" does not say which of those was the ask.
+    // marked; reading "Nxe5 Nc6 Bxc6" does not say which of those was the ask.
     const line = document.querySelector('.drill-feedback__line')
     expect(
       [...(line?.querySelectorAll('.drill-line__ply') ?? [])].map((n) => n.textContent),
     ).toEqual(['Nxe5', 'Nc6', 'Bxc6'])
     expect(line?.querySelector('.drill-line__ply--asked')?.textContent).toBe('Bxc6')
+  })
+
+  it('disables background plan queries while a drill session is active', () => {
+    render(<ImprovementTrainer color="both" timeClass="rapid_blitz" username="tester" />)
+    expect(planState.lastOptions?.enabled).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Choose Missed capture' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Train 1 position · ~1 min' }))
+    expect(planState.lastOptions?.enabled).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: 'End drill session' }))
+    expect(planState.lastOptions?.enabled).toBe(true)
   })
 })

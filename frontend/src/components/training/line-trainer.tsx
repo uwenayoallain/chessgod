@@ -51,7 +51,7 @@ function arrowFor(uci: string, color = HINT_ARROW) {
  * mode each of the player's moves is shown with an arrow and a reason, and the
  * player plays it to continue; in Practice mode nothing is shown until they
  * have tried. A wrong move is taken back and the right one shown, and the
- * player plays that before the line goes on — the correction is made with the
+ * player plays that before the line goes on: the correction is made with the
  * hand, not only read. Only the first try at each move is scored, and the
  * server scores it against the line, not against what this page claims.
  */
@@ -91,9 +91,17 @@ export function LineTrainer({
   const [result, setResult] = useState<LineReviewResponse | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const expectedNodeId = useRef<string | null>(null)
+  const rollbackTimer = useRef<number | null>(null)
   // Scored once per pass: a failed request is reported, never retried in a loop.
   const submitted = useRef(false)
   const requestId = useMemo(() => `line:${line.id}:${mode}:${Date.now()}`, [line.id, mode])
+
+  function clearRollbackTimer() {
+    if (rollbackTimer.current !== null) {
+      window.clearTimeout(rollbackTimer.current)
+      rollbackTimer.current = null
+    }
+  }
 
   const yours = useMemo(
     () => line.moves.filter((step): step is YourStep => step.side === 'you'),
@@ -105,6 +113,9 @@ export function LineTrainer({
 
   // Start (or restart) the line from its first position.
   useEffect(() => {
+    clearRollbackTimer()
+    hinted.current = {}
+    setTrainerArrows([])
     onBegin?.()
     loadPosition(fullFen(line.moves[0].fen))
     alignBoardToUserColor(color)
@@ -122,6 +133,7 @@ export function LineTrainer({
   useEffect(() => {
     setDrillSolving(true)
     return () => {
+      clearRollbackTimer()
       setDrillSolving(false)
       setTrainerArrows([])
     }
@@ -163,6 +175,7 @@ export function LineTrainer({
   // The player's answer: the first move made from the position being asked.
   useEffect(() => {
     if (phase !== 'waiting' || !step || step.side !== 'you') return
+    if (rollbackTimer.current !== null) return
     if (!currentNode?.uci || currentNode.parentId !== expectedNodeId.current) return
     if (!sameBoard(useAppStore.getState().nodes[currentNode.parentId ?? '']?.fen ?? '', step.fen))
       return
@@ -194,11 +207,12 @@ export function LineTrainer({
       text: `Not ${currentNode.san ?? answer}. Play ${step.san}.`,
     })
     const back = expectedNodeId.current
-    const timer = window.setTimeout(() => {
+    const expectedUci = step.uci
+    rollbackTimer.current = window.setTimeout(() => {
+      rollbackTimer.current = null
       if (back) jumpToNode(back)
-      setTrainerArrows(arrowFor(step.uci))
+      setTrainerArrows(arrowFor(expectedUci))
     }, 600)
-    return () => window.clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new move is an answer
   }, [currentNodeId])
 
@@ -391,6 +405,9 @@ export function LineTrainer({
           <button
             className="line-trainer__restart"
             onClick={() => {
+              clearRollbackTimer()
+              hinted.current = {}
+              setTrainerArrows([])
               loadPosition(fullFen(line.moves[0].fen))
               expectedNodeId.current = useAppStore.getState().currentNodeId
               setIndex(0)

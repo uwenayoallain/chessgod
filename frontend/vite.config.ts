@@ -56,6 +56,17 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          // React on its own: it changes a few times a year and the app
+          // changes daily. In the app's chunk its bytes were re-downloaded
+          // after every deploy because the chunk's hash moved with ours.
+          if (
+            id.includes('/node_modules/react/') ||
+            id.includes('/node_modules/react-dom/') ||
+            id.includes('/node_modules/scheduler/')
+          ) {
+            return 'react'
+          }
+
           if (
             id.includes('/node_modules/chess.js/') ||
             id.includes('/node_modules/react-chessboard/')

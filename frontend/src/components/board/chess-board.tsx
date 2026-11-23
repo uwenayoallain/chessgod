@@ -1,7 +1,7 @@
 import { Cpu, X } from 'lucide-react'
 
 import type { OpeningSelection } from '@/hooks/use-board-workspace'
-import { useMemo } from 'react'
+import { memo, useEffect, useMemo, useRef } from 'react'
 import { Chessboard, defaultPieces } from 'react-chessboard'
 
 import { EngineBar } from '@/components/analysis/engine-bar'
@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { BEST_MOVE_ARROW_COLOR, THREAT_ARROW_COLOR } from '@/lib/analysis/board-guidance'
 import { shouldShowBoardAnnotations } from '@/lib/board-annotations'
 import type { WorkspaceGame } from '@/hooks/use-workspace-data'
-import { useChessGame } from '@/hooks/use-chess-game'
+import { useChessGame, type PendingPromotion, type PromotionPiece } from '@/hooks/use-chess-game'
 import { useMoveMarkers } from '@/hooks/use-move-markers'
 import { formatGameDate } from '@/lib/format-date'
 import { useAppStore } from '@/store/app-store'
@@ -61,7 +61,117 @@ const pieces = Object.fromEntries(
   ]),
 ) as typeof defaultPieces
 
-export function ChessBoard({
+const PROMOTION_CHOICES: { piece: PromotionPiece; name: string }[] = [
+  { piece: 'q', name: 'queen' },
+  { piece: 'n', name: 'knight' },
+  { piece: 'r', name: 'rook' },
+  { piece: 'b', name: 'bishop' },
+]
+
+/**
+ * What a pawn on the last rank becomes. Four pieces in a column that starts on
+ * the promotion square and runs toward the middle of the board, the queen on
+ * the square itself so the usual choice is where the pawn was dropped. A
+ * dialog: focus starts on the queen and stays inside, and Escape or a press
+ * anywhere else on the board takes the move back.
+ */
+export function PromotionChooser({
+  pending,
+  orientation,
+  onChoose,
+  onCancel,
+}: {
+  pending: PendingPromotion
+  orientation: 'white' | 'black'
+  onChoose: (piece: PromotionPiece) => void
+  onCancel: () => void
+}) {
+  const options = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    options.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
+  }, [pending])
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      onCancel()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [onCancel])
+
+  function moveFocus(event: React.KeyboardEvent<HTMLDivElement>) {
+    const step =
+      event.key === 'ArrowDown' || (event.key === 'Tab' && !event.shiftKey)
+        ? 1
+        : event.key === 'ArrowUp' || (event.key === 'Tab' && event.shiftKey)
+          ? -1
+          : 0
+    if (!step) return
+    const buttons = [...(options.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+    if (!buttons.length) return
+    // Focus stays in the chooser: behind it is a board that cannot be used
+    // until the pawn has become something.
+    event.preventDefault()
+    const at = buttons.indexOf(document.activeElement as HTMLButtonElement)
+    buttons[(at + step + buttons.length) % buttons.length]?.focus({ preventScroll: true })
+  }
+
+  const file = pending.to.charCodeAt(0) - 97
+  const rank = Number(pending.to[1])
+  const column = orientation === 'white' ? file : 7 - file
+  // The promotion square is on the top edge when the promoting side sits at
+  // the bottom, which is the usual case; otherwise the column runs upward.
+  const onTopEdge = orientation === 'white' ? rank === 8 : rank === 1
+  const color = pending.color === 'w' ? 'White' : 'Black'
+
+  return (
+    <section
+      aria-label={`Promote the ${color.toLowerCase()} pawn on ${pending.to}`}
+      aria-modal="true"
+      className="promo-choice"
+      role="dialog"
+    >
+      <button
+        aria-label="Cancel promotion"
+        className="promo-choice__backdrop"
+        onClick={onCancel}
+        tabIndex={-1}
+        type="button"
+      />
+      <div
+        className="promo-choice__options"
+        data-edge={onTopEdge ? 'top' : 'bottom'}
+        onKeyDown={moveFocus}
+        ref={options}
+        style={{ left: `${column * 12.5}%` }}
+      >
+        {PROMOTION_CHOICES.map(({ piece, name }) => {
+          const Piece = pieces[`${pending.color}${piece.toUpperCase()}`]
+          return (
+            <button
+              aria-label={`Promote to ${name}`}
+              className="promo-choice__piece"
+              key={piece}
+              onClick={() => onChoose(piece)}
+              type="button"
+            >
+              {Piece ? <Piece /> : name}
+            </button>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+/**
+ * Memoised: the workspace root still re-renders with the position, and the
+ * board subscribes to what it draws itself.
+ */
+export const ChessBoard = memo(function ChessBoard({
   activeGame,
   selectedOpening,
   onClearContext,
@@ -73,7 +183,16 @@ export function ChessBoard({
   username?: string | null
 }) {
   const boardOrientation = useAppStore((state) => state.boardOrientation)
-  const { position, squareStyles, onPieceDrag, onPieceDrop, onSquareClick } = useChessGame()
+  const {
+    position,
+    squareStyles,
+    onPieceDrag,
+    onPieceDrop,
+    onSquareClick,
+    pendingPromotion,
+    choosePromotion,
+    cancelPromotion,
+  } = useChessGame()
   // Three fields, not the whole engine: the board redrew on every line.
   const enabled = useEngineStore((state) => state.enabled)
   const toggle = useEngineStore((state) => state.toggle)
@@ -308,6 +427,14 @@ export function ChessBoard({
           ) : null}
           <div className="board-frame__board">
             <Chessboard options={options} />
+            {pendingPromotion ? (
+              <PromotionChooser
+                onCancel={cancelPromotion}
+                onChoose={choosePromotion}
+                orientation={boardOrientation}
+                pending={pendingPromotion}
+              />
+            ) : null}
           </div>
           {players ? (
             <div className="board-frame__player board-frame__player--bottom">
@@ -341,4 +468,4 @@ export function ChessBoard({
       </div>
     </div>
   )
-}
+})

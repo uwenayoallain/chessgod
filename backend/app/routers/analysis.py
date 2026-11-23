@@ -5,11 +5,11 @@ from typing import Annotated
 
 import chess
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import case, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.engine_contract import ENGINE_NAME, ENGINE_VERSION
+from app.engine_contract import ENGINE_NAME, ENGINE_VERSION, MAX_PAIR_DEPTH_GAP
 from app.models.analysis import AnalysisResult
 from app.models.position import Position
 from app.schemas.analysis import (
@@ -111,21 +111,30 @@ async def analysis_activity(session: AsyncSession = Depends(get_db)) -> dict:
     A crawl that stops leaves no error anywhere, just a coverage number that
     quietly stops moving, so a stalled crawl and a finished library looked the
     same in the app. This is the audit's freshness line, served to the page.
-    Cached briefly: the max/count scan is cheap but the page polls it.
+    Cached briefly because the page polls it.
     """
     cache = get_shared_cache()
     cached = await cache.get_json(_ACTIVITY_CACHE_KEY)
     if cached is not None:
         return cached
     now = datetime.now(UTC)
-    newest, last_hour, last_day = (await session.execute(
+    engine_filter = (
+        AnalysisResult.engine == ENGINE_NAME,
+        AnalysisResult.engine_version == ENGINE_VERSION,
+    )
+    newest = await session.scalar(
+        select(AnalysisResult.analyzed_at)
+        .where(*engine_filter)
+        .order_by(AnalysisResult.analyzed_at.desc())
+        .limit(1)
+    )
+    last_hour, last_day = (await session.execute(
         select(
-            func.max(AnalysisResult.analyzed_at),
             func.count().filter(AnalysisResult.analyzed_at >= now - timedelta(hours=1)),
-            func.count().filter(AnalysisResult.analyzed_at >= now - timedelta(hours=24)),
+            func.count(),
         ).where(
-            AnalysisResult.engine == ENGINE_NAME,
-            AnalysisResult.engine_version == ENGINE_VERSION,
+            *engine_filter,
+            AnalysisResult.analyzed_at >= now - timedelta(hours=24),
         )
     )).one()
     if newest is not None and newest.tzinfo is None:
@@ -306,12 +315,34 @@ async def store_evaluations(
     return {"stored": stored, "skipped": skipped, "upgraded": upgraded}
 
 
+def _evaluation_preference(prefer_depth: int | None) -> list:
+    """The ORDER BY that picks one row per position: see `get_evaluations`."""
+    deepest = [AnalysisResult.depth.desc(), AnalysisResult.id.desc()]
+    if prefer_depth is None:
+        return deepest
+    distance = func.abs(AnalysisResult.depth - prefer_depth)
+    in_band = distance <= MAX_PAIR_DEPTH_GAP
+    # In band: closest first. Out of band the distance is not a preference,
+    # so every such row ties and the deepest wins, as without `prefer_depth`.
+    return [case((in_band, 0), else_=1), case((in_band, distance), else_=0), *deepest]
+
+
 @router.get("/evaluations", response_model=dict[str, AnalysisEvaluationOut])
 async def get_evaluations(
     fens: str = Query(..., max_length=13_000),
     min_depth: int = Query(18, ge=1, le=128),
+    prefer_depth: Annotated[int | None, Query(ge=1, le=128)] = None,
     session: AsyncSession = Depends(get_db),
 ) -> dict[str, AnalysisEvaluationOut]:
+    """One rank-one evaluation per position, for the browser's cache.
+
+    By default the deepest row. With `prefer_depth`, the row closest to that
+    depth when one lies within `MAX_PAIR_DEPTH_GAP` of it (ties to the deeper),
+    and only then the deepest: a game review grades a move by differencing two
+    positions searched to about the same depth, so a depth-34 row left by
+    somebody studying one side on the board must not be what the review reads
+    when a depth-20 row for it exists.
+    """
     requested_fens = [fen.strip() for fen in fens.split(",") if fen.strip()]
     if not requested_fens:
         return {}
@@ -330,7 +361,7 @@ async def get_evaluations(
             AnalysisResult.depth >= min_depth,
             AnalysisResult.multipv_rank == 1,
         )
-        .order_by(AnalysisResult.depth.desc(), AnalysisResult.id.desc())
+        .order_by(*_evaluation_preference(prefer_depth))
         .limit(1)
         .correlate(Position)
         .scalar_subquery()

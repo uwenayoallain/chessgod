@@ -32,9 +32,15 @@ type UnanalyzedFenResponse = {
 
 const AUTOPILOT_BATCH_LIMIT = 24
 const AUTOPILOT_INTERVAL_MS = 30_000
-// Two quiet cycles is a minute — long enough for a pending upload to land,
+// Two quiet cycles is a minute: long enough for a pending upload to land,
 // short enough that a browser with nothing to contribute stops pretending.
 const MAX_IDLE_BATCHES = 2
+// A failed request for work is tried again, but not at once and not for ever:
+// the wait before the second and third attempts, then the crawl switches
+// itself off. Retried the instant it failed, three attempts took a few
+// milliseconds and the panel went from "Analyzing" to stopped in one frame.
+export const RETRY_BACKOFF_MS = [5_000, 20_000]
+const MAX_FAILURES = RETRY_BACKOFF_MS.length + 1
 // Drawn at full height before the counts arrive, so the block does not grow
 // into the page once they do.
 const PENDING_PHASE_ROWS = [
@@ -84,23 +90,34 @@ export function EngineAnalyzeBatch({
   // so allow the upload a couple of cycles to land and then stop and say so.
   const [idleBatches, setIdleBatches] = useState(0)
   const queueReplayAnalysis = useEngineStore((state) => state.queueReplayAnalysis)
-  const stop = useEngineStore((state) => state.stop)
   const completed = useEngineStore((state) => state.replayQueueCompleted)
   const total = useEngineStore((state) => state.replayQueueTotal)
   const active = useEngineStore((state) => state.replayQueueActive)
+  // Cancel is offered for the crawl's own work. While a single game is being
+  // reviewed the queue is active too, and that review is not this panel's to end.
+  const crawlRunning = useEngineStore(
+    (state) => state.replayQueueActive && state.replayQueueKind !== 'game',
+  )
   const progressLabel = active
     ? `Analyzing ${Math.min(completed + 1, total)} of ${total}`
     : total > 0
       ? `${completed} of ${total} analyzed this run`
       : null
   const stalled = idleBatches >= MAX_IDLE_BATCHES
+  // Between a failed request and the next attempt. Not "Analyzing": nothing is.
+  const retryWaitMs =
+    browserAnalysisEnabled && browserAnalysisFailures > 0
+      ? RETRY_BACKOFF_MS[browserAnalysisFailures - 1]
+      : null
   const analysisStatus = stalled
     ? 'Paused while finished analysis uploads. Start again in a minute.'
-    : browserAnalysisEnabled || active
-      ? 'Analyzing…'
-      : coverage?.missing_count === 0
-        ? 'All positions analyzed.'
-        : null
+    : retryWaitMs != null
+      ? `Could not get the next positions. Trying again in ${Math.round(retryWaitMs / 1000)} seconds.`
+      : browserAnalysisEnabled || active
+        ? 'Analyzing…'
+        : coverage?.missing_count === 0
+          ? 'All positions analyzed.'
+          : null
   const coveragePercent =
     coverage?.candidate_count && coverage.analyzed_count != null
       ? Math.round((coverage.analyzed_count / coverage.candidate_count) * 100)
@@ -187,7 +204,6 @@ export function EngineAnalyzeBatch({
 
   useEffect(() => {
     if (!browserAnalysisEnabled) return
-    if (browserAnalysisFailures >= 3) return
     if (idleBatches >= MAX_IDLE_BATCHES) {
       setBrowserAnalysisEnabled(false)
       return
@@ -221,19 +237,35 @@ export function EngineAnalyzeBatch({
         })
         .catch(() => {
           if (controller.signal.aborted) return
-          setBrowserAnalysisFailures((count) => count + 1)
-          setError('Analysis stopped after an error. Start it again to retry.')
+          const failures = browserAnalysisFailures + 1
+          setBrowserAnalysisFailures(failures)
+          if (failures < MAX_FAILURES) return
+          // The last attempt: the crawl is switched off in the same update
+          // that reports it, so the panel never says "Analyzing" beside
+          // "stopped", and the button offers to start it again.
+          setBrowserAnalysisEnabled(false)
+          setError('Analysis stopped after three failed attempts. Start it again to retry.')
         })
         .finally(() => {
           running = false
         })
     }
 
-    tick()
-    const intervalId = window.setInterval(tick, AUTOPILOT_INTERVAL_MS)
+    let intervalId: number | undefined
+    const start = () => {
+      tick()
+      intervalId = window.setInterval(tick, AUTOPILOT_INTERVAL_MS)
+    }
+    // After a failure the next attempt waits out its backoff. This effect runs
+    // again as soon as the failure is counted, so starting at once here is
+    // what retried a failing request immediately.
+    const waitMs = browserAnalysisFailures > 0 ? RETRY_BACKOFF_MS[browserAnalysisFailures - 1] : 0
+    const startId = waitMs > 0 ? window.setTimeout(start, waitMs) : undefined
+    if (waitMs <= 0) start()
     return () => {
       controller.abort()
-      window.clearInterval(intervalId)
+      if (startId !== undefined) window.clearTimeout(startId)
+      if (intervalId !== undefined) window.clearInterval(intervalId)
     }
   }, [
     active,
@@ -245,6 +277,18 @@ export function EngineAnalyzeBatch({
     timeClass,
     username,
   ])
+
+  // Stop the crawl outright: no further batch, and the positions it queued are
+  // dropped. Only the crawl. The engine's own `stop` also ended a single-game
+  // review running on its pool, and left the crawl switched on, so the next
+  // tick queued the same batch again and "Cancel" did nothing anyone could see.
+  function cancelCrawl() {
+    setBrowserAnalysisEnabled(false)
+    setBrowserAnalysisFailures(0)
+    setIdleBatches(0)
+    setError(null)
+    useEngineStore.getState().stopLibraryCrawl()
+  }
 
   const activityLine = activity.data ? describeEngineActivity(activity.data) : null
 
@@ -331,6 +375,8 @@ export function EngineAnalyzeBatch({
           onClick={() => {
             setBrowserAnalysisFailures(0)
             setIdleBatches(0)
+            // A new start is a new attempt: the last run's failure is history.
+            setError(null)
             setBrowserAnalysisEnabled((enabled) => !enabled)
           }}
           type="button"
@@ -339,8 +385,8 @@ export function EngineAnalyzeBatch({
           {browserAnalysisEnabled ? <Pause size={14} /> : <Cpu size={14} />}
           <span>{browserAnalysisEnabled ? 'Pause analysis' : 'Analyze my games'}</span>
         </Button>
-        {active ? (
-          <Button onClick={stop} type="button" variant="ghost">
+        {crawlRunning ? (
+          <Button onClick={cancelCrawl} type="button" variant="ghost">
             <X size={14} />
             <span>Cancel</span>
           </Button>

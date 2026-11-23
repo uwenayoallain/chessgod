@@ -64,9 +64,28 @@ function readActiveTab(value: string | null) {
   return LEGACY_TAB_MAP[value] ?? DEFAULT_LAYOUT.activeTab
 }
 
+/**
+ * The layout's storage, or null when the browser refuses it. With site data
+ * blocked (a private window, a strict cookie setting, an embedded frame) the
+ * `localStorage` accessor itself throws, and this is called while `Workspace`
+ * renders: uncaught, a remembered sidebar width blanked the whole app.
+ */
 export function getDashboardLayoutStorage(): StorageLike | null {
-  if (typeof window === 'undefined') return null
-  return window.localStorage
+  try {
+    if (typeof window === 'undefined') return null
+    return window.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+/** A stored value, or null when there is none or the read was refused. */
+function readItem(storage: Pick<StorageLike, 'getItem'>, key: string): string | null {
+  try {
+    return storage.getItem(key)
+  } catch {
+    return null
+  }
 }
 
 export function readDashboardLayout(
@@ -77,17 +96,17 @@ export function readDashboardLayout(
   if (!storage) return defaults
 
   // Widths saved under an older layout version are old defaults, not choices.
-  const currentVersion = storage.getItem('chessgod.layoutVersion') === LAYOUT_VERSION
+  const currentVersion = readItem(storage, 'chessgod.layoutVersion') === LAYOUT_VERSION
 
   return {
-    activeTab: readActiveTab(storage.getItem('chessgod.activeTab')),
+    activeTab: readActiveTab(readItem(storage, 'chessgod.activeTab')),
     railWidth: currentVersion
-      ? readNumber(storage.getItem('chessgod.railWidth'), defaults.railWidth, RAIL_MIN, RAIL_MAX)
+      ? readNumber(readItem(storage, 'chessgod.railWidth'), defaults.railWidth, RAIL_MIN, RAIL_MAX)
       : defaults.railWidth,
-    sidebarCollapsed: storage.getItem('chessgod.sidebarCollapsed') === 'true',
+    sidebarCollapsed: readItem(storage, 'chessgod.sidebarCollapsed') === 'true',
     sidebarWidth: currentVersion
       ? readNumber(
-          storage.getItem('chessgod.sidebarWidth'),
+          readItem(storage, 'chessgod.sidebarWidth'),
           defaults.sidebarWidth,
           SIDEBAR_MIN,
           SIDEBAR_MAX,
@@ -99,12 +118,18 @@ export function readDashboardLayout(
 export function writeDashboardLayout(storage: StorageLike | null, layout: DashboardLayoutState) {
   if (!storage) return
 
-  storage.setItem('chessgod.layoutVersion', LAYOUT_VERSION)
-  storage.setItem('chessgod.activeTab', readActiveTab(layout.activeTab))
-  storage.setItem('chessgod.sidebarCollapsed', String(layout.sidebarCollapsed))
-  storage.setItem(
-    'chessgod.sidebarWidth',
-    String(clamp(layout.sidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX)),
-  )
-  storage.setItem('chessgod.railWidth', String(clamp(layout.railWidth, RAIL_MIN, RAIL_MAX)))
+  // The layout is written on every render. A refused write (quota, blocked
+  // site data) costs the remembered widths for this visit and nothing else.
+  try {
+    storage.setItem('chessgod.layoutVersion', LAYOUT_VERSION)
+    storage.setItem('chessgod.activeTab', readActiveTab(layout.activeTab))
+    storage.setItem('chessgod.sidebarCollapsed', String(layout.sidebarCollapsed))
+    storage.setItem(
+      'chessgod.sidebarWidth',
+      String(clamp(layout.sidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX)),
+    )
+    storage.setItem('chessgod.railWidth', String(clamp(layout.railWidth, RAIL_MIN, RAIL_MAX)))
+  } catch {
+    // Nothing to recover: the layout in memory is still the one on screen.
+  }
 }

@@ -1,28 +1,23 @@
 import { create } from 'zustand'
 
 import type { BoardArrow } from '@/lib/analysis/board-guidance'
+import { safeGetItem, safeRemoveItem, safeSetItem } from '@/lib/storage'
 
 export const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -'
 
+// Read through the safe helpers: with site data blocked the `localStorage`
+// accessor itself throws, and a throw here is a throw while the store is being
+// created, which leaves the page blank.
 function loadStoredUsername() {
-  if (typeof window === 'undefined') {
-    return null
-  }
-  return window.localStorage.getItem('chessgod.username')
+  return safeGetItem('chessgod.username')
 }
 
 function loadStoredKeepUserOnBottom() {
-  if (typeof window === 'undefined') {
-    return false
-  }
-  return window.localStorage.getItem('chessgod.keepUserOnBottom') === 'true'
+  return safeGetItem('chessgod.keepUserOnBottom') === 'true'
 }
 
 function loadStoredTimeClass() {
-  if (typeof window === 'undefined') {
-    return 'rapid_blitz'
-  }
-  return window.localStorage.getItem('chessgod.timeClass') || 'rapid_blitz'
+  return safeGetItem('chessgod.timeClass') || 'rapid_blitz'
 }
 
 export type ImportProgress = {
@@ -104,12 +99,14 @@ function clearScopedArrows(state: {
 
 function pathToRoot(nodes: Record<string, MoveNode>, nodeId: string): MoveNode[] {
   const path: MoveNode[] = []
-  let current = nodes[nodeId]
+  let current: MoveNode | undefined = nodes[nodeId]
+  // Leaf first, reversed once: `unshift` shifts the whole array per node, which
+  // is quadratic over a long game and ran on every step through one.
   while (current) {
-    path.unshift(current)
-    current = current.parentId ? nodes[current.parentId] : (undefined as unknown as MoveNode)
+    path.push(current)
+    current = current.parentId ? nodes[current.parentId] : undefined
   }
-  return path
+  return path.reverse()
 }
 
 type AppState = {
@@ -164,7 +161,17 @@ type AppState = {
   setCurrentFen: (fen: string) => void
   loadPosition: (fen: string, lastUci?: string | null) => void
   pushPosition: (fen: string, san?: string, uci?: string) => void
-  loadReplay: (moves: ReplayMove[], startIndex?: number, source?: 'loaded' | 'free') => void
+  /**
+   * `startFen` is the position the line starts from, for a game that did not
+   * begin at move one (a drill or a learned line played out against the
+   * engine). Move counters are dropped, as everywhere positions are keyed.
+   */
+  loadReplay: (
+    moves: ReplayMove[],
+    startIndex?: number,
+    source?: 'loaded' | 'free',
+    startFen?: string,
+  ) => void
   clearLoadedLine: () => void
   setDrillSolving: (value: boolean) => void
   setTrainerArrows: (arrows: BoardArrow[], forFen?: string | null) => void
@@ -195,16 +202,38 @@ type AppState = {
   getMainLineMoves: () => ReplayMove[]
 }
 
+function buildMainLineMoves(nodes: Record<string, MoveNode>, mainLine: string[]): ReplayMove[] {
+  return mainLine
+    .map((id) => nodes[id])
+    .filter((n): n is MoveNode => Boolean(n?.san))
+    .map((n) => ({ ply: n.ply, san: n.san!, uci: n.uci ?? '', fen: n.fen }))
+}
+
+// The main line's moves depend on the tree and the main line alone, and both
+// are replaced rather than edited. Stepping through a game changes neither, so
+// the last list is handed back: rebuilding it gave `replayMoves` a new identity
+// on every step and re-rendered everything subscribed to it.
+let mainLineMovesFor: {
+  nodes: Record<string, MoveNode>
+  mainLine: string[]
+  moves: ReplayMove[]
+} | null = null
+
+function mainLineMoves(nodes: Record<string, MoveNode>, mainLine: string[]): ReplayMove[] {
+  if (mainLineMovesFor?.nodes === nodes && mainLineMovesFor.mainLine === mainLine) {
+    return mainLineMovesFor.moves
+  }
+  const moves = buildMainLineMoves(nodes, mainLine)
+  mainLineMovesFor = { nodes, mainLine, moves }
+  return moves
+}
+
 function deriveCompat(nodes: Record<string, MoveNode>, currentNodeId: string, mainLine: string[]) {
   const path = pathToRoot(nodes, currentNodeId)
   const fenHistory = path.map((n) => n.fen)
   const moveHistory = path.filter((n) => n.san).map((n) => n.san!)
-  const mainLineMoves: ReplayMove[] = mainLine
-    .map((id) => nodes[id])
-    .filter((n): n is MoveNode => Boolean(n?.san))
-    .map((n) => ({ ply: n.ply, san: n.san!, uci: n.uci ?? '', fen: n.fen }))
   const historyIndex = path.length - 1
-  return { fenHistory, moveHistory, replayMoves: mainLineMoves, historyIndex }
+  return { fenHistory, moveHistory, replayMoves: mainLineMoves(nodes, mainLine), historyIndex }
 }
 
 export const useAppStore = create<AppState>((set, get) => {
@@ -240,16 +269,12 @@ export const useAppStore = create<AppState>((set, get) => {
     ...initialCompat,
 
     setUsername: (username) => {
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem('chessgod.username', username)
-      }
+      safeSetItem('chessgod.username', username)
       set({ username })
     },
 
     clearUsername: () => {
-      if (typeof window !== 'undefined') {
-        window.localStorage.removeItem('chessgod.username')
-      }
+      safeRemoveItem('chessgod.username')
       set({ username: null, importStatus: 'idle', importProgress: null })
     },
 
@@ -322,9 +347,12 @@ export const useAppStore = create<AppState>((set, get) => {
       })
     },
 
-    loadReplay: (moves, startIndex = 0, source = 'loaded') => {
+    loadReplay: (moves, startIndex = 0, source = 'loaded', startFen = STARTING_FEN) => {
       nextNodeCounter = 0
-      const rootNode = createRootNode()
+      // Rooted at the standard start whatever the game, the board showed the
+      // initial position under a line that could not be played from it, and
+      // the review differenced the first move against the wrong evaluation.
+      const rootNode = createRootNode(startFen.trim().split(/\s+/).slice(0, 4).join(' '))
       const newNodes: Record<string, MoveNode> = { [ROOT_ID]: rootNode }
       const newMainLine: string[] = []
       let prevId = ROOT_ID
@@ -512,9 +540,7 @@ export const useAppStore = create<AppState>((set, get) => {
       })),
 
     setKeepUserOnBottom: (keepUserOnBottom) => {
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem('chessgod.keepUserOnBottom', String(keepUserOnBottom))
-      }
+      safeSetItem('chessgod.keepUserOnBottom', String(keepUserOnBottom))
       set({ keepUserOnBottom })
     },
 
@@ -524,10 +550,8 @@ export const useAppStore = create<AppState>((set, get) => {
 
     setColorFilter: (colorFilter) => set({ colorFilter }),
     setTimeClassFilter: (timeClassFilter) => {
-      if (typeof window !== 'undefined') {
-        if (timeClassFilter) window.localStorage.setItem('chessgod.timeClass', timeClassFilter)
-        else window.localStorage.removeItem('chessgod.timeClass')
-      }
+      if (timeClassFilter) safeSetItem('chessgod.timeClass', timeClassFilter)
+      else safeRemoveItem('chessgod.timeClass')
       set({ timeClassFilter })
     },
     setIsLoadingGame: (isLoadingGame) => set({ isLoadingGame }),
@@ -544,15 +568,9 @@ export const useAppStore = create<AppState>((set, get) => {
 
     getMainLineMoves: () => {
       const { nodes, mainLine } = get()
-      return mainLine
-        .map((id) => nodes[id])
-        .filter((n): n is MoveNode => Boolean(n?.san))
-        .map((n) => ({
-          ply: n.ply,
-          san: n.san!,
-          uci: n.uci ?? '',
-          fen: n.fen,
-        }))
+      // A fresh array: callers of the getter have always been free to keep or
+      // change what it returns, unlike the shared `replayMoves` in the state.
+      return buildMainLineMoves(nodes, mainLine)
     },
   }
 })

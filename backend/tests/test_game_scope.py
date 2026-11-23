@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.base import Base
@@ -30,13 +31,18 @@ def _game(game_id: int, *, time_class: str, rating: int | None, played_at: datet
     )
 
 
-async def _floor(games: list[Game]) -> int:
+async def _floor(games: list[Game], *, selects: list[str] | None = None) -> int:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         session.add_all(games)
         await session.commit()
+        if selects is not None:
+            @event.listens_for(engine.sync_engine, "before_cursor_execute")
+            def count_select(_conn, _cursor, statement, _params, _context, _executemany):
+                if statement.startswith("SELECT"):
+                    selects.append(statement)
         floor = await player_rating_floor(session, "tester")
     await engine.dispose()
     return floor
@@ -97,3 +103,17 @@ async def test_the_floor_never_drops_below_the_lowest_bound() -> None:
         _game(1, time_class="rapid", rating=150, played_at=datetime(2025, 1, 1, tzinfo=UTC)),
     ])
     assert floor == 100
+
+
+@pytest.mark.asyncio
+async def test_rating_floor_batches_the_time_classes_and_breaks_played_at_ties() -> None:
+    played_at = datetime(2026, 11, 1, tzinfo=UTC)
+    queries = []
+    floor = await _floor([
+        _game(1, time_class="blitz", rating=1500, played_at=played_at),
+        _game(2, time_class="blitz", rating=800, played_at=played_at),
+        _game(3, time_class="blitz", rating=None, played_at=played_at),
+        _game(4, time_class="rapid", rating=1400, played_at=played_at),
+    ], selects=queries)
+    assert floor == 600
+    assert len(queries) == 1

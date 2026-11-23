@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 
 import { getAnnotationAppearance } from '@/components/ui/annotation-icon'
 import {
@@ -39,8 +39,6 @@ export function EvalGraph({
   annotations: ReplayMoveAnnotation[]
   fenHistory: string[]
 }) {
-  // The graph plots the loaded game, so a click jumps to that game's node.
-  const jumpToFen = useAppStore((state) => state.jumpToFen)
   const currentFen = useAppStore((state) => state.currentFen)
   const version = useEngineStore((state) => state.analysisVersion)
 
@@ -49,17 +47,16 @@ export function EvalGraph({
     const evaluations = fenHistory.map((fen) => cpFor(fen, analysisByFen))
     const laid = layoutEvalPoints({ evaluations, width: WIDTH, height: HEIGHT })
 
-    const marks = annotations
-      .filter((annotation) => annotation.label != null && MARKED.has(annotation.label))
-      .map((annotation) => {
-        // A move's mark belongs on the position it produced, which is the ply
-        // after the parent — index `ply` in the FEN history.
-        const point = laid.find((candidate) => candidate.index === annotation.ply)
-        return point ? { annotation, point } : null
-      })
-      .filter((mark): mark is { annotation: ReplayMoveAnnotation; point: (typeof laid)[number] } =>
-        Boolean(mark),
-      )
+    // A move's mark belongs on the position it produced, which is the ply
+    // after the parent: index `ply` in the FEN history. Points are looked up
+    // through a map; a `find` per marked move scanned the whole game each time.
+    const pointByIndex = new Map(laid.map((point) => [point.index, point]))
+    const marks: { annotation: ReplayMoveAnnotation; point: (typeof laid)[number] }[] = []
+    for (const annotation of annotations) {
+      if (annotation.label == null || !MARKED.has(annotation.label)) continue
+      const point = pointByIndex.get(annotation.ply)
+      if (point) marks.push({ annotation, point })
+    }
 
     return {
       points: laid,
@@ -123,19 +120,46 @@ export function EvalGraph({
         ))}
       </svg>
 
-      {/* One button per position, laid over the curve — keyboard reachable and
-          far easier to hit than the 2px-wide slice each ply occupies. */}
-      <div className="eval-graph__hits">
-        {fenHistory.map((fen, index) => (
-          <button
-            aria-label={index === 0 ? 'Starting position' : `Move ${Math.ceil(index / 2)}`}
-            className={`eval-graph__hit${index === currentIndex ? ' eval-graph__hit--active' : ''}`}
-            key={`${fen}-${index}`}
-            onClick={() => jumpToFen(fen)}
-            type="button"
-          />
-        ))}
-      </div>
+      <HitTargets currentIndex={currentIndex} fenHistory={fenHistory} />
     </div>
   )
 }
+
+/**
+ * One button per position, laid over the curve: keyboard reachable and far
+ * easier to hit than the 2px-wide slice each ply occupies.
+ *
+ * Memoised on the game and the cursor, so the few hundred buttons of a long
+ * game are not rebuilt each time the curve gains a point while a review runs.
+ * One handler on the row reads the position off the button pressed, instead of
+ * a closure per button. A click reaches it from the keyboard too: Enter and
+ * Space on a button fire `click`.
+ */
+const HitTargets = memo(function HitTargets({
+  currentIndex,
+  fenHistory,
+}: {
+  currentIndex: number
+  fenHistory: string[]
+}) {
+  function jump(event: React.MouseEvent<HTMLDivElement>) {
+    const button = (event.target as HTMLElement).closest<HTMLElement>('[data-ply]')
+    const fen = button ? fenHistory[Number(button.dataset.ply)] : undefined
+    // The graph plots the loaded game, so a click jumps to that game's node.
+    if (fen) useAppStore.getState().jumpToFen(fen)
+  }
+
+  return (
+    <div className="eval-graph__hits" onClick={jump}>
+      {fenHistory.map((fen, index) => (
+        <button
+          aria-label={index === 0 ? 'Starting position' : `Move ${Math.ceil(index / 2)}`}
+          className={`eval-graph__hit${index === currentIndex ? ' eval-graph__hit--active' : ''}`}
+          data-ply={index}
+          key={`${fen}-${index}`}
+          type="button"
+        />
+      ))}
+    </div>
+  )
+})

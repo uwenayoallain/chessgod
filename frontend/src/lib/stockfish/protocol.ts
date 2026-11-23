@@ -12,6 +12,11 @@ export type EngineWorkerCommand =
       fen: string
       depth: number
       multiPV: number
+      /**
+       * Stop at this many milliseconds even if `depth` is not reached. The
+       * search then ends the way a finished one does, with a `bestmove`.
+       */
+      movetime?: number
     }
   | {
       type: 'stop'

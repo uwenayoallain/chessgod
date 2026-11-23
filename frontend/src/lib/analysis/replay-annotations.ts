@@ -1,9 +1,11 @@
 import { Chess } from 'chess.js'
+import { memoize } from '@/lib/memo'
 import { scoreToWhitePerspective } from '@/lib/stockfish/eval'
 import { getTerminalOutcome } from '@/lib/stockfish/legal-analysis'
 import type { UCIInfo } from '@/lib/stockfish/uci'
 
-import { DECISIVE_CP } from './review-depth'
+import { MAX_PAIR_DEPTH_GAP, reviewLineOf } from './analysis-cache'
+import { DECISIVE_CP, MIN_TRUSTED_DEPTH } from './review-depth'
 
 type ReplayMove = {
   ply: number
@@ -16,6 +18,8 @@ type CachedEngineAnalysis = {
   bestMove: string | null
   depth: number
   lines: UCIInfo[]
+  /** The review-depth line a deeper board search displaced (analysis-cache.ts). */
+  reviewLine?: UCIInfo
 }
 
 export type ReplayMoveAnnotation = {
@@ -70,20 +74,63 @@ export function classifyCpLoss(cpLoss: number): MoveQualityLabel {
   return 'Blunder'
 }
 
-function getTopLine(analysis?: CachedEngineAnalysis) {
+/** The deepest trusted rank-one line, whatever it was searched for. */
+function trustedTopLine(analysis?: CachedEngineAnalysis) {
   // Live iterations are useful while exploring, but too shallow to grade a
   // historical decision. Use the actual rank-one depth, not a cache label.
-  return analysis?.lines.find((line) => line.multipv === 1 && line.depth >= 18) ?? null
+  return (
+    analysis?.lines.find((line) => line.multipv === 1 && line.depth >= MIN_TRUSTED_DEPTH) ?? null
+  )
+}
+
+/**
+ * The line a move is graded from: the review-depth search when the position
+ * has one, else its trusted rank-one line. A deeper look at the board keeps
+ * the review's search beside it rather than replacing it.
+ */
+function getTopLine(analysis?: CachedEngineAnalysis) {
+  return reviewLineOf(analysis) ?? trustedTopLine(analysis)
+}
+
+type GradingLines = { parent: UCIInfo | null; child: UCIInfo | null }
+
+/**
+ * The parent and child lines one move is graded from, searched to depths
+ * within `MAX_PAIR_DEPTH_GAP` of each other. An evaluation loss is the
+ * difference between two searches, so a parent at 30 against a child at 20
+ * charges the gap between the searches to the player. Both review lines are
+ * tried first, then both deepest lines, then the mixed pairs; with no pair
+ * close enough the child comes back null and the move stays ungraded.
+ */
+function gradingLines(
+  parent: CachedEngineAnalysis | undefined,
+  child: CachedEngineAnalysis | undefined,
+): GradingLines {
+  const parentReview = reviewLineOf(parent)
+  const parentTop = trustedTopLine(parent)
+  const childReview = reviewLineOf(child)
+  const childTop = trustedTopLine(child)
+  if (!childReview && !childTop) return { parent: parentReview ?? parentTop, child: null }
+  const pairs: Array<[UCIInfo | null, UCIInfo | null]> = [
+    [parentReview, childReview],
+    [parentTop, childTop],
+    [parentReview, childTop],
+    [parentTop, childReview],
+  ]
+  for (const [before, after] of pairs) {
+    if (before && after && Math.abs(before.depth - after.depth) <= MAX_PAIR_DEPTH_GAP) {
+      return { parent: before, child: after }
+    }
+  }
+  return { parent: parentReview ?? parentTop, child: null }
 }
 
 function getCpLoss(
   parentFen: string,
   childFen: string,
-  parent?: CachedEngineAnalysis,
-  child?: CachedEngineAnalysis,
+  parentTopLine: UCIInfo | null,
+  childTopLine: UCIInfo | null,
 ) {
-  const parentTopLine = getTopLine(parent)
-  const childTopLine = getTopLine(child)
   const terminal = getTerminalOutcome(childFen)
 
   if (!parentTopLine || (!childTopLine && !terminal)) {
@@ -138,6 +185,14 @@ const PIECE_VALUE: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0
  * looked at and so missed every sacrifice the engine declines.
  */
 export function isSacrifice(childFen: string, gainedByMove = 0): boolean {
+  return sacrificeOnBoard(childFen, String(gainedByMove))
+}
+
+// Both walks below load chess.js boards and list every capture, and a game
+// loaded cold grades all of its moves at once: ~317ms of a 170-ply game's
+// hydration, measured, for answers that depend only on the position and move.
+const sacrificeOnBoard = memoize((childFen: string, gained: string): boolean => {
+  const gainedByMove = Number(gained)
   let board: Chess
   try {
     board = new Chess(childFen.split(' ').length >= 6 ? childFen : `${childFen} 0 1`)
@@ -164,10 +219,10 @@ export function isSacrifice(childFen: string, gainedByMove = 0): boolean {
     if (loss >= 2) return true
   }
   return false
-}
+}, 2_048)
 
 /** The value of what a move captured, read from the position it was played in. */
-function capturedValue(parentFen: string, uci: string): number {
+const capturedValue = memoize((parentFen: string, uci: string): number => {
   try {
     const board = new Chess(parentFen.split(' ').length >= 6 ? parentFen : `${parentFen} 0 1`)
     const move = board.move({
@@ -179,7 +234,7 @@ function capturedValue(parentFen: string, uci: string): number {
   } catch {
     return 0
   }
-}
+}, 2_048)
 
 /**
  * Brilliant, the way Chess.com awards it: a piece sacrifice (see
@@ -190,15 +245,10 @@ function isBrilliantMove(
   move: ReplayMove,
   parentFen: string,
   childFen: string,
-  parentAnalysis?: CachedEngineAnalysis,
-  childAnalysis?: CachedEngineAnalysis,
+  { parent: parentTopLine, child: childTopLine }: GradingLines,
   cpLoss?: number | null,
 ): boolean {
-  if (!parentAnalysis?.bestMove) return false
   if (cpLoss == null || cpLoss > 30) return false
-
-  const parentTopLine = getTopLine(parentAnalysis)
-  const childTopLine = getTopLine(childAnalysis)
   if (!parentTopLine || !childTopLine) return false
 
   // Already winning outright: giving material back is not brilliance.
@@ -237,14 +287,10 @@ const WIN_LOST_CP = 150
 function isMissedWin(
   parentFen: string,
   childFen: string,
-  parentAnalysis?: CachedEngineAnalysis,
-  childAnalysis?: CachedEngineAnalysis,
+  { parent: parentTopLine, child: childTopLine }: GradingLines,
   cpLoss?: number | null,
 ): boolean {
   if (cpLoss == null || cpLoss <= 90) return false
-
-  const parentTopLine = getTopLine(parentAnalysis)
-  const childTopLine = getTopLine(childAnalysis)
   if (!parentTopLine || !childTopLine) return false
 
   const before = toMoverCp(parentTopLine.score, parentFen)
@@ -258,6 +304,8 @@ function isMissedWin(
 
 type MoveMeasurement = {
   cpLoss: number | null
+  /** The best move of the line this move was graded against. */
+  gradedBest: string | null
   matchesBest: boolean
   brilliant: boolean
   missedWin: boolean
@@ -289,22 +337,22 @@ function measureMove(
   const cached = byMove.get(key)
   if (cached) return cached
 
-  const measuredLoss = parentFen
-    ? getCpLoss(parentFen, move.fen, parentAnalysis, childAnalysis)
-    : null
-  const matchesBest = move.uci === getTopLine(parentAnalysis)?.pv[0]
+  const lines = gradingLines(parentAnalysis, childAnalysis)
+  const measuredLoss = parentFen ? getCpLoss(parentFen, move.fen, lines.parent, lines.child) : null
+  const gradedBest = lines.parent?.pv[0] ?? null
+  const matchesBest = move.uci === gradedBest
   // Re-searching a best move's child can change its score. That search
   // variation is not a mistake made by the player.
   const cpLoss = measuredLoss != null && matchesBest ? 0 : measuredLoss
   const measurement = {
     cpLoss,
+    gradedBest,
     matchesBest,
-    brilliant: parentFen
-      ? isBrilliantMove(move, parentFen, move.fen, parentAnalysis, childAnalysis, cpLoss)
-      : false,
-    missedWin: parentFen
-      ? isMissedWin(parentFen, move.fen, parentAnalysis, childAnalysis, cpLoss)
-      : false,
+    brilliant:
+      parentFen && parentAnalysis?.bestMove
+        ? isBrilliantMove(move, parentFen, move.fen, lines, cpLoss)
+        : false,
+    missedWin: parentFen ? isMissedWin(parentFen, move.fen, lines, cpLoss) : false,
   }
   byMove.set(key, measurement)
   return measurement
@@ -328,12 +376,15 @@ export function buildReplayMoveAnnotations({
     const parentFen = fenHistory[index]
     const parentAnalysis = parentFen ? analysisByFen[parentFen] : undefined
     const childAnalysis = analysisByFen[move.fen]
-    const { cpLoss, matchesBest, brilliant, missedWin } = measureMove(
+    const { cpLoss, gradedBest, matchesBest, brilliant, missedWin } = measureMove(
       parentFen,
       move,
       parentAnalysis,
       childAnalysis,
     )
+    // The best move of the search the move was graded against, so "Best was"
+    // never names the move of a deeper search the grade did not come from.
+    const bestMove = gradedBest ?? parentAnalysis?.bestMove ?? null
 
     const isBadMove = cpLoss !== null && cpLoss > 40
     const isExactBookMove = bookPlies.has(move.ply)
@@ -341,7 +392,7 @@ export function buildReplayMoveAnnotations({
 
     if (!isBadMove && stillInBook && isOpeningBookMove) {
       return {
-        bestMove: parentAnalysis?.bestMove ?? null,
+        bestMove,
         cpLoss,
         fen: move.fen,
         label: 'Book' as const,
@@ -355,7 +406,7 @@ export function buildReplayMoveAnnotations({
 
     if (brilliant) {
       return {
-        bestMove: parentAnalysis?.bestMove ?? null,
+        bestMove,
         cpLoss,
         fen: move.fen,
         label: 'Brilliant' as const,
@@ -367,7 +418,7 @@ export function buildReplayMoveAnnotations({
 
     if (parentAnalysis?.bestMove && matchesBest && cpLoss !== null) {
       return {
-        bestMove: parentAnalysis.bestMove,
+        bestMove,
         cpLoss,
         fen: move.fen,
         label: 'Best' as const,
@@ -378,7 +429,7 @@ export function buildReplayMoveAnnotations({
     }
 
     return {
-      bestMove: parentAnalysis?.bestMove ?? null,
+      bestMove,
       cpLoss,
       fen: move.fen,
       label: missedWin ? ('Missed Win' as const) : cpLoss == null ? null : classifyCpLoss(cpLoss),

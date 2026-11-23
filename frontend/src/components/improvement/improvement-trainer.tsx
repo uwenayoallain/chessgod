@@ -18,6 +18,7 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { getTrainingTimeClass, useImprovementPlan, type DrillCard } from '@/hooks/use-improvement'
 import { DrillContinuation } from '@/components/improvement/drill-continuation'
+import { hydrateEvaluationsForFens } from '@/lib/analysis/hydrate-evaluations'
 import { HintControl } from '@/components/training/hint-control'
 import { ExploreButton } from '@/components/ui/explore-button'
 import { useHint } from '@/hooks/use-hint'
@@ -118,14 +119,20 @@ function ScopedImprovementTrainer({
   const [selectedPattern, setSelectedPattern] = useState<string | null>(null)
   // The theme trained most recently today: recommended moves past it.
   const [trainedToday, setTrainedToday] = useState<string | null>(() => readTrainedToday())
-  const plan = useImprovementPlan({ username, color, timeClass, patternKey: selectedPattern })
+  const [sessionActive, setSessionActive] = useState(false)
+  const plan = useImprovementPlan({
+    username,
+    color,
+    timeClass,
+    patternKey: selectedPattern,
+    enabled: !sessionActive,
+  })
   const loadPosition = useAppStore((state) => state.loadPosition)
   const clearLoadedLine = useAppStore((state) => state.clearLoadedLine)
   const alignBoardToUserColor = useAppStore((state) => state.alignBoardToUserColor)
   const setDrillSolving = useAppStore((state) => state.setDrillSolving)
   const currentNodeId = useAppStore((state) => state.currentNodeId)
   const nodes = useAppStore((state) => state.nodes)
-  const [sessionActive, setSessionActive] = useState(false)
   // Each card's outcome as it resolves, and the finish screen once the set ends.
   const outcomes = useRef<Map<number, boolean>>(new Map())
   const [finished, setFinished] = useState<{ results: boolean[]; theme: string | null } | null>(
@@ -220,6 +227,19 @@ function ScopedImprovementTrainer({
     const nextIndex = index + 1
     loadCard(drills[nextIndex], nextIndex)
   }
+
+  // The stored lines for every position on offer (and each follow-up), loaded
+  // as soon as the set is known, so "What follows" needs no engine start. Keyed
+  // on the FENs themselves: a query refresh with the same cards asks nothing.
+  const drillFens = drills
+    .flatMap((drill) => (drill.follow_up ? [drill.fen, drill.follow_up.fen] : [drill.fen]))
+    .join('|')
+  useEffect(() => {
+    if (!drillFens) return
+    const controller = new AbortController()
+    void hydrateEvaluationsForFens(drillFens.split('|'), controller.signal)
+    return () => controller.abort()
+  }, [drillFens])
 
   // A card's first resolution is its outcome; a retry after a miss does not rewrite it.
   useEffect(() => {

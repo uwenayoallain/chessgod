@@ -1,18 +1,38 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from itertools import islice
 from typing import Annotated
 
 import chess
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, case, func, or_, select, tuple_
+from sqlalchemy import (
+    Integer,
+    all_,
+    and_,
+    any_,
+    case,
+    cast,
+    func,
+    literal,
+    literal_column,
+    null,
+    or_,
+    select,
+    tuple_,
+    union_all,
+)
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.database import get_db
+from app.database import _async_engine_for, get_db
 from app.engine_contract import (
     ENGINE_NAME,
     ENGINE_VERSION,
@@ -24,6 +44,7 @@ from app.models.game_position import GamePosition
 from app.models.analysis import AnalysisResult
 from app.models.position import Position
 from app.models.position_outcome import PositionOutcome
+from app.services import threats
 from app.services.cache import get_shared_cache
 from app.utils.fen import normalize_fen
 from app.services.game_scope import (
@@ -47,6 +68,7 @@ from app.schemas.game import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _COVERAGE_TTL_SECONDS = 300.0  # a progress label; imports clear it
 _RECENT_DECISION_OVERFETCH = 16
@@ -79,8 +101,18 @@ _POOL_TTL_SECONDS = 3600.0
 _POOL_REFILL_FACTOR = 4
 # How long a pool that came back short of work is kept before walking again.
 _POOL_SHORT_REST_SECONDS = 900.0
+# How long a pool stays readable at all. Past _POOL_TTL_SECONDS it is still
+# served, because each request re-checks its pairs' depths, and one walk
+# replaces it behind the request instead of in front of it.
+_POOL_KEEP_SECONDS = 86_400.0
 # How many already-read pairs a page read leaves out in SQL (see read_page_pairs).
 _SEEN_PAIRS_IN_SQL = 4000
+# The one walk in progress per pool, so a second request for the same scope
+# joins it instead of walking the library again beside it.
+_pool_flights: dict[str, asyncio.Task[list["_DecisionPairTarget"]]] = {}
+# How many Blunder Check and Punish candidates one read checks for stored
+# second and third lines (see trainer_multipv_fens).
+_TRAINER_BATCH = 200
 
 
 @dataclass(frozen=True)
@@ -119,7 +151,7 @@ def _board_phase(fen_column, ply_column, *, dialect: str):
     """The game phase of a decision, as SQL rather than as Python.
 
     `_analysis_phase` decides this in Python, but by then the candidate pool is
-    already chosen — and the pool is where the bias lives. Ordering a page by
+    already chosen, and the pool is where the bias lives. Ordering a page by
     ply and keeping the first N gives the opening and early middlegame of the
     newest game or two, so the phase rotation downstream has nothing to rotate
     to. Computing the phase in the query lets each phase be given its own share
@@ -146,16 +178,22 @@ def _board_phase(fen_column, ply_column, *, dialect: str):
     )
 
 
+@lru_cache(maxsize=32_768)
 def _is_storable_fen(fen: str) -> bool:
     """Whether the evaluations endpoint could store a search of this position.
 
     Mirrors the FEN half of AnalysisEvaluationItemIn.validate_chess_analysis: a
     four- or six-field FEN that parses but fails python-chess validity is
     rejected with 422, so offering it only burns an engine search plus two
-    uploads every batch forever — the queue re-offers a position until it is
+    uploads every batch forever: the queue re-offers a position until it is
     analysed, and one of these can never become analysed. Seen in the wild:
     stale castling rights (`kq` on a board whose king has left e8), which the
     engine searches happily and the validator refuses.
+
+    Remembered, because the answer for a FEN never changes and the queue asks
+    it of the same pool again and again: a request for a browser-sized batch
+    set up 25,000 boards to ask it, which was 2.4s of the 2.6s it took with
+    the pool already cached, all of it holding the event loop.
     """
     parts = fen.split()
     if len(fen) > 120 or len(parts) not in (4, 6):
@@ -165,6 +203,62 @@ def _is_storable_fen(fen: str) -> bool:
     except ValueError:
         return False
     return board.is_valid()
+
+
+def _dialect_name(session: AsyncSession) -> str:
+    return session.bind.dialect.name if session.bind is not None else "postgresql"
+
+
+def _member_of(column, values, *, dialect: str):
+    """`column` is one of `values`, as one array parameter on PostgreSQL.
+
+    An IN list is a bind parameter per value, so a statement's text changes
+    with the count and each count is parsed and planned as a statement nobody
+    has seen before. One array keeps the text the same whatever it holds.
+    Other dialects (the tests' SQLite) have no arrays and keep the list.
+    """
+
+    values = list(values)
+    if dialect == "postgresql":
+        return column == any_(literal(values, type_=PG_ARRAY(column.type)))
+    return column.in_(values)
+
+
+def _not_member_of(column, values, *, dialect: str):
+    """`column` is none of `values`; see `_member_of`."""
+
+    values = list(values)
+    if dialect == "postgresql":
+        return column != all_(literal(values, type_=PG_ARRAY(column.type)))
+    return column.not_in(values)
+
+
+def _pair_not_among(parent_column, child_column, pairs, *, dialect: str):
+    """`(parent, child)` is none of `pairs`, as an anti-join on PostgreSQL.
+
+    This was a row-wise NOT IN over up to 4,000 pairs: 8,000 bind parameters
+    and a filter the planner rebuilt for every count, measured at up to 116ms
+    of planning for a read that then ran in a few. Two arrays unnested side by
+    side are the same pairs behind one statement text and a hashed anti-join.
+    """
+
+    pairs = list(pairs)
+    if dialect == "postgresql":
+        seen = (
+            func.unnest(
+                literal([parent for parent, _ in pairs], type_=PG_ARRAY(parent_column.type)),
+                literal([child for _, child in pairs], type_=PG_ARRAY(child_column.type)),
+            )
+            .table_valued("parent_id", "child_id")
+            .render_derived(name="seen_pairs")
+        )
+        return ~(
+            select(literal_column("1"))
+            .select_from(seen)
+            .where(seen.c.parent_id == parent_column, seen.c.child_id == child_column)
+            .exists()
+        )
+    return tuple_(parent_column, child_column).not_in(pairs)
 
 
 def _pair_work(
@@ -181,8 +275,8 @@ def _pair_work(
     only be graded once both of its positions have been searched to a depth they
     share. The pair is brought to the deepest evidence either side already
     carries: a parent someone studied on the board at depth 30 is not re-run
-    shallower — a shallower result would be discarded by the browser's own
-    depth-max cache and the pair would stay ungradeable forever — the child is
+    shallower (a shallower result would be discarded by the browser's own
+    depth-max cache and the pair would stay ungradeable forever); the child is
     searched to depth 30 instead, which also makes the measurement better.
 
     `review_band` turns that round for a client with no such cache (the Node
@@ -201,7 +295,7 @@ def _pair_work(
     )
     # A finished game is exact rather than searched: it needs no work and
     # constrains no depth. A position the evaluations endpoint cannot store
-    # needs no search either — offering it burns an engine job every batch
+    # needs no search either: offering it burns an engine job every batch
     # while the pair stays ungradeable forever (see _is_storable_fen). The
     # storable side of a half-bad pair is still offered: its search stands on
     # its own in every other decision that reaches the position.
@@ -253,14 +347,14 @@ def _phase_balanced_pair_fens(
         phase_pairs.sort(key=lambda pair: len(work_for(pair)) or 3)
 
     # Past the opening, positions do not repeat, so there is no recurrence to
-    # order by — but there is the clock, which costs no engine time and turns
+    # order by, but there is the clock, which costs no engine time and turns
     # out to say a great deal. Measured over 210 decisions from this library,
     # searched at depth 22: moves played in under a second were wrong 8% of the
     # time, the broad middle 23-32%, and moves the player thought about for 15
     # seconds or more were wrong 53% of the time and lost 200cp or more 41% of
     # the time. That is the opposite of the usual assumption that rushed moves
     # are the blunders: a fast move is usually a forced or obvious one, while a
-    # long think marks a position the player found genuinely hard — which is
+    # long think marks a position the player found genuinely hard, which is
     # where they err, and exactly the decision worth a lesson. The tail samples
     # are small (17 long thinks, 25 sub-second), so this orders work rather than
     # discarding any: every decision is still crawled, the informative ones just
@@ -276,7 +370,7 @@ def _phase_balanced_pair_fens(
         )
 
     # The opening bucket keeps recency. It was ordered by recurrence for a
-    # while — how many of the player's decisions one search unlocks — which
+    # while (how many of the player's decisions one search unlocks), which
     # multiplied the *instances* a batch covered (+28 to +81 in one measurement)
     # while unlocking the same number of distinct decisions (+10 either way).
     # Instances are not lessons: the drill pipeline groups by position, so fifty
@@ -345,16 +439,6 @@ def build_game_filters(
     return filters
 
 
-def apply_position_join(stmt, fen: str | None):
-    if not fen:
-        return stmt
-    return (
-        stmt.join(GamePosition, GamePosition.game_id == Game.id)
-        .join(Position, Position.id == GamePosition.position_id)
-        .where(Position.fen == fen)
-    )
-
-
 @router.get("", response_model=GameListOut)
 async def list_games(
     username: str = Query(...),
@@ -376,45 +460,55 @@ async def list_games(
         opening_name=opening_name,
         eco=eco,
     )
+    if fen:
+        # The position is looked up once and each game is then asked whether
+        # it visits it. Joining game_positions and positions into the listing
+        # multiplied every game by its visits, so the page had to be grouped
+        # back down to games and the count taken over distinct ids: 186ms
+        # against 1.63ms for the same page.
+        position_id = await session.scalar(select(Position.id).where(Position.fen == fen))
+        if position_id is None:
+            return GameListOut(games=[], total=0, page=page, per_page=per_page)
+        filters.append(
+            select(GamePosition.id)
+            .where(GamePosition.game_id == Game.id, GamePosition.position_id == position_id)
+            .exists()
+        )
 
-    total_stmt = apply_position_join(
-        select(func.count(func.distinct(Game.id))).select_from(Game).where(*filters),
-        fen,
-    )
-    total = await session.scalar(total_stmt)
-    id_stmt = apply_position_join(
-        select(Game.id, Game.played_at)
-        .where(*filters)
-        .group_by(Game.id, Game.played_at)
-        .order_by(Game.played_at.desc(), Game.id.desc())
-        .offset((page - 1) * per_page)
-        .limit(per_page),
-        fen,
-    )
-    result = await session.execute(id_stmt)
-    game_ids = [row[0] for row in result.all()]
-    if not game_ids:
+    # One row per game already, so there is nothing to group or de-duplicate.
+    total = await session.scalar(select(func.count()).select_from(Game).where(*filters))
+    page_games = (
+        await session.execute(
+            select(Game)
+            .where(*filters)
+            .order_by(Game.played_at.desc(), Game.id.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+    ).scalars().all()
+    if not page_games:
         return GameListOut(games=[], total=total or 0, page=page, per_page=per_page)
 
-    games_result = await session.execute(select(Game).where(Game.id.in_(game_ids)))
-    games_by_id = {game.id: game for game in games_result.scalars().all()}
+    dialect = _dialect_name(session)
     analyzed_result = await session.execute(
-        select(GamePosition.game_id)
-        .join(AnalysisResult, AnalysisResult.position_id == GamePosition.position_id)
-        .where(
-            GamePosition.game_id.in_(game_ids),
-            AnalysisResult.engine == ENGINE_NAME,
-            AnalysisResult.engine_version == ENGINE_VERSION,
-            AnalysisResult.depth >= 20,
-            AnalysisResult.multipv_rank == 1,
+        select(Game.id).where(
+            _member_of(Game.id, [game.id for game in page_games], dialect=dialect),
+            select(GamePosition.id)
+            .join(AnalysisResult, AnalysisResult.position_id == GamePosition.position_id)
+            .where(
+                GamePosition.game_id == Game.id,
+                AnalysisResult.engine == ENGINE_NAME,
+                AnalysisResult.engine_version == ENGINE_VERSION,
+                AnalysisResult.depth >= 20,
+                AnalysisResult.multipv_rank == 1,
+            )
+            .exists(),
         )
-        .distinct()
     )
     analyzed_game_ids = set(analyzed_result.scalars().all())
     games = [
-        GameOut.model_validate(games_by_id[game_id]).model_copy(update={"has_analysis": game_id in analyzed_game_ids})
-        for game_id in game_ids
-        if game_id in games_by_id
+        GameOut.model_validate(game).model_copy(update={"has_analysis": game.id in analyzed_game_ids})
+        for game in page_games
     ]
     return GameListOut(games=games, total=total or 0, page=page, per_page=per_page)
 
@@ -430,16 +524,49 @@ async def game_stats(
     if time_filter is not None:
         filters.append(time_filter)
 
-    totals = await session.execute(
-        select(
-            func.count(Game.id),
-            func.sum(case((Game.user_result == "win", 1), else_=0)),
-            func.sum(case((Game.user_color == "white", 1), else_=0)),
-        ).where(*filters)
-    )
-    total_games, wins, _ = totals.one()
-    total_games = total_games or 0
-    wins = wins or 0
+    # One scan at the finest grain the answer needs, folded four ways here.
+    # The totals, the colours, the time classes and the openings were four
+    # scans of the same games (168ms together); a player has a few hundred
+    # (colour, time class, opening) groups, which is nothing to add up.
+    rows = (
+        await session.execute(
+            select(
+                Game.user_color,
+                Game.time_class,
+                Game.opening_name,
+                func.count(Game.id),
+                func.sum(case((Game.user_result == "win", 1), else_=0)),
+                func.sum(case((Game.user_result == "loss", 1), else_=0)),
+                func.sum(case((Game.user_result == "draw", 1), else_=0)),
+            )
+            .where(*filters)
+            .group_by(Game.user_color, Game.time_class, Game.opening_name)
+        )
+    ).all()
+
+    total_games = 0
+    total_wins = 0
+    color_totals = {"white": [0, 0, 0], "black": [0, 0, 0]}
+    class_totals: dict[str, list[int]] = {}
+    # Keyed on the stored name, so games with no opening stay one group of
+    # their own and are only labelled "Unknown" on the way out.
+    opening_totals: dict[str | None, int] = {}
+    for user_color, time_class_name, opening, games, wins, losses, draws in rows:
+        games, wins, losses, draws = int(games), int(wins or 0), int(losses or 0), int(draws or 0)
+        total_games += games
+        total_wins += wins
+        if user_color in color_totals:
+            by_result = color_totals[user_color]
+            by_result[0] += wins
+            by_result[1] += losses
+            by_result[2] += draws
+        by_class = class_totals.setdefault(time_class_name, [0, 0, 0, 0])
+        by_class[0] += games
+        by_class[1] += wins
+        by_class[2] += losses
+        by_class[3] += draws
+        opening_totals[opening] = opening_totals.get(opening, 0) + games
+
     if not total_games:
         return GameStatsOut(
             by_color={"white": ColorStats(), "black": ColorStats()},
@@ -447,66 +574,28 @@ async def game_stats(
             by_opening=[],
         )
 
-    color_rows = await session.execute(
-        select(
-            Game.user_color,
-            func.sum(case((Game.user_result == "win", 1), else_=0)),
-            func.sum(case((Game.user_result == "loss", 1), else_=0)),
-            func.sum(case((Game.user_result == "draw", 1), else_=0)),
-        )
-        .where(*filters)
-        .group_by(Game.user_color)
-    )
-    color_stats = {"white": ColorStats(), "black": ColorStats()}
-    for user_color, row_wins, losses, draws in color_rows.all():
-        if user_color in color_stats:
-            color_stats[user_color] = ColorStats(
-                wins=row_wins or 0,
-                losses=losses or 0,
-                draws=draws or 0,
-            )
-
-    by_time_class: dict[str, TimeClassStats] = {}
-    time_rows = await session.execute(
-        select(
-            Game.time_class,
-            func.count(Game.id),
-            func.sum(case((Game.user_result == "win", 1), else_=0)),
-            func.sum(case((Game.user_result == "loss", 1), else_=0)),
-            func.sum(case((Game.user_result == "draw", 1), else_=0)),
-        )
-        .where(*filters)
-        .group_by(Game.time_class)
-    )
-    for time_class_name, class_total, class_wins, class_losses, class_draws in time_rows.all():
-        class_wins = class_wins or 0
-        class_losses = class_losses or 0
-        class_draws = class_draws or 0
-        by_time_class[time_class_name] = TimeClassStats(
-            games=class_total,
-            wins=class_wins,
-            losses=class_losses,
-            draws=class_draws,
-            win_rate=round(class_wins / class_total, 4) if class_total else 0.0,
-        )
-
-    opening_rows = await session.execute(
-        select(func.coalesce(Game.opening_name, "Unknown"), func.count(Game.id))
-        .where(*filters)
-        .group_by(Game.opening_name)
-        .order_by(func.count(Game.id).desc())
-        .limit(10)
-    )
-
+    top_openings = sorted(
+        (("Unknown" if opening is None else opening, games) for opening, games in opening_totals.items()),
+        key=lambda item: (-item[1], item[0]),
+    )[:10]
     return GameStatsOut(
         total_games=total_games,
-        win_rate=round(wins / total_games, 4),
-        by_color=color_stats,
-        by_time_class=by_time_class,
-        by_opening=[
-            OpeningStat(opening_name=name, games=count)
-            for name, count in opening_rows.all()
-        ],
+        win_rate=round(total_wins / total_games, 4),
+        by_color={
+            color: ColorStats(wins=wins, losses=losses, draws=draws)
+            for color, (wins, losses, draws) in color_totals.items()
+        },
+        by_time_class={
+            name: TimeClassStats(
+                games=games,
+                wins=wins,
+                losses=losses,
+                draws=draws,
+                win_rate=round(wins / games, 4) if games else 0.0,
+            )
+            for name, (games, wins, losses, draws) in class_totals.items()
+        },
+        by_opening=[OpeningStat(opening_name=name, games=games) for name, games in top_openings],
     )
 
 
@@ -559,8 +648,8 @@ async def game_opening_groups(
     username: str = Query(...),
     color: str = Query("both", pattern="^(white|black|both)$"),
     time_class: str | None = None,
-    page: int = 1,
-    per_page: int = 20,
+    page: Annotated[int, Query(ge=1)] = 1,
+    per_page: Annotated[int, Query(ge=1, le=100)] = 20,
     session: AsyncSession = Depends(get_db),
 ) -> OpeningGroupListOut:
     filters = build_game_filters(username=username, color=color, time_class=time_class)
@@ -597,6 +686,7 @@ async def game_opening_groups(
             & (func.coalesce(Game.opening_name, "Unknown") == grouped_stmt.c.opening_label)
             & (Game.played_at == grouped_stmt.c.latest_played_at),
         )
+        .where(*filters)
         .group_by(
             grouped_stmt.c.eco,
             grouped_stmt.c.opening_label,
@@ -608,7 +698,7 @@ async def game_opening_groups(
         )
         # Frequency first, recency only as the tie-break. Ordered by recency the
         # list opened with whatever was played last, so a line played once sat
-        # above an opening played hundreds of times — and since the list is
+        # above an opening played hundreds of times, and since the list is
         # paginated, the openings that actually describe a player's repertoire
         # could be pages deep. One-game rows now fall to the end, where they
         # belong.
@@ -682,59 +772,82 @@ async def get_opening_preview(
     )
 
 
-@router.get("/unanalyzed-fens")
-@router.post("/unanalyzed-fens")
-async def unanalyzed_fens(
-    username: str = Query(...),
-    color: str = Query("both", pattern="^(white|black|both)$"),
-    time_class: str | None = None,
-    min_depth: Annotated[int, Query(ge=1, le=128)] = 18,
-    limit: Annotated[int, Query(ge=1, le=500)] = 500,
-    min_user_rating: Annotated[int | None, Query(ge=100, le=4000)] = None,
-    # Bring pairs to the review depth rather than to their deepest side; see
-    # `_pair_work`. Only for a client that stores a shallower search beside a
-    # deeper one, which the browser's depth-max cache does not.
-    shallow_pairs: bool = False,
-    session: AsyncSession = Depends(get_db),
-    exclusions: AnalysisQueueExclusions | None = None,
-) -> dict[str, object]:
-    review_band = shallow_pairs
-    if min_user_rating is None:
-        min_user_rating = await player_rating_floor(session, username)
-    excluded_fens = list(dict.fromkeys(
-        normalize_fen(fen) for fen in exclusions.exclude_fens
-    )) if exclusions else []
-    filters = [
-        Game.username == username,
-        user_rating_condition(Game, min_user_rating),
-        standard_rules_condition(Game),
-    ]
-    if color != "both":
-        filters.append(Game.user_color == color)
-    time_filter = time_class_condition(Game.time_class, time_class)
-    if time_filter is not None:
-        filters.append(time_filter)
+@dataclass(frozen=True)
+class _QueueScope:
+    """Whose queue this is and how it is filtered: what a pool is good for."""
 
-    played_by_user = (
-        select(GamePosition.id)
-        .join(Game, Game.id == GamePosition.game_id)
-        .where(GamePosition.position_id == Position.id, *filters)
-        .exists()
-    )
-    def is_resolved(position_id):
+    username: str
+    color: str
+    time_class: str | None
+    min_depth: int
+    min_user_rating: int
+    # Bring pairs to the review depth rather than to their deepest side.
+    review_band: bool
+    excluded_fens: tuple[str, ...]
+    # How many decision pairs a walk of the library aims to hold.
+    pair_target: int
+
+    def game_filters(self) -> list:
+        filters = [
+            Game.username == self.username,
+            user_rating_condition(Game, self.min_user_rating),
+            standard_rules_condition(Game),
+        ]
+        if self.color != "both":
+            filters.append(Game.user_color == self.color)
+        time_filter = time_class_condition(Game.time_class, self.time_class)
+        if time_filter is not None:
+            filters.append(time_filter)
+        return filters
+
+    def pool_base(self) -> str:
+        # The walk leaves the excluded positions out, so a pool is only good
+        # for the exclusions it was built under. The crawler's set changes only
+        # when a search times out, so it still reuses its pool batch after batch.
+        exclusion_digest = (
+            hashlib.sha1("\n".join(sorted(self.excluded_fens)).encode()).hexdigest()[:16]
+            if self.excluded_fens else "none"
+        )
+        # Under `queue-pool:v2:{username}:`, the prefix an import drops.
+        return (
+            f"queue-pool:v2:{self.username}:{self.color}:{self.time_class}:{self.min_depth}:"
+            f"{self.min_user_rating}:{self.pair_target}:{exclusion_digest}:"
+            f"{'band' if self.review_band else 'deep'}:dated"
+        )
+
+
+class _QueueReader:
+    """The analysis queue's reads for one scope, on one session.
+
+    A class rather than closures inside the endpoint so the walk of the
+    library can run on a session of its own, behind the request that asked for
+    it or shared by several of them (see `_pool_flight`).
+    """
+
+    def __init__(self, session: AsyncSession, scope: _QueueScope) -> None:
+        self.session = session
+        self.scope = scope
+        self.dialect = _dialect_name(session)
+        self.filters = scope.game_filters()
+        self.child_gp = aliased(GamePosition)
+        self.parent_gp = aliased(GamePosition)
+        self.child_position = aliased(Position)
+        self.parent_position = aliased(Position)
+
+    def is_resolved(self, position_id):
         return or_(
             select(AnalysisResult.id).where(
                 AnalysisResult.position_id == position_id,
                 AnalysisResult.engine == ENGINE_NAME,
                 AnalysisResult.engine_version == ENGINE_VERSION,
-                AnalysisResult.depth >= min_depth,
+                AnalysisResult.depth >= self.scope.min_depth,
                 AnalysisResult.multipv_rank == 1,
             ).exists(),
             select(PositionOutcome.position_id).where(PositionOutcome.position_id == position_id).exists(),
         )
 
-    def is_deep_outlier(position_id):
-        # A position searched deeper than the review band — someone studied it
+    def is_deep_outlier(self, position_id):
+        # A position searched deeper than the review band: someone studied it
         # on the board. Its partner cannot be differenced against it at the
         # review depth, so the pair is work even though both sides are
         # "analyzed". Crawled positions never hit this, so the extra pairs this
@@ -743,43 +856,46 @@ async def unanalyzed_fens(
             AnalysisResult.position_id == position_id,
             AnalysisResult.engine == ENGINE_NAME,
             AnalysisResult.engine_version == ENGINE_VERSION,
-            AnalysisResult.depth > min_depth + MAX_PAIR_DEPTH_GAP,
+            AnalysisResult.depth > self.scope.min_depth + MAX_PAIR_DEPTH_GAP,
             AnalysisResult.multipv_rank == 1,
         ).exists()
 
-    already_analyzed = is_resolved(Position.id)
-    resolved_positions = (
-        select(AnalysisResult.position_id)
-        .where(
-            AnalysisResult.engine == ENGINE_NAME,
-            AnalysisResult.engine_version == ENGINE_VERSION,
-            AnalysisResult.depth >= min_depth,
-            AnalysisResult.multipv_rank == 1,
-        )
-        .union(select(PositionOutcome.position_id))
-    )
+    async def coverage_counts(self) -> tuple[int, int]:
+        """How many of the player's positions there are, and how many are resolved.
 
-    # Coverage counts scan every game_position of the user (~seconds at millions
-    # of rows) and only exist for the progress label, so cache them briefly —
-    # the browser autopilot polls this endpoint every 30s.
-    cache = get_shared_cache()
-    cache_key = (
-        f"coverage:v3:{username}:{color}:{time_class}:{min_depth}:{min_user_rating}"
-    )
-    cache_key = await cache.versioned_key(cache_key)
-    cached_counts = await cache.get_json(cache_key)
-    if cached_counts is not None:
-        candidate_count, analyzed_count = int(cached_counts[0]), int(cached_counts[1])
-    else:
-        analyzed_positions = resolved_positions.cte("analyzed_positions")
+        The counts scan every game_position of the user (seconds at millions
+        of rows) and only exist for the progress label, so they are cached
+        briefly: the browser autopilot polls this endpoint every 30s.
+        """
+
+        scope = self.scope
+        cache = get_shared_cache()
+        cache_key = await cache.versioned_key(
+            f"coverage:v3:{scope.username}:{scope.color}:{scope.time_class}:"
+            f"{scope.min_depth}:{scope.min_user_rating}"
+        )
+        cached_counts = await cache.get_json(cache_key)
+        if cached_counts is not None:
+            return int(cached_counts[0]), int(cached_counts[1])
+        analyzed_positions = (
+            select(AnalysisResult.position_id)
+            .where(
+                AnalysisResult.engine == ENGINE_NAME,
+                AnalysisResult.engine_version == ENGINE_VERSION,
+                AnalysisResult.depth >= scope.min_depth,
+                AnalysisResult.multipv_rank == 1,
+            )
+            .union(select(PositionOutcome.position_id))
+            .cte("analyzed_positions")
+        )
         candidate_ids = (
             select(GamePosition.position_id)
             .join(Game, Game.id == GamePosition.game_id)
-            .where(*filters)
+            .where(*self.filters)
             .distinct()
             .subquery()
         )
-        count_row = await session.execute(
+        count_row = await self.session.execute(
             select(
                 func.count().label("candidate_count"),
                 func.count(analyzed_positions.c.position_id).label("analyzed_count"),
@@ -798,70 +914,57 @@ async def unanalyzed_fens(
             [candidate_count, analyzed_count],
             ttl_seconds=_COVERAGE_TTL_SECONDS,
         )
+        return candidate_count, analyzed_count
 
-    # Improvement analysis needs both sides of the user's decision before it can
-    # measure evaluation loss. Select those pairs as units, rotate across phases,
-    # and preserve recency within each phase. This prevents an analysis session
-    # from spending its first several batches deepening an already dominant
-    # opening sample while middlegames and endgames remain invisible.
-    child_gp = aliased(GamePosition)
-    parent_gp = aliased(GamePosition)
-    child_position = aliased(Position)
-    parent_position = aliased(Position)
-    parent_already_analyzed = is_resolved(parent_position.id)
-    child_already_analyzed = is_resolved(child_position.id)
-    recent_pair_target = max(
-        _MIN_RECENT_DECISIONS,
-        limit * _RECENT_DECISION_OVERFETCH,
-    )
-    recent_pairs: list[_DecisionPairTarget] = []
-    # Every (parent, child) the walk has read, kept or not. A decision counts
-    # once however many games it occurred in -- openings repeat, and counting
-    # instances filled the target with copies of the newest few pairs -- and a
-    # pair already judged is left out of every later read, which is what lets a
-    # page be re-read without handing back the rows it has already given.
-    # A dict for its order: the earliest pairs seen are the ones that recur.
-    seen_pairs: dict[tuple[int, int], None] = {}
-    # Sorting every decision in a large corpus made a 24-position request scan
-    # all 159k Saint_Uwe decisions. Walk already ordered game IDs in bounded
-    # chunks and stop as soon as there is enough phase-balanced work instead.
-    dialect = session.bind.dialect.name if session.bind is not None else "postgresql"
-
-    async def read_page_pairs(game_ids: list[int], phase, per_phase: int, remaining: int):
+    async def read_page_pairs(
+        self,
+        game_ids: list[int],
+        per_phase: int,
+        remaining: int,
+        *,
+        seen_pairs: dict[tuple[int, int], None],
+    ):
         """One read of a page: up to `per_phase` unseen decisions per phase."""
 
+        child_gp, parent_gp = self.child_gp, self.parent_gp
+        child_position, parent_position = self.child_position, self.parent_position
+        phase = _board_phase(parent_position.fen, child_gp.ply, dialect=self.dialect).label("phase")
         candidate_rank = func.row_number().over(
             partition_by=phase,
             order_by=(Game.played_at.desc(), Game.id.desc(), child_gp.ply.asc()),
         ).label("phase_rank")
         conditions = [
-            Game.id.in_(game_ids),
+            _member_of(Game.id, game_ids, dialect=self.dialect),
             child_gp.move_uci.is_not(None),
             or_(
                 and_(Game.user_color == "white", child_gp.ply % 2 == 1),
                 and_(Game.user_color == "black", child_gp.ply % 2 == 0),
             ),
             or_(
-                ~parent_already_analyzed,
-                ~child_already_analyzed,
-                is_deep_outlier(parent_position.id),
-                is_deep_outlier(child_position.id),
+                ~self.is_resolved(parent_position.id),
+                ~self.is_resolved(child_position.id),
+                self.is_deep_outlier(parent_position.id),
+                self.is_deep_outlier(child_position.id),
             ),
         ]
         if seen_pairs and _SEEN_PAIRS_IN_SQL:
-            # Bounded, because each pair is two bind parameters and asyncpg
-            # takes at most 32,767. Only an optimisation: a pair left out here
-            # is skipped in Python, and the doubling window still ends the page.
+            # A bounded batch of the earliest pairs seen, which are the ones
+            # that recur. Only an optimisation: a pair left out of it is
+            # skipped in Python, and the doubling window still ends the page.
             conditions.append(
-                tuple_(parent_position.id, child_position.id).not_in(
-                    list(islice(seen_pairs, _SEEN_PAIRS_IN_SQL))
+                _pair_not_among(
+                    parent_position.id,
+                    child_position.id,
+                    islice(seen_pairs, _SEEN_PAIRS_IN_SQL),
+                    dialect=self.dialect,
                 )
             )
         # Excluded in the walk, not after it: filtering a finished pool left a
         # small one empty whenever its newest pairs were the excluded ones.
-        if excluded_fens:
-            conditions.append(parent_position.fen.not_in(excluded_fens))
-            conditions.append(child_position.fen.not_in(excluded_fens))
+        if self.scope.excluded_fens:
+            excluded = self.scope.excluded_fens
+            conditions.append(_not_member_of(parent_position.fen, excluded, dialect=self.dialect))
+            conditions.append(_not_member_of(child_position.fen, excluded, dialect=self.dialect))
         candidates = (
             select(
                 parent_position.id.label("parent_id"),
@@ -887,7 +990,7 @@ async def unanalyzed_fens(
             .where(*conditions)
             .subquery()
         )
-        rows = await session.execute(
+        rows = await self.session.execute(
             select(
                 candidates.c.parent_id,
                 candidates.c.parent_fen,
@@ -902,7 +1005,77 @@ async def unanalyzed_fens(
         )
         return rows.all()
 
-    async def collect_pairs(*, target: int, era_filters: list) -> None:
+    async def load_depths(
+        self,
+        pairs: list[_DecisionPairTarget],
+    ) -> tuple[dict[int, int], set[int]]:
+        """Each position's depth on record, and which positions are finished games.
+
+        One read for both. They were two round trips for every page of the
+        walk and every request, and a finished game is just a position with no
+        depth: its row arrives here with a NULL one.
+        """
+
+        min_depth = self.scope.min_depth
+        position_ids = sorted({
+            position_id
+            for pair in pairs
+            for position_id in (pair.parent_position_id, pair.child_position_id)
+        })
+        # The deepest search on record per position, so a pair can be brought to a
+        # depth both sides share instead of differencing two different searches.
+        depth_by_position: dict[int, int] = {}
+        # Finished games are exact rather than searched: no work, no depth.
+        exact_position_ids: set[int] = set()
+        if not position_ids:
+            return depth_by_position, exact_position_ids
+        rows = await self.session.execute(
+            union_all(
+                select(AnalysisResult.position_id, AnalysisResult.depth).where(
+                    _member_of(AnalysisResult.position_id, position_ids, dialect=self.dialect),
+                    AnalysisResult.engine == ENGINE_NAME,
+                    AnalysisResult.engine_version == ENGINE_VERSION,
+                    AnalysisResult.depth >= min_depth,
+                    AnalysisResult.multipv_rank == 1,
+                ),
+                select(PositionOutcome.position_id, cast(null(), Integer)).where(
+                    _member_of(PositionOutcome.position_id, position_ids, dialect=self.dialect)
+                ),
+            )
+        )
+        in_band: dict[int, int] = {}
+        for position_id, depth in rows.all():
+            position_id = int(position_id)
+            if depth is None:
+                exact_position_ids.add(position_id)
+                continue
+            depth = int(depth)
+            depth_by_position[position_id] = max(depth_by_position.get(position_id, 0), depth)
+            if depth - min_depth <= MAX_PAIR_DEPTH_GAP:
+                in_band[position_id] = depth
+        # Graded at the review depth, a position with a row in the band is
+        # done there however deep its deepest row is.
+        if self.scope.review_band:
+            depth_by_position.update(in_band)
+        return depth_by_position, exact_position_ids
+
+    def pair_work(self, pair: _DecisionPairTarget, depth_by_position, exact_position_ids):
+        return _pair_work(
+            pair,
+            depth_by_position=depth_by_position,
+            exact_position_ids=exact_position_ids,
+            min_depth=self.scope.min_depth,
+            review_band=self.scope.review_band,
+        )
+
+    async def collect_pairs(
+        self,
+        *,
+        target: int,
+        era_filters: list,
+        recent_pairs: list[_DecisionPairTarget],
+        seen_pairs: dict[tuple[int, int], None],
+    ) -> None:
         """Walk games newest-first inside one era, adding the work they need."""
 
         game_cursor: tuple[datetime, int] | None = None
@@ -915,29 +1088,29 @@ async def unanalyzed_fens(
         # little work, so start small and double until the page earns its size.
         chunk = _GAME_CHUNK_START
         while True:
-            page_query = select(Game.id, Game.played_at).where(*filters, *era_filters)
+            page_query = select(Game.id, Game.played_at).where(*self.filters, *era_filters)
             if game_cursor is not None:
                 cursor_time, cursor_id = game_cursor
                 page_query = page_query.where(or_(
                     Game.played_at < cursor_time,
                     and_(Game.played_at == cursor_time, Game.id < cursor_id),
                 ))
-            game_page = (await session.execute(
+            game_page = (await self.session.execute(
                 page_query.order_by(Game.played_at.desc(), Game.id.desc()).limit(chunk)
             )).all()
             if not game_page:
                 break
             game_ids = [int(game_id) for game_id, _ in game_page]
             game_cursor = (game_page[-1].played_at, int(game_page[-1].id))
-            # Give each phase its own share of the page instead of taking the
-            # first N rows in ply order, which is the opening and early
-            # middlegame of the newest game or two. Measured before this: with
-            # 26,663 endgame decisions still needing work — 17% of everything
-            # outstanding — a 24-position batch surfaced one. A phase with
-            # nothing to offer simply contributes nothing; the others keep their
-            # shares, and `_phase_balanced_pair_fens` still does the final
-            # rotation over whatever arrives.
-            phase = _board_phase(parent_position.fen, child_gp.ply, dialect=dialect).label("phase")
+            # Each phase gets its own share of the page instead of the first N
+            # rows in ply order, which is the opening and early middlegame of
+            # the newest game or two. Measured before this: with 26,663 endgame
+            # decisions still needing work, 17% of everything outstanding, a
+            # 24-position batch surfaced one. A phase with nothing to offer
+            # simply contributes nothing; the others keep their shares, and
+            # `_phase_balanced_pair_fens` still does the final rotation over
+            # whatever arrives.
+            #
             # A page is read until it stops yielding, not once. Rows the walk
             # cannot use -- an already-comparable deep pair, or a decision
             # already taken from a newer game -- still occupy their phase's
@@ -959,7 +1132,9 @@ async def unanalyzed_fens(
                 remaining = max(0, target - len(recent_pairs))
                 per_phase = max(1, -(-remaining // len(_PHASES))) * window
                 read_limit = remaining * window
-                page_rows = await read_page_pairs(game_ids, phase, per_phase, read_limit)
+                page_rows = await self.read_page_pairs(
+                    game_ids, per_phase, read_limit, seen_pairs=seen_pairs
+                )
                 page_pairs = [
                     _DecisionPairTarget(
                         parent_position_id=int(parent_id),
@@ -976,17 +1151,13 @@ async def unanalyzed_fens(
                 # even when its partner was searched just as deep; one small
                 # depth lookup per read drops those here, because every exact
                 # SQL form of the check measured slower (see CLAUDE.md).
-                page_depths, page_exact = await load_depths(page_pairs)
+                page_depths, page_exact = await self.load_depths(page_pairs)
                 for pair in page_pairs:
                     key = (pair.parent_position_id, pair.child_position_id)
                     if key in seen_pairs:
                         continue
                     seen_pairs[key] = None
-                    if len(recent_pairs) < target and _pair_work(
-                        pair, depth_by_position=page_depths,
-                        exact_position_ids=page_exact, min_depth=min_depth,
-                        review_band=review_band,
-                    ):
+                    if len(recent_pairs) < target and self.pair_work(pair, page_depths, page_exact):
                         recent_pairs.append(pair)
                 if len(recent_pairs) >= target:
                     break
@@ -1005,20 +1176,38 @@ async def unanalyzed_fens(
             # has to cover more ground.
             chunk = min(chunk * 2, _GAME_CHUNK_MAX)
 
-    # Rotate across eras of the player's history, not only the newest games.
-    # A pure newest-first walk buries the rest of the library: measured after a
-    # crawl session, the current month held 379 distinct covered decisions
-    # against 19-42 for every earlier month. That skew is not just unfair to old
-    # games — it makes the library untestable, because scoring the drill ranking
-    # (and every "is this pattern getting better?" trend) compares an older
-    # window against a recent one, and the older window stays empty forever.
-    # The newest era is still walked first and keeps whatever the others cannot
-    # fill, so recent play is not starved either.
-    async def build_pool() -> list[_DecisionPairTarget]:
-        recent_pairs.clear()
-        seen_pairs.clear()
-        bounds = (await session.execute(
-            select(func.min(Game.played_at), func.max(Game.played_at)).where(*filters)
+    async def build_pool(self) -> list[_DecisionPairTarget]:
+        """Walk the library for decision pairs with work, era by era.
+
+        Improvement analysis needs both sides of the user's decision before it
+        can measure evaluation loss, so pairs are selected as units.
+
+        The walk rotates across eras of the player's history, not only the
+        newest games. A pure newest-first walk buries the rest of the library:
+        measured after a crawl session, the current month held 379 distinct
+        covered decisions against 19-42 for every earlier month. That skew is
+        not just unfair to old games, it makes the library untestable, because
+        scoring the drill ranking (and every "is this pattern getting better?"
+        trend) compares an older window against a recent one, and the older
+        window stays empty forever. The newest era is still walked first and
+        keeps whatever the others cannot fill, so recent play is not starved.
+
+        Sorting every decision in a large corpus made a 24-position request
+        scan all 159k of one player's decisions, so each era walks already
+        ordered game ids in bounded chunks and stops as soon as it has enough.
+        """
+
+        pair_target = self.scope.pair_target
+        recent_pairs: list[_DecisionPairTarget] = []
+        # Every (parent, child) the walk has read, kept or not. A decision counts
+        # once however many games it occurred in -- openings repeat, and counting
+        # instances filled the target with copies of the newest few pairs -- and a
+        # pair already judged is left out of every later read, which is what lets a
+        # page be re-read without handing back the rows it has already given.
+        # A dict for its order: the earliest pairs seen are the ones that recur.
+        seen_pairs: dict[tuple[int, int], None] = {}
+        bounds = (await self.session.execute(
+            select(func.min(Game.played_at), func.max(Game.played_at)).where(*self.filters)
         )).one()
         eras: list[list] = [[]]
         if bounds[0] is not None and bounds[1] is not None and bounds[1] > bounds[0]:
@@ -1030,68 +1219,131 @@ async def unanalyzed_fens(
                 else [Game.played_at >= edges[index], Game.played_at < edges[index + 1]]
                 for index in reversed(range(_HISTORY_ERAS))
             ]
-        era_share = max(1, recent_pair_target // len(eras))
+        era_share = max(1, pair_target // len(eras))
         for era_index, era_filters in enumerate(eras):
             # The last era may take whatever the earlier ones left unspent.
-            target = recent_pair_target if era_index == len(eras) - 1 else min(
-                recent_pair_target, len(recent_pairs) + era_share
+            target = pair_target if era_index == len(eras) - 1 else min(
+                pair_target, len(recent_pairs) + era_share
             )
             if len(recent_pairs) >= target:
                 continue
-            await collect_pairs(target=target, era_filters=era_filters)
-            if len(recent_pairs) >= recent_pair_target:
+            await self.collect_pairs(
+                target=target,
+                era_filters=era_filters,
+                recent_pairs=recent_pairs,
+                seen_pairs=seen_pairs,
+            )
+            if len(recent_pairs) >= pair_target:
                 break
-        return list(recent_pairs)
+        return recent_pairs
 
-    async def load_depths(
-        pairs: list[_DecisionPairTarget],
-    ) -> tuple[dict[int, int], set[int]]:
-        recent_position_ids = {
-            position_id
-            for pair in pairs
-            for position_id in (pair.parent_position_id, pair.child_position_id)
-        }
-        # The deepest search on record per position, so a pair can be brought to a
-        # depth both sides share instead of differencing two different searches.
-        depth_by_position: dict[int, int] = {}
-        # Finished games are exact rather than searched: no work, no depth.
-        exact_position_ids: set[int] = set()
-        if recent_position_ids:
-            depth_rows = await session.execute(
-                select(AnalysisResult.position_id, AnalysisResult.depth).where(
-                    AnalysisResult.position_id.in_(recent_position_ids),
-                    AnalysisResult.engine == ENGINE_NAME,
-                    AnalysisResult.engine_version == ENGINE_VERSION,
-                    AnalysisResult.depth >= min_depth,
-                    AnalysisResult.multipv_rank == 1,
-                )
-            )
-            in_band: dict[int, int] = {}
-            for position_id, depth in depth_rows.all():
-                position_id, depth = int(position_id), int(depth)
-                depth_by_position[position_id] = max(
-                    depth_by_position.get(position_id, 0), depth
-                )
-                if depth - min_depth <= MAX_PAIR_DEPTH_GAP:
-                    in_band[position_id] = depth
-            # Graded at the review depth, a position with a row in the band is
-            # done there however deep its deepest row is.
-            if review_band:
-                depth_by_position.update(in_band)
-            outcome_rows = await session.execute(
-                select(PositionOutcome.position_id).where(
-                    PositionOutcome.position_id.in_(recent_position_ids)
-                )
-            )
-            exact_position_ids = {int(value) for value in outcome_rows.scalars()}
-        return depth_by_position, exact_position_ids
 
-    # The walk above reads the whole library to find sparse middlegame work
-    # (~1.5-3s, and the crawler asks every batch), yet between batches the
-    # work barely changes: only the positions just searched drop off. So the
-    # pool is built once and reused; each request re-checks only its own
-    # positions' depths (one small query) and rebuilds when the pool runs low.
-    # Imports clear it (`invalidate_improvement_caches`).
+async def _store_pool(
+    pool_key: str, rebuilt_key: str, pairs: list[_DecisionPairTarget], *, pair_target: int,
+) -> None:
+    cache = get_shared_cache()
+    await cache.set_json(
+        pool_key,
+        {"built_at": time.time(), "pairs": [asdict(pair) for pair in pairs]},
+        ttl_seconds=_POOL_KEEP_SECONDS,
+    )
+    if len(pairs) < pair_target:
+        await cache.set_json(rebuilt_key, True, ttl_seconds=_POOL_SHORT_REST_SECONDS)
+
+
+def _pool_flight(
+    session: AsyncSession,
+    scope: _QueueScope,
+    pool_key: str,
+    rebuilt_key: str,
+    *,
+    observed_built_at: float | None = None,
+) -> asyncio.Task[list[_DecisionPairTarget]] | None:
+    """The one walk of this pool in progress, started here if there is none.
+
+    A walk reads the whole library: 2.5-3s on a quiet machine, 4.5-11.3s under
+    load, once 44.5s. Run inside the request, every request that found the
+    pool missing or short ran its own, side by side, and a crawler that gave
+    up waiting threw its walk away and began another on its next try. The walk
+    is now a task on a session of its own, keyed on the pool it fills: a
+    second request for the same scope joins it, and a request that goes away
+    leaves it running for the next one to find finished.
+
+    Returns None when the request's session has no engine to open another
+    session on, in which case the caller walks on its own session.
+    """
+
+    engine = _async_engine_for(session)
+    if engine is None:
+        return None
+    running = _pool_flights.get(pool_key)
+    if running is not None and not running.done():
+        return running
+
+    async def walk() -> list[_DecisionPairTarget]:
+        # Another flight may have finished since the caller read the cache.
+        current = await get_shared_cache().get_json(pool_key)
+        if current is not None and current["built_at"] != observed_built_at:
+            return [_DecisionPairTarget(**item) for item in current["pairs"]]
+        async with AsyncSession(bind=engine, expire_on_commit=False) as own:
+            built = await _QueueReader(own, scope).build_pool()
+        await _store_pool(pool_key, rebuilt_key, built, pair_target=scope.pair_target)
+        return built
+
+    def landed(task: asyncio.Task[list[_DecisionPairTarget]]) -> None:
+        if _pool_flights.get(pool_key) is task:
+            del _pool_flights[pool_key]
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning("Analysis queue pool walk for %s failed", scope.username, exc_info=error)
+
+    task = _pool_flights[pool_key] = asyncio.create_task(walk())
+    task.add_done_callback(landed)
+    return task
+
+
+@router.get("/unanalyzed-fens")
+@router.post("/unanalyzed-fens")
+async def unanalyzed_fens(
+    username: str = Query(...),
+    color: str = Query("both", pattern="^(white|black|both)$"),
+    time_class: str | None = None,
+    min_depth: Annotated[int, Query(ge=1, le=128)] = 18,
+    limit: Annotated[int, Query(ge=1, le=500)] = 500,
+    min_user_rating: Annotated[int | None, Query(ge=100, le=4000)] = None,
+    # Bring pairs to the review depth rather than to their deepest side; see
+    # `_pair_work`. Only for a client that stores a shallower search beside a
+    # deeper one, which the browser's depth-max cache does not.
+    shallow_pairs: bool = False,
+    session: AsyncSession = Depends(get_db),
+    exclusions: AnalysisQueueExclusions | None = None,
+) -> dict[str, object]:
+    if min_user_rating is None:
+        min_user_rating = await player_rating_floor(session, username)
+    excluded_fens = list(dict.fromkeys(
+        normalize_fen(fen) for fen in exclusions.exclude_fens
+    )) if exclusions else []
+    scope = _QueueScope(
+        username=username,
+        color=color,
+        time_class=time_class,
+        min_depth=min_depth,
+        min_user_rating=min_user_rating,
+        review_band=shallow_pairs,
+        excluded_fens=tuple(excluded_fens),
+        pair_target=max(_MIN_RECENT_DECISIONS, limit * _RECENT_DECISION_OVERFETCH),
+    )
+    reader = _QueueReader(session, scope)
+    filters = reader.filters
+    dialect = reader.dialect
+    cache = get_shared_cache()
+
+    candidate_count, analyzed_count = await reader.coverage_counts()
+
+    # The walk reads the whole library to find sparse middlegame work, and the
+    # crawler asks every batch, yet between batches the work barely changes:
+    # only the positions just searched drop off. So the pool is built once and
+    # reused; each request re-checks only its own positions' depths (one small
+    # query). Imports clear it (`invalidate_improvement_caches`).
     excluded = set(excluded_fens)
 
     def usable(pairs: list[_DecisionPairTarget]) -> list[_DecisionPairTarget]:
@@ -1100,51 +1352,48 @@ async def unanalyzed_fens(
             if pair.parent_fen not in excluded and pair.child_fen not in excluded
         ]
 
-    def with_work(pairs, depth_by_position, exact_position_ids) -> int:
-        return sum(
-            1 for pair in pairs
-            if _pair_work(
-                pair, depth_by_position=depth_by_position,
-                exact_position_ids=exact_position_ids, min_depth=min_depth,
-                review_band=review_band,
-            )
-        )
-
-    # The walk leaves the excluded positions out, so a pool is only good for
-    # the exclusions it was built under. The crawler's set changes only when a
-    # search times out, so it still reuses its pool batch after batch.
-    exclusion_digest = (
-        hashlib.sha1("\n".join(sorted(excluded)).encode()).hexdigest()[:16]
-        if excluded else "none"
-    )
-    pool_base = (
-        f"queue-pool:v2:{username}:{color}:{time_class}:{min_depth}:"
-        f"{min_user_rating}:{recent_pair_target}:{exclusion_digest}:"
-        f"{'band' if review_band else 'deep'}"
-    )
+    pool_base = scope.pool_base()
     pool_key = await cache.versioned_key(pool_base)
     # Under the pool's prefix, so an import drops it with the pool.
     rebuilt_key = await cache.versioned_key(f"{pool_base}:rebuilt")
     cached_pool = await cache.get_json(pool_key)
     pool: list[_DecisionPairTarget] | None = None
+    # Serve an old or depleted pool while rebuilding if it still has work.
+    observed_built_at: float | None = None
+    refresh_built_at: float | None = None
     if cached_pool is not None:
-        pool = usable([_DecisionPairTarget(**item) for item in cached_pool])
-        depth_by_position, exact_position_ids = await load_depths(pool)
-        short = with_work(pool, depth_by_position, exact_position_ids) < limit * _POOL_REFILL_FACTOR
-        # A short pool is rebuilt at most once a rest. With the library nearly
-        # all analysed every pool is short, and rebuilding on each request
-        # walked the whole library for nothing new: 145 of 166 crawler
-        # requests in a day took 3-10s (three ~90s), against ~63ms reused.
-        if short and await cache.get_json(rebuilt_key) is None:
-            pool = None
-    if pool is None:
-        built = await build_pool()
-        await cache.set_json(
-            pool_key, [asdict(pair) for pair in built], ttl_seconds=_POOL_TTL_SECONDS
+        pool = usable([_DecisionPairTarget(**item) for item in cached_pool["pairs"]])
+        depth_by_position, exact_position_ids = await reader.load_depths(pool)
+        with_work = sum(
+            1 for pair in pool if reader.pair_work(pair, depth_by_position, exact_position_ids)
         )
-        await cache.set_json(rebuilt_key, True, ttl_seconds=_POOL_SHORT_REST_SECONDS)
+        observed_built_at = float(cached_pool["built_at"])
+        aged = time.time() - observed_built_at > _POOL_TTL_SECONDS
+        # A walk that returned short is repeated at most once a rest. With the library
+        # nearly all analysed every pool is short, and walking on each request
+        # read the whole library for nothing new: 145 of 166 crawler requests
+        # in a day took 3-10s (three ~90s), against ~63ms reused.
+        short = with_work < limit * _POOL_REFILL_FACTOR
+        filled_target = len(cached_pool["pairs"]) >= scope.pair_target
+        if aged or (short and (filled_target or await cache.get_json(rebuilt_key) is None)):
+            if with_work and _async_engine_for(session) is not None:
+                refresh_built_at = observed_built_at
+            else:
+                pool = None
+    if pool is None:
+        flight = _pool_flight(session, scope, pool_key, rebuilt_key, observed_built_at=observed_built_at)
+        if flight is None:
+            built = await reader.build_pool()
+            await _store_pool(pool_key, rebuilt_key, built, pair_target=scope.pair_target)
+        else:
+            # This request has only read so far. Its transaction is closed
+            # rather than left open and idle for as long as the walk takes.
+            await session.commit()
+            # Shielded: a client that stops waiting must not take the walk,
+            # and everyone else waiting on it, down with it.
+            built = await asyncio.shield(flight)
         pool = usable(built)
-        depth_by_position, exact_position_ids = await load_depths(pool)
+        depth_by_position, exact_position_ids = await reader.load_depths(pool)
     # The newest sitting goes first. The Habits coach reads the newest game
     # with most of its moves judged, and an era rotation hands a fresh game
     # the same share as any old one: measured the day it was built, the three
@@ -1169,15 +1418,11 @@ async def unanalyzed_fens(
             )).scalars()
         ]
         if fresh_ids:
-            phase = _board_phase(parent_position.fen, child_gp.ply, dialect=dialect).label("phase")
-            # The pool's walk marks every pair it read as seen, the newest
-            # games' included; this read must not skip them for that.
-            walked = dict(seen_pairs)
-            seen_pairs.clear()
-            try:
-                fresh_rows = await read_page_pairs(fresh_ids, phase, limit, limit * len(_PHASES))
-            finally:
-                seen_pairs.update(walked)
+            # Nothing counts as seen here: the pool's walk has read the newest
+            # games' pairs too, and this read must not skip them for that.
+            fresh_rows = await reader.read_page_pairs(
+                fresh_ids, limit, limit * len(_PHASES), seen_pairs={}
+            )
             fresh_pairs = [
                 _DecisionPairTarget(
                     parent_position_id=int(parent_id), parent_fen=parent_fen,
@@ -1185,13 +1430,9 @@ async def unanalyzed_fens(
                 )
                 for parent_id, parent_fen, child_id, child_fen, ply, _think, _phase in fresh_rows
             ]
-            fresh_depths, fresh_exact = await load_depths(fresh_pairs)
+            fresh_depths, fresh_exact = await reader.load_depths(fresh_pairs)
             for pair in sorted(fresh_pairs, key=lambda item: item.ply):
-                work = _pair_work(
-                    pair, depth_by_position=fresh_depths,
-                    exact_position_ids=fresh_exact, min_depth=min_depth,
-                    review_band=review_band,
-                )
+                work = reader.pair_work(pair, fresh_depths, fresh_exact)
                 if not work or len(fresh_fens) + len(work) > limit:
                     continue
                 for fen, depth in work:
@@ -1199,6 +1440,10 @@ async def unanalyzed_fens(
                         fresh_fens.append(fen)
                         fresh_targets[fen] = depth
 
+    # Rotate across phases and preserve recency within each. This keeps an
+    # analysis session from spending its first several batches deepening an
+    # already dominant opening sample while middlegames and endgames remain
+    # invisible.
     recent_pairs = [
         pair for pair in pool
         if pair.parent_fen not in fresh_targets and pair.child_fen not in fresh_targets
@@ -1209,7 +1454,7 @@ async def unanalyzed_fens(
         exact_position_ids=exact_position_ids,
         min_depth=min_depth,
         limit=limit - len(fresh_fens),
-        review_band=review_band,
+        review_band=scope.review_band,
     )
     fens = fresh_fens + fens
     depth_targets = {**depth_targets, **fresh_targets}
@@ -1219,6 +1464,10 @@ async def unanalyzed_fens(
     # Malformed/partial historical rows cannot form a pair. Preserve the old
     # recent-position walk as a bounded fallback before global recurrence.
     already_selected = set(fens)
+    already_analyzed = reader.is_resolved(Position.id)
+    not_excluded = (
+        [_not_member_of(Position.fen, excluded_fens, dialect=dialect)] if excluded_fens else []
+    )
 
     async def fill_from(query, order_by) -> None:
         """Read a fallback in growing windows until the batch is full or it runs out.
@@ -1252,22 +1501,32 @@ async def unanalyzed_fens(
             .select_from(Game)
             .join(GamePosition, GamePosition.game_id == Game.id)
             .join(Position, Position.id == GamePosition.position_id)
-            .where(*filters, ~already_analyzed, Position.fen.not_in(excluded_fens)),
+            .where(*filters, ~already_analyzed, *not_excluded),
             (Game.played_at.desc(), Game.id.desc(), GamePosition.ply.asc()),
         )
 
     if len(fens) < limit:
         # Once the recent frontier is covered, recurrent positions keep older
         # history moving forward efficiently via positions.total_games.
+        played_by_user = (
+            select(GamePosition.id)
+            .join(Game, Game.id == GamePosition.game_id)
+            .where(GamePosition.position_id == Position.id, *filters)
+            .exists()
+        )
         await fill_from(
             select(Position.fen).where(
                 Position.total_games >= 1,
                 played_by_user,
                 ~already_analyzed,
-                Position.fen.not_in(excluded_fens),
+                *not_excluded,
             ),
             (Position.total_games.desc(), Position.id.asc()),
         )
+    # Started last, once this request has read everything it needs, so the
+    # walk does not compete with the answer it is following.
+    if refresh_built_at is not None:
+        _pool_flight(session, scope, pool_key, rebuilt_key, observed_built_at=refresh_built_at)
     return {
         "fens": fens,
         # Per-FEN search depth. A decision is graded by differencing its two
@@ -1287,6 +1546,83 @@ async def unanalyzed_fens(
         "selection_strategy": "phase_balanced_recent_decision_pairs_then_recurrence",
         "selected_decision_pairs_by_phase": selected_pair_counts,
     }
+
+
+def _has_a_second_line(fen: str) -> bool:
+    """Whether a MultiPV search of this position can return more than one line.
+
+    A position with one legal move never gets a second line however it is
+    searched, so it could never leave the list and would be offered forever.
+    """
+
+    try:
+        board = chess.Board(fen if len(fen.split()) == 6 else f"{fen} 0 1")
+    except ValueError:
+        return False
+    return board.legal_moves.count() >= 2
+
+
+@router.get("/trainer-multipv-fens")
+async def trainer_multipv_fens(
+    username: str = Query(..., min_length=1, max_length=64),
+    limit: int = Query(default=6, ge=1, le=25),
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    """Trainer positions still waiting for their second and third engine lines.
+
+    Blunder Check and Punish it ask for one move and are judged against the
+    engine's first line, because the library crawl searches one line a
+    position. A position with a second move nearly as good needs its other
+    lines stored before that move can be accepted. This lists the newest
+    trainer positions with no line past the first at the review depth, for
+    the crawler to search at MultiPV 3 once the main queue is caught up; a
+    position leaves the list when the upload stores a second line for it.
+    """
+
+    floor = await player_rating_floor(session, username)
+    blunders = await threats.cached_threat_pool(session, username, min_user_rating=floor)
+    gifts = await threats.cached_punish_pool(session, username, min_user_rating=floor)
+    # Both pools arrive newest first; merged, the newest games of either lead.
+    candidates: list[tuple[int, str]] = []
+    listed: set[int] = set()
+    for item in sorted(blunders + gifts, key=lambda item: item["played_at"], reverse=True):
+        position_id = int(item["position_id"])
+        if position_id in listed:
+            continue
+        listed.add(position_id)
+        candidates.append((position_id, item["fen"]))
+
+    dialect = _dialect_name(session)
+    fens: list[str] = []
+    for start in range(0, len(candidates), _TRAINER_BATCH):
+        batch = candidates[start:start + _TRAINER_BATCH]
+        enriched = set(
+            (
+                await session.execute(
+                    select(AnalysisResult.position_id)
+                    .where(
+                        _member_of(
+                            AnalysisResult.position_id,
+                            [position_id for position_id, _ in batch],
+                            dialect=dialect,
+                        ),
+                        AnalysisResult.engine == ENGINE_NAME,
+                        AnalysisResult.engine_version == ENGINE_VERSION,
+                        AnalysisResult.multipv_rank >= 2,
+                        AnalysisResult.depth >= GAME_REVIEW_DEPTH - MAX_PAIR_DEPTH_GAP,
+                        AnalysisResult.depth <= GAME_REVIEW_DEPTH + MAX_PAIR_DEPTH_GAP,
+                    )
+                    .distinct()
+                )
+            ).scalars()
+        )
+        for position_id, fen in batch:
+            if position_id in enriched or not _is_storable_fen(fen) or not _has_a_second_line(fen):
+                continue
+            fens.append(fen)
+            if len(fens) >= limit:
+                return {"fens": fens, "review_depth": GAME_REVIEW_DEPTH}
+    return {"fens": fens, "review_depth": GAME_REVIEW_DEPTH}
 
 
 @router.get("/{game_id}", response_model=GameOut)

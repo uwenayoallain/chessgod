@@ -12,7 +12,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from app.engine_contract import GAME_REVIEW_DEPTH, MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
+from app.engine_contract import (
+    GAME_REVIEW_DEPTH,
+    MAX_PAIR_DEPTH_GAP,
+    MIN_TRUSTED_DEPTH,
+    PREVIOUS_REVIEW_DEPTH,
+)
 
 REVIEW_DEPTH_TS = Path(__file__).parents[2] / "frontend/src/lib/analysis/review-depth.ts"
 
@@ -30,6 +35,13 @@ def test_the_review_depth_clears_the_trust_floor() -> None:
     # the learning surfaces are only just willing to read, and leave no room for
     # the pairing tolerance.
     assert GAME_REVIEW_DEPTH >= MIN_TRUSTED_DEPTH + MAX_PAIR_DEPTH_GAP
+
+
+def test_the_review_depth_still_pairs_with_rows_stored_at_the_previous_depth() -> None:
+    # The library was filled at 22 before the review depth moved. A new row at
+    # the current depth must still be differenced against one of those, or
+    # moving the number would have made every stored evaluation ungradeable.
+    assert abs(PREVIOUS_REVIEW_DEPTH - GAME_REVIEW_DEPTH) <= MAX_PAIR_DEPTH_GAP
 
 
 def test_frontend_and_backend_cap_centipawns_at_the_same_scale() -> None:

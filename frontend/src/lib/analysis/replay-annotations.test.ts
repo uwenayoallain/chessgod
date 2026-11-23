@@ -475,3 +475,95 @@ describe('isSacrifice', () => {
     expect(isSacrifice('not a fen')).toBe(false)
   })
 })
+
+describe('depth pairing', () => {
+  const PARENT = 'r1bq1rk1/ppp2ppp/5n2/8/8/3B1N2/PPP2PPP/R2Q1RK1 w - - 0 1'
+  const board = new Chess(PARENT)
+  board.move({ from: 'f3', to: 'e5' })
+  const CHILD = board.fen()
+
+  function grade(
+    parent: { depth: number; value: number; review?: { depth: number; value: number } },
+    child: { depth: number; value: number; review?: { depth: number; value: number } },
+  ) {
+    return buildReplayMoveAnnotations({
+      analysisByFen: {
+        [PARENT]: {
+          bestMove: 'd1d8',
+          depth: parent.depth,
+          lines: [line({ depth: parent.depth, pv: ['d1d8'], value: parent.value })],
+          ...(parent.review
+            ? {
+                reviewLine: line({
+                  depth: parent.review.depth,
+                  pv: ['c1g5'],
+                  value: parent.review.value,
+                }),
+              }
+            : {}),
+        },
+        [CHILD]: {
+          bestMove: 'f6g4',
+          depth: child.depth,
+          lines: [line({ depth: child.depth, pv: ['f6g4'], value: child.value })],
+          ...(child.review
+            ? {
+                reviewLine: line({
+                  depth: child.review.depth,
+                  pv: ['f6g4'],
+                  value: child.review.value,
+                }),
+              }
+            : {}),
+        },
+      },
+      bookPlies: new Set(),
+      fenHistory: [PARENT, CHILD],
+      replayMoves: [{ ply: 21, san: 'Ne5', uci: 'f3e5', fen: CHILD }],
+    })[0]
+  }
+
+  it('leaves a move ungraded when its two searches are too far apart in depth', () => {
+    // A parent studied on the board at 30 against a child the review left at
+    // 20 is the gap between two searches, not a mistake by the player.
+    const graded = grade({ depth: 30, value: 150 }, { depth: 20, value: 300 })
+    expect(graded.cpLoss).toBeNull()
+    expect(graded.label).toBeNull()
+  })
+
+  it('grades within the gap as before', () => {
+    expect(grade({ depth: 22, value: 150 }, { depth: 20, value: 300 }).label).toBe('Blunder')
+  })
+
+  it('grades from the review line a deeper board search displaced', () => {
+    // The board's depth-30 search reads +3.0 for the parent; the review's own
+    // depth-20 search reads +0.5. The child was reviewed at 20 (-0.5 for Black).
+    const graded = grade(
+      { depth: 30, value: 300, review: { depth: 20, value: 50 } },
+      { depth: 20, value: 0 },
+    )
+    expect(graded.cpLoss).toBe(50)
+    expect(graded.label).toBe('Inaccuracy')
+    // "Best was" names the graded search's move, not the board search's.
+    expect(graded.bestMove).toBe('c1g5')
+  })
+
+  it('pairs two deep searches with each other rather than with a review line', () => {
+    const graded = grade(
+      { depth: 30, value: 120, review: { depth: 20, value: 50 } },
+      { depth: 29, value: -100 },
+    )
+    expect(graded.cpLoss).toBe(20)
+    expect(graded.bestMove).toBe('d1d8')
+  })
+})
+
+describe('isSacrifice memo', () => {
+  it('answers the same position and capture the same way every time', () => {
+    const fen = 'rnbqkb1r/ppp2ppp/3p1n2/4N3/3PP3/8/PPP2PPP/RNBQKB1R b KQkq - 0 1'
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(isSacrifice(fen)).toBe(true)
+      expect(isSacrifice(fen, 1)).toBe(false)
+    }
+  })
+})

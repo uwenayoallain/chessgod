@@ -12,7 +12,6 @@ from app.database import get_db
 from app.models.game import Game
 from app.models.sparring import SparringGame
 from app.models.training import TrainingEvent
-from app.services.cache import get_shared_cache
 from app.services.game_scope import player_rating_floor
 from app.services.improvement import DEFAULT_TIME_CLASS
 from app.services.repertoire_builder import build_repertoire
@@ -51,14 +50,9 @@ async def _repertoire(session: AsyncSession, username: str, color: str, time_cla
             db, username=username, color=color, time_class=time_class, min_user_rating=floor,
         )
 
-    if fresh:
-        value = await compute(session)
-        cache = get_shared_cache()
-        await cache.set_json(await cache.versioned_key(fresh_base), value, ttl_seconds=1_800.0)
-        await cache.set_json(last_key.lower(), value, ttl_seconds=86_400.0)
-        return value
     return await stale_while_revalidate(
         session, fresh_base=fresh_base, last_key=last_key, compute=compute, fresh_ttl=1_800.0,
+        force_refresh=fresh,
     )
 
 
@@ -92,6 +86,11 @@ class LineReviewIn(BaseModel):
 
 @router.post("/repertoire/review")
 async def review_line(payload: LineReviewIn, session: AsyncSession = Depends(get_db)) -> dict:
+    if payload.request_id is not None:
+        recorded = await training.line_review_receipt(session, payload.username, payload.request_id)
+        if recorded is not None:
+            current = await training.profile(session, payload.username, tz=payload.tz, goal=payload.goal)
+            return {**recorded, **_progress_delta(current, current), "profile": current}
     repertoire = await _repertoire(session, payload.username, payload.color, payload.time_class)
     line = next((item for item in repertoire["lines"] if item["id"] == payload.line_id), None)
     if line is None:
@@ -276,23 +275,6 @@ async def check_repertoire(payload: RepertoireCheckIn, session: AsyncSession = D
     return result
 
 
-
-async def _threat_pool(session: AsyncSession, username: str) -> list[dict]:
-    floor = await player_rating_floor(session, username)
-    suffix = f"{username}:{floor}"
-
-    async def compute(db: AsyncSession) -> list[dict]:
-        return await threats.build_pool(db, username=username, min_user_rating=floor)
-
-    return await stale_while_revalidate(
-        session,
-        fresh_base=f"improvement:threats:{suffix}",
-        last_key=f"training:threatslast:{suffix}",
-        compute=compute,
-        fresh_ttl=1_800.0,
-    )
-
-
 @router.get("/threats")
 async def threat_set(
     username: str = Query(..., min_length=1, max_length=64),
@@ -300,7 +282,7 @@ async def threat_set(
     session: AsyncSession = Depends(get_db),
 ) -> dict:
     """Ten of the player's own big mistakes: missed ones that are due first, then new ones."""
-    pool = await _threat_pool(session, username)
+    pool = await threats.cached_threat_pool(session, username)
     answers = (
         await session.execute(
             select(TrainingEvent.kind, TrainingEvent.detail, TrainingEvent.created_at).where(
@@ -362,8 +344,8 @@ async def threats_overview(
     session: AsyncSession = Depends(get_db),
 ) -> dict:
     """What Blunder Check has to ask, how much of it has been asked, and what it cannot see yet."""
-    threat_pool = await _threat_pool(session, username)
-    punish_pool = await _punish_pool(session, username)
+    threat_pool = await threats.cached_threat_pool(session, username)
+    punish_pool = await threats.cached_punish_pool(session, username)
     rows = (
         await session.execute(
             select(TrainingEvent.kind, TrainingEvent.detail).where(
@@ -407,21 +389,26 @@ async def threat_hint(
     session: AsyncSession = Depends(get_db),
 ) -> dict:
     """A hint toward the punishment: its kind, then the piece. Never the move."""
-    pool = await _threat_pool(session, username)
+    pool = await threats.cached_threat_pool(session, username)
     item = next((entry for entry in pool if entry["position_id"] == position_id), None)
     if item is None:
         raise HTTPException(status_code=409, detail="That position is no longer in your Blunder Check.")
     return threats.hint_for(item["fen"], item["reply_uci"], level)
 
 
+@router.post("/threats/attempt", include_in_schema=False)
 @router.post("/threats/answer")
 async def threat_answer(payload: ThreatAnswerIn, session: AsyncSession = Depends(get_db)) -> dict:
     """Score one answer against the pool, never against what the page says."""
-    pool = await _threat_pool(session, payload.username)
+    pool = await threats.cached_threat_pool(session, payload.username)
     item = next((entry for entry in pool if entry["position_id"] == payload.position_id), None)
     if item is None:
         raise HTTPException(status_code=409, detail="That position is no longer in your Blunder Check.")
-    correct = payload.played_uci == item["reply_uci"]
+    accepted_san = await training.accepted_trainer_move_san(
+        session, position_id=payload.position_id, fen=item["fen"],
+        expected_uci=item["reply_uci"], expected_san=item["reply_san"], played_uci=payload.played_uci,
+    )
+    correct = accepted_san is not None
     before = await training.profile(session, payload.username, tz=payload.tz, goal=payload.goal)
     xp = await training.award(
         session, payload.username, "threat_spotted" if correct else "threat_missed",
@@ -433,8 +420,8 @@ async def threat_answer(payload: ThreatAnswerIn, session: AsyncSession = Depends
     after = await training.profile(session, payload.username, tz=payload.tz, goal=payload.goal)
     return {
         "correct": correct,
-        "reply_uci": item["reply_uci"],
-        "reply_san": item["reply_san"],
+        "reply_uci": payload.played_uci if correct else item["reply_uci"],
+        "reply_san": accepted_san if correct else item["reply_san"],
         "better_san": item["better_san"],
         "xp_gained": xp,
         **_progress_delta(before, after),
@@ -556,24 +543,6 @@ async def week_scoresheet(
     )
 
 
-async def _punish_pool(session: AsyncSession, username: str) -> list[dict]:
-    floor = await player_rating_floor(session, username)
-    suffix = f"{username}:{floor}"
-
-    async def compute(db: AsyncSession) -> list[dict]:
-        return await threats.build_punish_pool(db, username=username, min_user_rating=floor)
-
-    return await stale_while_revalidate(
-        session,
-        # Under the threats prefix, so every upload and import that drops
-        # Blunder Check's pool drops this one too.
-        fresh_base=f"improvement:threats:{suffix}:punish",
-        last_key=f"training:punishlast:{suffix}",
-        compute=compute,
-        fresh_ttl=1_800.0,
-    )
-
-
 @router.get("/punish")
 async def punish_set(
     username: str = Query(..., min_length=1, max_length=64),
@@ -581,7 +550,7 @@ async def punish_set(
     session: AsyncSession = Depends(get_db),
 ) -> dict:
     """Ten opponents' mistakes the player handed back: missed ones that are due first."""
-    pool = await _punish_pool(session, username)
+    pool = await threats.cached_punish_pool(session, username)
     answers = (
         await session.execute(
             select(TrainingEvent.kind, TrainingEvent.detail, TrainingEvent.created_at).where(
@@ -617,21 +586,26 @@ async def punish_hint(
     session: AsyncSession = Depends(get_db),
 ) -> dict:
     """A hint toward the move that keeps the gift: its kind, then the piece."""
-    pool = await _punish_pool(session, username)
+    pool = await threats.cached_punish_pool(session, username)
     item = next((entry for entry in pool if entry["position_id"] == position_id), None)
     if item is None:
         raise HTTPException(status_code=409, detail="That position is no longer in Punish it.")
     return threats.hint_for(item["fen"], item["answer_uci"], level)
 
 
+@router.post("/punish/attempt", include_in_schema=False)
 @router.post("/punish/answer")
 async def punish_answer(payload: ThreatAnswerIn, session: AsyncSession = Depends(get_db)) -> dict:
     """Score one Punish it answer against the pool."""
-    pool = await _punish_pool(session, payload.username)
+    pool = await threats.cached_punish_pool(session, payload.username)
     item = next((entry for entry in pool if entry["position_id"] == payload.position_id), None)
     if item is None:
         raise HTTPException(status_code=409, detail="That position is no longer in Punish it.")
-    correct = payload.played_uci == item["answer_uci"]
+    accepted_san = await training.accepted_trainer_move_san(
+        session, position_id=payload.position_id, fen=item["fen"],
+        expected_uci=item["answer_uci"], expected_san=item["answer_san"], played_uci=payload.played_uci,
+    )
+    correct = accepted_san is not None
     before = await training.profile(session, payload.username, tz=payload.tz, goal=payload.goal)
     xp = await training.award(
         session, payload.username, "punish_found" if correct else "punish_missed",
@@ -643,8 +617,8 @@ async def punish_answer(payload: ThreatAnswerIn, session: AsyncSession = Depends
     after = await training.profile(session, payload.username, tz=payload.tz, goal=payload.goal)
     return {
         "correct": correct,
-        "answer_uci": item["answer_uci"],
-        "answer_san": item["answer_san"],
+        "answer_uci": payload.played_uci if correct else item["answer_uci"],
+        "answer_san": accepted_san if correct else item["answer_san"],
         "your_move_san": item["your_move_san"],
         "xp_gained": xp,
         **_progress_delta(before, after),

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -15,11 +18,41 @@ from app.services.observability import get_observability_store
 from app.services.theory import load_lichess_sync_state
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# How long the readiness probe waits for the database. Under the container
+# healthcheck's own 3s client timeout, so a slow database is reported as "not
+# ready" by this endpoint rather than as a probe that never answered.
+READY_TIMEOUT_SECONDS = 2.0
 
 
 @router.get("/health")
 async def health_check() -> dict[str, str]:
+    """Liveness: the process is up and answering. Touches nothing else."""
     return {"status": "ok"}
+
+
+@router.get("/health/ready")
+async def readiness_check(session: AsyncSession = Depends(get_db)) -> dict[str, str]:
+    """Readiness: the process can reach its database, within a bounded wait.
+
+    `/health` answers as soon as uvicorn is listening, which says nothing
+    about Postgres: with the database gone every real request fails while the
+    container still reads as healthy, and the crawler started against it has
+    nowhere to fetch work from or store it. One `SELECT 1` answers that. It is
+    bounded, because an unreachable database does not refuse a connection so
+    much as never answer one, and 503 is the only useful thing to say then.
+    """
+
+    try:
+        await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=READY_TIMEOUT_SECONDS)
+    except Exception as error:  # a timeout, a refused connection, an exhausted pool
+        logger.warning("Readiness probe could not reach the database: %s", error or type(error).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable",
+        ) from error
+    return {"status": "ok", "database": "ok"}
 
 
 def _admin_auth_error() -> HTTPException:

@@ -4,7 +4,7 @@ After the opening, 54% of the winning chances the first real player gave away
 came down to a capture or a check: one they allowed (the opponent's best reply
 captured, 31%, or checked, 10%) or one they missed (13%). The drills ask for
 the right move *before* the mistake; this asks for the opponent's punishment
-*after* it — "you played Nf6; what do they play now?" — because spotting the
+*after* it ("you played Nf6, what do they play now?") because spotting the
 reply is exactly the scan that would have stopped the move: look at every
 capture and check the opponent has before letting go of the piece.
 
@@ -20,10 +20,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import chess
-from sqlalchemy import Integer, Text, bindparam, text
+from sqlalchemy import DateTime, Integer, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine_contract import MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
+from app.models.identity import Username
+from app.services.game_scope import player_rating_floor
+from app.services.swr import stale_while_revalidate
 
 MIN_LOSS_CP = 150
 # A move in a position already this lost punishes nothing the player can fix.
@@ -103,7 +106,15 @@ JOIN positions p ON p.id = r.child_id
 WHERE r.eval_rank = 1
   AND r.better_uci <> r.move_uci
   AND (r.reply_san LIKE '%x%' OR r.reply_san LIKE '%+%' OR r.reply_san LIKE '%#%')
-ORDER BY r.played_at DESC
+  -- The loss and the position before it, from the player's side, judged on the
+  -- one measurement chosen above. Filtering here instead of in Python keeps
+  -- ~18k rows of small and lost-position drops off the wire.
+  AND (CASE WHEN r.user_color = 'white' THEN 1 ELSE -1 END) * r.before_cp >= :min_before_cp
+  AND (CASE WHEN r.user_color = 'white' THEN 1 ELSE -1 END) * (r.before_cp - r.after_cp) >= :min_loss_cp
+  -- A recapture after the player's own capture (see `is_recapture`).
+  AND NOT (COALESCE(r.move_san, '') LIKE '%x%'
+           AND COALESCE(substr(r.reply_uci, 3, 2), '') = substr(r.move_uci, 3, 2))
+ORDER BY r.played_at DESC, r.game_id DESC, r.ply
 """
 
 
@@ -130,7 +141,7 @@ _PIECE_NAMES = {
 def hint_for(fen: str, uci: str, level: int) -> dict:
     """A graded hint toward the answer that never names the move.
 
-    Level 1 is the kind of move (a capture, a check, a knight move) — the scan
+    Level 1 is the kind of move (a capture, a check, a knight move), the scan
     these trainers teach; level 2 the piece and the square it stands on, which
     the page highlights. Mirrors `describeHint` in the frontend, for the two
     trainers whose answer stays on the server until the move is played.
@@ -167,52 +178,54 @@ def kind_of(reply_san: str) -> str:
 
 async def build_pool(session: AsyncSession, *, username: str, min_user_rating: int) -> list[dict]:
     """Every qualifying mistake, most recent first, one per position."""
-    rows = (
-        await session.execute(
-            text(_POOL_SQL).bindparams(bindparam("max_pair_depth_gap", type_=Integer()),
-                                       bindparam("username", type_=Text())),
-            {
-                "username": username,
-                "min_user_rating": min_user_rating,
-                "min_depth": MIN_TRUSTED_DEPTH,
-                "max_pair_depth_gap": MAX_PAIR_DEPTH_GAP,
-            },
-        )
-    ).mappings().all()
+    rows = await session.stream(
+        text(_POOL_SQL).bindparams(
+            bindparam("max_pair_depth_gap", type_=Integer()),
+            bindparam("min_before_cp", type_=Integer()),
+            bindparam("min_loss_cp", type_=Integer()),
+            bindparam("username", type_=Username),
+        ),
+        {
+            "username": username,
+            "min_user_rating": min_user_rating,
+            "min_depth": MIN_TRUSTED_DEPTH,
+            "max_pair_depth_gap": MAX_PAIR_DEPTH_GAP,
+            "min_before_cp": MIN_BEFORE_CP,
+            "min_loss_cp": MIN_LOSS_CP,
+        },
+    )
     pool: list[dict] = []
     seen: set[int] = set()
-    for row in rows:
-        sign = 1 if row["user_color"] == "white" else -1
-        before = sign * int(row["before_cp"])
-        loss = before - sign * int(row["after_cp"])
-        if loss < MIN_LOSS_CP or before < MIN_BEFORE_CP or row["child_id"] in seen:
-            continue
-        if not _legal(row["fen"], row["reply_uci"]):
-            continue
-        # A recapture after the player's own capture is a trade gone wrong, and
-        # obvious to spot: it teaches nothing about scanning. A capture of the
-        # piece just moved (Qd4?? Nxd4) is the scan itself and stays.
-        if is_recapture(row["move_uci"], row["move_san"], row["reply_uci"]):
-            continue
-        seen.add(row["child_id"])
-        played_at = row["played_at"]
-        pool.append({
-            "position_id": int(row["child_id"]),
-            "fen": row["fen"],
-            "player_color": row["user_color"],
-            "ply": int(row["ply"]),
-            "your_move_uci": row["move_uci"],
-            "your_move_san": row["move_san"] or row["move_uci"],
-            "better_san": row["better_san"],
-            "reply_uci": row["reply_uci"],
-            "reply_san": row["reply_san"],
-            "kind": kind_of(row["reply_san"]),
-            "loss_cp": int(loss),
-            "game_url": row["chesscom_game_url"],
-            "played_at": played_at.isoformat() if hasattr(played_at, "isoformat") else str(played_at),
-        })
-        if len(pool) >= POOL_LIMIT:
-            break
+    try:
+        async for row in rows.mappings().yield_per(128):
+            sign = 1 if row["user_color"] == "white" else -1
+            before = sign * int(row["before_cp"])
+            loss = before - sign * int(row["after_cp"])
+            if row["child_id"] in seen:
+                continue
+            if not _legal(row["fen"], row["reply_uci"]):
+                continue
+            seen.add(row["child_id"])
+            played_at = row["played_at"]
+            pool.append({
+                "position_id": int(row["child_id"]),
+                "fen": row["fen"],
+                "player_color": row["user_color"],
+                "ply": int(row["ply"]),
+                "your_move_uci": row["move_uci"],
+                "your_move_san": row["move_san"] or row["move_uci"],
+                "better_san": row["better_san"],
+                "reply_uci": row["reply_uci"],
+                "reply_san": row["reply_san"],
+                "kind": kind_of(row["reply_san"]),
+                "loss_cp": int(loss),
+                "game_url": row["chesscom_game_url"],
+                "played_at": played_at.isoformat() if hasattr(played_at, "isoformat") else str(played_at),
+            })
+            if len(pool) >= POOL_LIMIT:
+                break
+    finally:
+        await rows.close()
     return pool
 
 
@@ -260,7 +273,7 @@ def pick_set(pool: list[dict], *, exclude: set[int], due: list[int] | None = Non
     set, the rest new. The rest is taken newest game first, one position per
     game per pass, so a set reads across the player's games rather than three
     positions from one afternoon, and a position shown but not answered
-    (`served`) waits its turn again — the old random draw from the newest half
+    (`served`) waits its turn again. The old random draw from the newest half
     of the pool asked much the same positions every day and never reached an
     older game. `seed` is accepted for old callers and ignored.
     """
@@ -300,15 +313,27 @@ def served_recently(sets: list[tuple[list[int], datetime]], now: datetime) -> se
     return shown
 
 
+# Each ply counts once in the denominator, and once in the numerator when its
+# position has a trusted rank-1 evaluation or is a finished position (mate or
+# stalemate, which has nothing to search). Joining `analysis_results` directly
+# multiplied every ply by its stored depths and MultiPV lines, inflating the
+# total and reading well-analysed games as under 60%.
 _RECENT_UNANALYSED_SQL = """
 SELECT count(*) FROM (
-    SELECT g.id, count(gp.position_id) AS total, count(DISTINCT ar.position_id) AS done
+    SELECT g.id,
+           count(*) AS total,
+           sum(CASE WHEN EXISTS (
+                        SELECT 1 FROM analysis_results ar
+                        WHERE ar.position_id = gp.position_id
+                          AND ar.multipv_rank = 1
+                          AND ar.engine = 'stockfish-19' AND ar.engine_version = '19'
+                          AND ar.depth >= :min_depth
+                          AND (ar.eval_cp IS NOT NULL OR ar.eval_mate IS NOT NULL)
+                    )
+                    OR EXISTS (SELECT 1 FROM position_outcomes po WHERE po.position_id = gp.position_id)
+                    THEN 1 ELSE 0 END) AS done
     FROM games g
     JOIN game_positions gp ON gp.game_id = g.id
-    LEFT JOIN analysis_results ar
-      ON ar.position_id = gp.position_id
-     AND ar.engine = 'stockfish-19' AND ar.engine_version = '19'
-     AND ar.depth >= :min_depth
     WHERE g.username = :username
       AND g.time_class IN ('rapid', 'blitz')
       AND g.played_at >= :since
@@ -328,7 +353,9 @@ async def recent_unanalysed_games(session: AsyncSession, *, username: str, now: 
     """
     now = now or datetime.now(UTC)
     return int((await session.execute(
-        text(_RECENT_UNANALYSED_SQL),
+        text(_RECENT_UNANALYSED_SQL).bindparams(
+            bindparam("username", type_=Username), bindparam("since", type_=DateTime(timezone=True)),
+        ),
         {"username": username, "min_depth": MIN_TRUSTED_DEPTH, "since": now - timedelta(days=days)},
     )).scalar_one() or 0)
 
@@ -413,56 +440,96 @@ JOIN positions p ON p.id = r.gift_id
 WHERE r.eval_rank = 1
   AND r.answer_uci <> r.your_uci
   AND (r.answer_san LIKE '%x%' OR r.answer_san LIKE '%+%' OR r.answer_san LIKE '%#%')
-ORDER BY r.played_at DESC
+  -- The gift, the position before it, and the hand-back, from the player's side.
+  AND (CASE WHEN r.user_color = 'white' THEN 1 ELSE -1 END) * r.before_cp <= :max_before_gift_cp
+  AND (CASE WHEN r.user_color = 'white' THEN 1 ELSE -1 END) * (r.gift_cp - r.before_cp) >= :min_gift_cp
+  AND (CASE WHEN r.user_color = 'white' THEN 1 ELSE -1 END) * (r.gift_cp - r.after_cp) >= :min_gift_cp
+ORDER BY r.played_at DESC, r.game_id DESC, r.ply
 """
 
 
 async def build_punish_pool(session: AsyncSession, *, username: str, min_user_rating: int) -> list[dict]:
     """Opponents' big mistakes the player handed straight back, most recent first."""
-    rows = (
-        await session.execute(
-            text(_PUNISH_SQL).bindparams(bindparam("max_pair_depth_gap", type_=Integer()),
-                                         bindparam("username", type_=Text())),
-            {
-                "username": username,
-                "min_user_rating": min_user_rating,
-                "min_depth": MIN_TRUSTED_DEPTH,
-                "max_pair_depth_gap": MAX_PAIR_DEPTH_GAP,
-                "opening_plies": PUNISH_OPENING_PLIES,
-            },
-        )
-    ).mappings().all()
+    rows = await session.stream(
+        text(_PUNISH_SQL).bindparams(
+            bindparam("max_pair_depth_gap", type_=Integer()),
+            bindparam("max_before_gift_cp", type_=Integer()),
+            bindparam("min_gift_cp", type_=Integer()),
+            bindparam("username", type_=Username),
+        ),
+        {
+            "username": username,
+            "min_user_rating": min_user_rating,
+            "min_depth": MIN_TRUSTED_DEPTH,
+            "max_pair_depth_gap": MAX_PAIR_DEPTH_GAP,
+            "opening_plies": PUNISH_OPENING_PLIES,
+            "max_before_gift_cp": MAX_BEFORE_GIFT_CP,
+            "min_gift_cp": MIN_GIFT_CP,
+        },
+    )
     pool: list[dict] = []
     seen: set[int] = set()
-    for row in rows:
-        sign = 1 if row["user_color"] == "white" else -1
-        before = sign * int(row["before_cp"])
-        gift = sign * int(row["gift_cp"])
-        after = sign * int(row["after_cp"])
-        if gift - before < MIN_GIFT_CP or before > MAX_BEFORE_GIFT_CP:
-            continue
-        # Handed back: the player's reply gave up the gift and then some.
-        if gift - after < MIN_GIFT_CP or row["gift_id"] in seen:
-            continue
-        if not _legal(row["fen"], row["answer_uci"]):
-            continue
-        seen.add(row["gift_id"])
-        played_at = row["played_at"]
-        pool.append({
-            "position_id": int(row["gift_id"]),
-            "fen": row["fen"],
-            "player_color": row["user_color"],
-            "ply": int(row["ply"]),
-            "their_move_uci": row["their_uci"],
-            "their_move_san": row["their_san"] or row["their_uci"],
-            "your_move_san": row["your_san"] or row["your_uci"],
-            "answer_uci": row["answer_uci"],
-            "answer_san": row["answer_san"],
-            "kind": kind_of(row["answer_san"]),
-            "gift_cp": int(gift - before),
-            "game_url": row["chesscom_game_url"],
-            "played_at": played_at.isoformat() if hasattr(played_at, "isoformat") else str(played_at),
-        })
-        if len(pool) >= POOL_LIMIT:
-            break
+    try:
+        async for row in rows.mappings().yield_per(128):
+            sign = 1 if row["user_color"] == "white" else -1
+            before = sign * int(row["before_cp"])
+            gift = sign * int(row["gift_cp"])
+            if row["gift_id"] in seen:
+                continue
+            if not _legal(row["fen"], row["answer_uci"]):
+                continue
+            seen.add(row["gift_id"])
+            played_at = row["played_at"]
+            pool.append({
+                "position_id": int(row["gift_id"]),
+                "fen": row["fen"],
+                "player_color": row["user_color"],
+                "ply": int(row["ply"]),
+                "their_move_uci": row["their_uci"],
+                "their_move_san": row["their_san"] or row["their_uci"],
+                "your_move_san": row["your_san"] or row["your_uci"],
+                "answer_uci": row["answer_uci"],
+                "answer_san": row["answer_san"],
+                "kind": kind_of(row["answer_san"]),
+                "gift_cp": int(gift - before),
+                "game_url": row["chesscom_game_url"],
+                "played_at": played_at.isoformat() if hasattr(played_at, "isoformat") else str(played_at),
+            })
+            if len(pool) >= POOL_LIMIT:
+                break
+    finally:
+        await rows.close()
     return pool
+
+
+async def cached_threat_pool(
+    session: AsyncSession, username: str, *, min_user_rating: int | None = None,
+) -> list[dict]:
+    return await _cached_pool(session, username, min_user_rating, punish=False)
+
+
+async def cached_punish_pool(
+    session: AsyncSession, username: str, *, min_user_rating: int | None = None,
+) -> list[dict]:
+    return await _cached_pool(session, username, min_user_rating, punish=True)
+
+
+async def _cached_pool(
+    session: AsyncSession, username: str, floor: int | None, *, punish: bool,
+) -> list[dict]:
+    if floor is None:
+        floor = await player_rating_floor(session, username)
+    suffix = f"{username}:{floor}"
+    build = build_punish_pool if punish else build_pool
+
+    async def compute(db: AsyncSession) -> list[dict]:
+        return await build(db, username=username, min_user_rating=floor)
+
+    # Both fresh entries share the prefix invalidated by uploads and imports.
+    return await stale_while_revalidate(
+        session,
+        fresh_base=f"improvement:threats:{suffix}:punish" if punish else f"improvement:threats:{suffix}",
+        last_key=f"training:punishlast:{suffix}" if punish else f"training:threatslast:{suffix}",
+        compute=compute,
+        fresh_ttl=1_800.0,
+    )

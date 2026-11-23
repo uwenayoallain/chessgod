@@ -3,20 +3,22 @@
 The usual guess about a club player's mistakes is time trouble. On the first
 player's rapid games it was the opposite: they lost with a median of six of
 their ten minutes unused, and 87% of their big mistakes were played with five
-minutes or more on the clock — half of them in under ten seconds. Mistakes
+minutes or more on the clock, half of them in under ten seconds. Mistakes
 were *rarer* in time trouble, not commoner. This measures that for any
 player, on their main time control, so the card can say which it is.
 """
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import Counter
 
-from sqlalchemy import Integer, Text, bindparam, text
+from sqlalchemy import Integer, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine_contract import MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
+from app.models.identity import Username
 from app.services.points_lost import BIG_ERROR, expected_score
 
 CLOCK_GAMES = 300
@@ -41,18 +43,30 @@ WHERE g.username = :username
 GROUP BY g.time_control, g.time_class
 """
 
+# The player's clock after their last move, per game, in one pass over the
+# window's positions. It used to be a correlated subquery, one ordered index
+# probe per selected game.
 _GAMES_SQL = """
-SELECT g.id, g.user_result, g.num_moves,
-       (SELECT gp.clock_seconds_after FROM game_positions gp
-         WHERE gp.game_id = g.id AND gp.clock_seconds_after IS NOT NULL
-           AND ((g.user_color = 'white' AND gp.ply % 2 = 1) OR (g.user_color = 'black' AND gp.ply % 2 = 0))
-         ORDER BY gp.ply DESC LIMIT 1) AS last_clock
-FROM games g
-WHERE g.username = :username
-  AND g.time_control = :time_control
-  AND CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END >= :min_user_rating
-ORDER BY g.played_at DESC
-LIMIT :limit
+WITH user_games AS (
+    SELECT g.id, g.user_result, g.num_moves, g.user_color
+    FROM games g
+    WHERE g.username = :username
+      AND g.time_control = :time_control
+      AND CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END >= :min_user_rating
+    ORDER BY g.played_at DESC, g.id DESC
+    LIMIT :limit
+),
+clocks AS (
+    SELECT gp.game_id, gp.clock_seconds_after,
+           ROW_NUMBER() OVER (PARTITION BY gp.game_id ORDER BY gp.ply DESC) AS clock_rank
+    FROM game_positions gp
+    JOIN user_games g ON g.id = gp.game_id
+    WHERE gp.clock_seconds_after IS NOT NULL
+      AND ((g.user_color = 'white' AND gp.ply % 2 = 1) OR (g.user_color = 'black' AND gp.ply % 2 = 0))
+)
+SELECT g.id, g.user_result, g.num_moves, c.clock_seconds_after AS last_clock
+FROM user_games g
+LEFT JOIN clocks c ON c.game_id = g.id AND c.clock_rank = 1
 """
 
 _DECISIONS_SQL = """
@@ -63,7 +77,7 @@ user_games AS (
     WHERE g.username = :username
       AND g.time_control = :time_control
       AND CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END >= :min_user_rating
-    ORDER BY g.played_at DESC
+    ORDER BY g.played_at DESC, g.id DESC
     LIMIT :limit
 ),
 position_evals AS (
@@ -123,9 +137,12 @@ def parse_control(time_control: str) -> tuple[float, float] | None:
         return None
     base, _, increment = time_control.partition("+")
     try:
-        return float(base), float(increment or 0)
+        base_seconds, inc = float(base), float(increment or 0)
     except ValueError:
         return None
+    if math.isfinite(base_seconds) and math.isfinite(inc) and base_seconds > 0 and inc >= 0:
+        return base_seconds, inc
+    return None
 
 
 def main_control(controls: list[tuple[str, str, int]]) -> tuple[str, str] | None:
@@ -157,7 +174,7 @@ def verdict(summary: dict) -> str:
 async def build_clock(session: AsyncSession, *, username: str, min_user_rating: int) -> dict:
     controls = (
         await session.execute(
-            text(_CONTROLS_SQL).bindparams(bindparam("username", type_=Text())),
+            text(_CONTROLS_SQL).bindparams(bindparam("username", type_=Username)),
             {"username": username, "min_user_rating": min_user_rating},
         )
     ).all()
@@ -174,13 +191,13 @@ async def build_clock(session: AsyncSession, *, username: str, min_user_rating: 
     }
     games = (
         await session.execute(
-            text(_GAMES_SQL).bindparams(bindparam("username", type_=Text())), params,
+            text(_GAMES_SQL).bindparams(bindparam("username", type_=Username)), params,
         )
     ).mappings().all()
     decisions = (
         await session.execute(
             text(_DECISIONS_SQL).bindparams(
-                bindparam("username", type_=Text()),
+                bindparam("username", type_=Username),
                 bindparam("max_pair_depth_gap", type_=Integer()),
             ),
             {
@@ -200,7 +217,7 @@ async def build_clock(session: AsyncSession, *, username: str, min_user_rating: 
         left = float(game["last_clock"])
         left_by_result[game["user_result"]].append(left)
         if (game["num_moves"] or 0) >= FINISH_MIN_PLIES:
-            share = left / initial
+            share = max(0.0, left / initial)
             band = next(label for low, high, label in FINISH_BANDS
                         if share >= low and (high is None or share < high))
             finish_scores[band].append(RESULT_SCORE[game["user_result"]])
@@ -211,7 +228,7 @@ async def build_clock(session: AsyncSession, *, username: str, min_user_rating: 
     band_mistakes: Counter[str] = Counter()
     for row in decisions:
         sign = 1 if row["user_color"] == "white" else -1
-        think = float(row["think_seconds"])
+        think = max(0.0, float(row["think_seconds"]))
         # The clock as the player looked at it, before the move and its increment.
         left = float(row["clock_seconds_after"]) + think - increment
         band = next(label for low, high, label in THINK_BANDS if think >= low and (high is None or think < high))

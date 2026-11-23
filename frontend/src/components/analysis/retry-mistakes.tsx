@@ -106,6 +106,14 @@ export function RetryMistakes() {
   const [attempt, setAttempt] = useState<Attempt>({ status: 'asking', tries: 0 })
   const before = useRef<Promise<{ cp: number; best: string | null } | null> | null>(null)
   const bestUci = useRef<string | null>(null)
+  const resetTimer = useRef<number | null>(null)
+
+  function clearResetTimer() {
+    if (resetTimer.current !== null) {
+      window.clearTimeout(resetTimer.current)
+      resetTimer.current = null
+    }
+  }
 
   const item = session ? session.items[session.index] : undefined
   const hints = useHint(
@@ -118,6 +126,7 @@ export function RetryMistakes() {
   // A new position: go to it, hide the answer, and start the engine on it
   // while the player thinks.
   useEffect(() => {
+    clearResetTimer()
     if (!item) return
     jumpToNode(item.parentNodeId)
     setDrillSolving(true)
@@ -133,6 +142,7 @@ export function RetryMistakes() {
   // Leaving the retry puts the board's hints back.
   useEffect(
     () => () => {
+      clearResetTimer()
       useAppStore.getState().setDrillSolving(false)
       useAppStore.getState().setTrainerArrows([])
     },
@@ -149,6 +159,7 @@ export function RetryMistakes() {
   }
 
   function finish(verdict: RetryVerdict, attemptSan: string | null, tries: number) {
+    clearResetTimer()
     setAttempt({ status: 'done', verdict, attemptSan, tries })
     play(verdict === 'worse' ? 'wrong' : 'right')
     setDrillSolving(false)
@@ -162,6 +173,7 @@ export function RetryMistakes() {
     if (!item || attempt.status !== 'asking') return
     const node = nodes[currentNodeId]
     if (!node || node.parentId !== item.parentNodeId || !node.uci) return
+    clearResetTimer()
     const tries = attempt.tries
     const played = node.uci
     const san = node.san
@@ -174,7 +186,11 @@ export function RetryMistakes() {
           tries,
           note: `${item!.san} is what you played in the game. Find something better.`,
         })
-        window.setTimeout(() => jumpToNode(item!.parentNodeId), 700)
+        clearResetTimer()
+        resetTimer.current = window.setTimeout(() => {
+          resetTimer.current = null
+          jumpToNode(item!.parentNodeId)
+        }, 700)
         return
       }
       if (quick === 'best') {
@@ -200,7 +216,11 @@ export function RetryMistakes() {
           tries: tries + 1,
           note: `${san ?? 'That'} doesn't hold either. One more try.`,
         })
-        window.setTimeout(() => jumpToNode(item!.parentNodeId), 900)
+        clearResetTimer()
+        resetTimer.current = window.setTimeout(() => {
+          resetTimer.current = null
+          jumpToNode(item!.parentNodeId)
+        }, 900)
       } else {
         finish('worse', san, tries + 1)
       }
@@ -216,6 +236,7 @@ export function RetryMistakes() {
   if (!session) return null
 
   function close() {
+    clearResetTimer()
     const returnTo = session!.returnNodeId
     end()
     setDrillSolving(false)

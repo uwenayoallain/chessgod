@@ -52,3 +52,16 @@ test('the engine keeps working for searches after that', async () => {
 
   assert.equal(result.bestMoveUci, ONLY_MOVE)
 })
+
+test('a search stopped for shutdown is cancelled, never returned as an answer', async () => {
+  const searching = engine.analyse(SLOW_FEN, 60)
+  setTimeout(() => engine.stop(), 50)
+  // Stopped short of its depth: storing it would be a shallow row passed off
+  // as the depth the queue asked for.
+  await assert.rejects(searching, (error) => error.cancelled === true)
+
+  // Stopping with nothing in hand is a no-op, and the engine still answers.
+  engine.stop()
+  const result = await engine.analyse(ONLY_MOVE_FEN, 8)
+  assert.equal(result.bestMoveUci, ONLY_MOVE)
+})

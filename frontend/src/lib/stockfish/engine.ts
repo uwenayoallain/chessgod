@@ -13,6 +13,26 @@ type AnalyzeOptions = {
   depth?: number
   multiPV?: number
   force?: boolean
+  /** Stop after this many milliseconds even if `depth` is not reached. */
+  movetime?: number
+}
+
+export type PlayOptions = { depth: number; multiPV: number; movetime?: number }
+
+/**
+ * The lines of the last depth the search reached, in rank order.
+ *
+ * With MultiPV, an iteration reports its lines one at a time, and a search that
+ * stops mid-iteration (a time limit, a stop) leaves some ranks at the new depth
+ * and the rest at the one before. Choosing among them compares a move searched
+ * a ply deeper against one that was not, which is how a shallow line with a
+ * stale score could be picked over a sound one. Only lines searched as deep as
+ * the deepest belong to the same comparison.
+ */
+export function deepestLines(lines: Iterable<UCIInfo>): UCIInfo[] {
+  const all = [...lines]
+  const deepest = all.reduce((max, line) => Math.max(max, line.depth), 0)
+  return all.filter((line) => line.depth === deepest).sort((a, b) => a.multipv - b.multipv)
 }
 
 function parseBestMove(line: string): string | null {
@@ -85,11 +105,7 @@ export class StockfishEngine {
       if (event.line.startsWith('bestmove')) {
         const { lines, resolve } = this.pendingPlay
         this.pendingPlay = null
-        resolve(
-          parseBestMove(event.line)
-            ? [...lines.values()].sort((a, b) => a.multipv - b.multipv)
-            : null,
-        )
+        resolve(parseBestMove(event.line) ? deepestLines(lines.values()) : null)
       }
       return
     }
@@ -143,7 +159,8 @@ export class StockfishEngine {
   analyze(fen: string, options: AnalyzeOptions = {}) {
     const depth = options.depth ?? 18
     const multiPV = options.multiPV ?? 3
-    const analysisKey = `${fen}|${depth}|${multiPV}`
+    const movetime = options.movetime
+    const analysisKey = `${fen}|${depth}|${multiPV}|${movetime ?? ''}`
 
     if (!options.force && this.lastAnalyzeKey === analysisKey) {
       return
@@ -160,24 +177,46 @@ export class StockfishEngine {
       depth,
       fen,
       multiPV,
+      ...(movetime != null ? { movetime } : {}),
     })
   }
 
   /**
    * Search `fen` for a move to play: `multiPV` candidate lines to `depth`, at
-   * full strength. Resolves with the final line per candidate, or null when
-   * there is no move or the search was superseded (a stop, or a newer search
-   * on the shared worker). Choosing among them is the caller's business.
+   * full strength, or for `movetime` milliseconds if that comes first.
+   * Resolves with the lines of the deepest depth reached, one per candidate,
+   * or null when there is no move or the search was superseded (a stop, or a
+   * newer search on the shared worker). Choosing among them is the caller's
+   * business.
    */
-  play(fen: string, { depth, multiPV }: { depth: number; multiPV: number }) {
+  play(fen: string, { depth, multiPV, movetime }: PlayOptions) {
     this.cancelPlay()
     this.activeSearchId = null
     this.lastAnalyzeKey = null
     const searchId = ++this.nextSearchId
     return new Promise<UCIInfo[] | null>((resolve) => {
       this.pendingPlay = { searchId, lines: new Map(), resolve }
-      this.post({ type: 'analyze', searchId, fen, depth, multiPV })
+      this.post({
+        type: 'analyze',
+        searchId,
+        fen,
+        depth,
+        multiPV,
+        ...(movetime != null ? { movetime } : {}),
+      })
     })
+  }
+
+  /**
+   * End the pending `play` search early and keep what it reached: the engine
+   * is told to stop, and the search settles on the `bestmove` that follows,
+   * with its lines, as a finished one would. `stop` instead settles it with
+   * nothing. Returns false when there was no search to finish.
+   */
+  finish() {
+    if (!this.pendingPlay || !this.worker) return false
+    this.worker.postMessage({ type: 'stop' } satisfies EngineWorkerCommand)
+    return true
   }
 
   private cancelPlay() {

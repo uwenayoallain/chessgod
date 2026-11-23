@@ -1,12 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { prefetchBookPlies } from '@/lib/analysis/book-moves'
+import { GAME_REVIEW_DEPTH, MIN_TRUSTED_DEPTH } from '@/lib/analysis/review-depth'
 import { api } from '@/lib/api'
 import { useTrainingLine, type WorkspaceGame } from '@/hooks/use-workspace-data'
 import { useEngineStore } from '@/store/engine-store'
 import { STARTING_FEN, useAppStore, type ReplayMove } from '@/store/app-store'
 import type { PersistedEngineAnalysis } from '@/store/engine-store'
 import { parsePgnToReplay } from '@/lib/chess-utils'
+
+/** The most positions `GET /api/analysis/evaluations` answers in one request. */
+const EVALUATION_BATCH = 100
 
 export type OpeningSelection = {
   eco: string | null
@@ -27,7 +31,6 @@ export function useBoardWorkspace({
   color: 'white' | 'black' | 'both'
   timeClass: string | null
 }) {
-  const currentFen = useAppStore((state) => state.currentFen)
   const loadReplay = useAppStore((state) => state.loadReplay)
   const clearLoadedLine = useAppStore((state) => state.clearLoadedLine)
   const keepUserOnBottom = useAppStore((state) => state.keepUserOnBottom)
@@ -44,24 +47,45 @@ export function useBoardWorkspace({
     const generation = bookPrefetchGeneration.current
     const fenHistory = [STARTING_FEN, ...replay.map((move) => move.fen)]
     const uniqueFens = [...new Set(fenHistory)]
+    const isStale = () => generation !== bookPrefetchGeneration.current
     void (async () => {
-      try {
-        // Long games exceed practical URL limits. Bounded batches also let
-        // switching games abandon stale work before it starts another search.
-        for (let start = 0; start < uniqueFens.length; start += 50) {
-          if (generation !== bookPrefetchGeneration.current) return
-          const response = await api.get<Record<string, PersistedEngineAnalysis>>(
-            '/api/analysis/evaluations',
-            { params: { fens: uniqueFens.slice(start, start + 50).join(','), min_depth: 22 } },
-          )
-          useEngineStore.getState().hydrateAnalysisCache(response.data)
-        }
-      } catch (error) {
-        console.warn('[chessgod] Saved analysis could not be loaded; using browser analysis', error)
-      } finally {
-        if (generation === bookPrefetchGeneration.current) {
-          void useEngineStore.getState().queueReplayAnalysis(uniqueFens, { depth: 22 })
-        }
+      // Long games exceed practical URL limits, so the saved evaluations come
+      // in batches of the endpoint's maximum, all at once: one after another,
+      // a 170-move game waited on seven round trips through the tunnel before
+      // its review could start. `prefer_depth` asks for the row at the review
+      // depth beside a deeper board search, so the review grades against it.
+      const chunks: string[][] = []
+      for (let start = 0; start < uniqueFens.length; start += EVALUATION_BATCH) {
+        chunks.push(uniqueFens.slice(start, start + EVALUATION_BATCH))
+      }
+      let failed = false
+      await Promise.all(
+        chunks.map(async (chunk) => {
+          try {
+            const response = await api.get<Record<string, PersistedEngineAnalysis>>(
+              '/api/analysis/evaluations',
+              {
+                params: {
+                  fens: chunk.join(','),
+                  min_depth: MIN_TRUSTED_DEPTH,
+                  prefer_depth: GAME_REVIEW_DEPTH,
+                },
+              },
+            )
+            if (!isStale()) useEngineStore.getState().hydrateAnalysisCache(response.data)
+          } catch (error) {
+            if (!failed) {
+              failed = true
+              console.warn(
+                '[chessgod] Saved analysis could not be loaded; using browser analysis',
+                error,
+              )
+            }
+          }
+        }),
+      )
+      if (!isStale()) {
+        void useEngineStore.getState().queueReplayAnalysis(uniqueFens, { depth: GAME_REVIEW_DEPTH })
       }
     })()
     void prefetchBookPlies({
@@ -79,6 +103,7 @@ export function useBoardWorkspace({
         }
       },
       replayMoves: replay,
+      isStale,
     })
       .then((result) => {
         if (generation !== bookPrefetchGeneration.current) return
@@ -136,15 +161,6 @@ export function useBoardWorkspace({
     alignBoardToUserColor(activeGame.user_color)
   }, [activeGame, alignBoardToUserColor, keepUserOnBottom])
 
-  const gameFilters = useMemo(
-    () => ({
-      openingName: null,
-      eco: null,
-      fen: currentFen !== STARTING_FEN ? currentFen : null,
-    }),
-    [currentFen],
-  )
-
   function loadGame(game: WorkspaceGame) {
     if (!game.pgn) return
     useAppStore.getState().setIsLoadingGame(true)
@@ -187,7 +203,6 @@ export function useBoardWorkspace({
   }
 
   return {
-    currentFen,
     selectedGameId,
     selectedOpening,
     activeGame,
@@ -197,7 +212,6 @@ export function useBoardWorkspace({
     loadOpening,
     loadMistakeReview,
     clearLoadedContext,
-    gameFilters,
     trainingLine,
   }
 }

@@ -218,7 +218,7 @@ importers:
   .:
     dependencies:
       '@lichess-org/stockfish-web':
-        specifier: ^0.5.0
+        specifier: 0.5.0
         version: 0.5.0
       '@tanstack/react-query':
         specifier: ^5.100.4
@@ -244,9 +244,6 @@ importers:
       react-dom:
         specifier: ^19.1.0
         version: 19.2.4(react@19.2.4)
-      react-router-dom:
-        specifier: ^7.5.3
-        version: 7.14.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       zustand:
         specifier: ^5.0.3
         version: 5.0.12(@types/react@19.2.14)(react@19.2.4)

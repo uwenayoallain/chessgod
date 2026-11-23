@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models.base import Base
@@ -12,6 +13,7 @@ from app.routers.theory import (
     find_representative_deviation_games,
     theory_compare,
     theory_deviations,
+    theory_training_line,
 )
 from app.services.pgn_parser import parse_game_pgn
 from app.services.theory import (
@@ -285,6 +287,7 @@ async def test_get_or_fetch_master_data_uses_seeded_moves_without_live_fetch() -
             {
                 "san": "e4",
                 "uci": "e2e4",
+                "master_total": 0,
                 "white": 0,
                 "draws": 0,
                 "black": 0,
@@ -709,3 +712,94 @@ async def test_a_named_opening_is_still_recorded() -> None:
 
         assert position.master_eco == "B00"
         assert position.master_opening_name == "King's Pawn Game"
+
+
+@pytest.mark.asyncio
+async def test_synced_deviations_rank_master_moves_independently_of_local_games() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        session.add_all([
+            Position(id=1, fen="root", total_games=100, master_fetched_at=datetime.now(UTC)),
+            Position(id=2, fen="after-e4"),
+            Position(id=3, fen="after-d4"),
+            Position(id=4, fen="after-c4"),
+        ])
+        for to_id, san, uci, local, master in [
+            (2, "e4", "e2e4", 90, 100),
+            (3, "d4", "d2d4", 9, 1500),
+            (4, "c4", "c2c4", 1, 0),
+        ]:
+            session.add(PositionMove(
+                from_position_id=1, to_position_id=to_id, move_san=san, move_uci=uci,
+                move_number=1, is_white_move=True, game_count=local, master_game_count=master,
+            ))
+        await session.commit()
+
+        deviations = await theory_deviations(color="white", min_games=5, session=session)
+        assert len(deviations) == 1
+        assert deviations[0].user_top_move.san == "e4"
+        assert deviations[0].master_top_move.san == "d4"
+        assert deviations[0].master_top_move.game_count == 1500
+        compare = await theory_compare(fen="root", session=session)
+        assert [(move.uci, move.game_count) for move in compare.master_moves] == [
+            ("d2d4", 1500), ("e2e4", 100), ("c2c4", 0),
+        ]
+    await engine.dispose()
+
+
+def test_matching_uci_precedes_san_spelling() -> None:
+    user = [{"san": "O-O", "uci": "e1g1", "game_count": 20, "move_number": 6, "win_rate": 0.55}]
+    master = [{"san": "0-0", "uci": "e1g1", "game_count": 100, "win_rate": 0.55}]
+    assert build_deviation("fen", user, master, None, None) is None
+
+
+@pytest.mark.asyncio
+async def test_french_training_line_keeps_the_opening_prefix_and_extends_from_it() -> None:
+    french = '[Opening "French Defense"]\n\n1. e4 e6 2. d3 *'
+    continuation = parse_game_pgn("1. e4 e6 2. d4 d5 *").positions
+    sicilian = parse_game_pgn("1. e4 c5 *").positions
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        positions = {step.fen: Position(fen=step.fen) for step in [*continuation, *sicilian]}
+        positions[continuation[2].fen].master_opening_name = "French Defense"
+        session.add_all(positions.values())
+        await session.flush()
+        for parent, step, masters in [
+            *[(a, b, 20) for a, b in zip(continuation, continuation[1:])],
+            (sicilian[1], sicilian[2], 5_000),
+        ]:
+            session.add(PositionMove(
+                from_position_id=positions[parent.fen].id, to_position_id=positions[step.fen].id,
+                move_san=step.move_san, move_uci=step.move_uci, move_number=step.ply,
+                is_white_move=step.ply % 2 == 1, master_game_count=masters,
+            ))
+        session.add(Game(
+            chesscom_game_url="french-game", username="tester", white_username="other",
+            black_username="tester", user_color="black", result="1-0", user_result="loss",
+            time_class="rapid", pgn=french, eco="C00", opening_name="French Defense",
+            played_at=datetime.now(UTC),
+        ))
+        await session.commit()
+
+        selects = []
+
+        @event.listens_for(engine.sync_engine, "before_cursor_execute")
+        def count_selects(_conn, _cursor, statement, _params, _context, _executemany):
+            if statement.startswith("SELECT"):
+                selects.append(statement)
+
+        line = await theory_training_line(
+            username="tester", opening_name="French Defense", eco="C00",
+            color="black", time_class="rapid", session=session,
+        )
+        assert line.opening_name == "French Defense"
+        assert [(step.ply, step.san) for step in line.moves] == [
+            (1, "e4"), (2, "e6"), (3, "d4"), (4, "d5"),
+        ]
+        assert len(selects) == 6
+    await engine.dispose()

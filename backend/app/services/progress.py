@@ -5,7 +5,7 @@ in the app said whether they did. This measures the player's recent games on
 the three things the training aims at: big mistakes per game (the moves that
 give away a tenth of the game or more), the ones that were a capture or check
 allowed or missed (what Blunder Check trains), and how often the opening left
-them a pawn down (what the course trains) — and compares the latest games with
+them a pawn down (what the course trains), and compares the latest games with
 the ones before, and games since training started with games before it.
 
 A game counts only when most of the player's moves in it have a measured
@@ -17,10 +17,11 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, datetime
 
-from sqlalchemy import Integer, Text, bindparam, select, text
+from sqlalchemy import Integer, bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine_contract import MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
+from app.models.identity import Username
 from app.models.training import TrainingEvent
 from app.services.points_lost import BIG_ERROR, expected_score
 
@@ -31,17 +32,14 @@ MIN_GAME_COVERAGE = 0.6
 WORSE_AFTER_OPENING_CP = -100
 OPENING_PLIES = 20
 
-_GAMES_SQL = """
+# The decisions of the games `_WINDOW_SQL` already chose, by id: the window is
+# read once rather than selected again inside this query.
+_DECISIONS_SQL = """
 WITH
 user_games AS (
-    SELECT g.id, g.user_color, g.user_result, g.played_at, g.chesscom_game_url,
-           CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END AS rating
+    SELECT g.id, g.user_color
     FROM games g
-    WHERE g.username = :username
-      AND g.time_class IN ('rapid', 'blitz')
-      AND CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END >= :min_user_rating
-    ORDER BY g.played_at DESC
-    LIMIT :recent
+    WHERE g.id IN :game_ids
 ),
 position_evals AS (
     SELECT ar.position_id,
@@ -91,6 +89,21 @@ FROM ranked
 WHERE eval_rank = 1
 """
 
+_WINDOW_SQL = """
+SELECT g.id, g.user_color, g.user_result, g.played_at, g.chesscom_game_url,
+       CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END AS rating,
+       (SELECT COUNT(*) FROM game_positions gp
+         WHERE gp.game_id = g.id AND gp.move_uci IS NOT NULL
+           AND ((g.user_color = 'white' AND gp.ply % 2 = 1)
+                OR (g.user_color = 'black' AND gp.ply % 2 = 0))) AS moves
+FROM games g
+WHERE g.username = :username
+  AND g.time_class IN ('rapid', 'blitz')
+  AND CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END >= :min_user_rating
+ORDER BY g.played_at DESC, g.id DESC
+LIMIT :recent
+"""
+
 
 def _is_forcing(san: str | None) -> bool:
     return bool(san) and ("x" in san or "+" in san or "#" in san)
@@ -122,42 +135,25 @@ def summarize(games: list[dict]) -> dict | None:
 
 
 async def build_progress(session: AsyncSession, *, username: str, min_user_rating: int) -> dict:
-    params = {
-        "username": username,
-        "min_user_rating": min_user_rating,
-        "recent": RECENT_GAMES,
-        "min_depth": MIN_TRUSTED_DEPTH,
-        "max_pair_depth_gap": MAX_PAIR_DEPTH_GAP,
-    }
-    decisions = (
-        await session.execute(
-            text(_GAMES_SQL).bindparams(
-                bindparam("username", type_=Text()),
-                bindparam("max_pair_depth_gap", type_=Integer()),
-            ),
-            params,
-        )
-    ).mappings().all()
-    games_sql = text("""
-        SELECT g.id, g.user_color, g.user_result, g.played_at, g.chesscom_game_url,
-               CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END AS rating,
-               (SELECT COUNT(*) FROM game_positions gp
-                 WHERE gp.game_id = g.id AND gp.move_uci IS NOT NULL
-                   AND ((g.user_color = 'white' AND gp.ply % 2 = 1)
-                        OR (g.user_color = 'black' AND gp.ply % 2 = 0))) AS moves
-        FROM games g
-        WHERE g.username = :username
-          AND g.time_class IN ('rapid', 'blitz')
-          AND CASE WHEN g.user_color = 'white' THEN g.white_rating ELSE g.black_rating END >= :min_user_rating
-        ORDER BY g.played_at DESC
-        LIMIT :recent
-    """).bindparams(bindparam("username", type_=Text()))
     games = (
         await session.execute(
-            games_sql,
+            text(_WINDOW_SQL).bindparams(bindparam("username", type_=Username)),
             {"username": username, "min_user_rating": min_user_rating, "recent": RECENT_GAMES},
         )
     ).mappings().all()
+    decisions = (
+        await session.execute(
+            text(_DECISIONS_SQL).bindparams(
+                bindparam("game_ids", expanding=True),
+                bindparam("max_pair_depth_gap", type_=Integer()),
+            ),
+            {
+                "game_ids": [int(game["id"]) for game in games],
+                "min_depth": MIN_TRUSTED_DEPTH,
+                "max_pair_depth_gap": MAX_PAIR_DEPTH_GAP,
+            },
+        )
+    ).mappings().all() if games else []
 
     per_game: dict[int, dict] = defaultdict(lambda: {"analysed": 0, "big": 0, "forcing": 0, "cp10": None})
     for row in decisions:

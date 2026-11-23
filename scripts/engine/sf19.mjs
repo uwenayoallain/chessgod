@@ -90,6 +90,8 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
   let generation = 0
   let searching = false
   let poisoned = false
+  // Ends the search in hand without an answer (see `stop`); null when idle.
+  let cancelSearch = null
 
   /**
    * Search one position and resolve with the deepest info line seen.
@@ -110,6 +112,7 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
       let best = null
       const ranked = new Map()
       let timedOut = false
+      let cancelled = false
       const softTimer = setTimeout(() => {
         timedOut = true
         engine.uci('stop')
@@ -117,13 +120,30 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
       // UCI output has no search ID. A generation tag on our listener cannot
       // identify late output once a new listener is installed: never reuse a
       // worker that did not acknowledge stop.
-      const hardTimer = setTimeout(() => {
+      let hardTimer = setTimeout(() => {
         clearTimeout(softTimer)
         poisoned = true
         searching = false
+        cancelSearch = null
         onLine = () => {}
         reject(Object.assign(new Error(`engine did not stop after ${SEARCH_TIMEOUT_MS}ms at depth ${depth}`), { fatal: true }))
       }, SEARCH_TIMEOUT_MS + STOP_GRACE_MS)
+      cancelSearch = () => {
+        if (cancelled) return
+        cancelled = true
+        clearTimeout(softTimer)
+        engine.uci('stop')
+        // Shutting down: wait for the acknowledgement only as long as a stop
+        // normally takes, and never reuse an engine that did not give it.
+        clearTimeout(hardTimer)
+        hardTimer = setTimeout(() => {
+          poisoned = true
+          searching = false
+          cancelSearch = null
+          onLine = () => {}
+          reject(Object.assign(new Error('search cancelled; engine did not acknowledge stop'), { cancelled: true }))
+        }, STOP_GRACE_MS)
+      }
 
       onLine = (line) => {
         // A straggler from a search we already gave up on.
@@ -141,7 +161,13 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
           clearTimeout(softTimer)
           clearTimeout(hardTimer)
           searching = false
+          cancelSearch = null
           onLine = () => {}
+          if (cancelled) {
+            // Stopped on request, short of its depth: not an answer to store.
+            reject(Object.assign(new Error(`search cancelled at depth ${best?.depth ?? 0}`), { cancelled: true }))
+            return
+          }
           if (timedOut) {
             // The engine has drained and is idle again, so the next search on
             // it starts clean. This one simply has no trustworthy answer.
@@ -169,5 +195,24 @@ export async function createEngine({ threads = 1, hash = 256 } = {}) {
     })
   }
 
-  return { analyse, netName }
+  /**
+   * End the search in hand, if any. Its promise rejects with `cancelled`
+   * rather than resolving with a shallower answer than was asked for, so a
+   * search stopped for shutdown is never stored as if it had finished.
+   */
+  function stop() {
+    cancelSearch?.()
+  }
+
+  /**
+   * Stop and retire this engine. The build exposes no shutdown and `quit`
+   * aborts the wasm module, so a closed engine is simply never searched
+   * again; its memory goes with the process.
+   */
+  function close() {
+    stop()
+    poisoned = true
+  }
+
+  return { analyse, stop, close, netName }
 }

@@ -113,10 +113,10 @@ describe('how the opponent chooses', () => {
   ]
 
   it('picks by how much worse each candidate looks', () => {
-    // Weights at T=40: 1, e^-0.25 ≈ 0.78, e^-5 ≈ 0.007.
-    expect(chooseSparMove(lines, 40, () => 0)).toBe('e2e4')
-    expect(chooseSparMove(lines, 40, () => 0.7)).toBe('d2d4')
-    expect(chooseSparMove(lines, 40, () => 0.9999)).toBe('g1h3')
+    // Weights at T=150: 1, e^-0.07 ≈ 0.94, e^-1.33 ≈ 0.26.
+    expect(chooseSparMove(lines, 150, () => 0)).toBe('e2e4')
+    expect(chooseSparMove(lines, 150, () => 0.7)).toBe('d2d4')
+    expect(chooseSparMove(lines, 150, () => 0.9999)).toBe('g1h3')
     // A mate outweighs any centipawn score.
     expect(
       chooseSparMove([...lines, line(4, 'd1h5', { type: 'mate', value: 2 })], 10, () => 0.5),
@@ -139,6 +139,30 @@ describe('how the opponent chooses', () => {
     expect(weaker.depth).toBe(2)
     expect(sparSearchParams(400).depth).toBe(2)
     expect(sparSearchParams(2800).depth).toBeLessThanOrEqual(12)
+  })
+
+  it('never lets a strong opponent play a move far worse than its best', () => {
+    // At T=40 the guard is 100cp: g1h3, 200cp worse, is never chosen.
+    for (const draw of [0.9, 0.99, 0.9999, 1]) {
+      expect(chooseSparMove(lines, 40, () => draw)).not.toBe('g1h3')
+    }
+    // At and below the calibration point there is no guard.
+    expect(chooseSparMove(lines, 110, () => 0.9999)).toBe('g1h3')
+  })
+
+  it('gives a 2000 opponent a horizon that sees the short tactics', () => {
+    const twoThousand = sparSearchParams(2000)
+    // A five-ply fork is inside a seven-ply horizon; the old curve gave four.
+    expect(twoThousand.depth).toBeGreaterThanOrEqual(7)
+    expect(twoThousand.temperature).toBeLessThan(60)
+    // Each step up sees at least as far and chooses at least as carefully.
+    let previous = sparSearchParams(1600)
+    for (let rating = 1650; rating <= 2800; rating += 50) {
+      const next = sparSearchParams(rating)
+      expect(next.depth).toBeGreaterThanOrEqual(previous.depth)
+      expect(next.temperature).toBeLessThanOrEqual(previous.temperature)
+      previous = next
+    }
   })
 })
 

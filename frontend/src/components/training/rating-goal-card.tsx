@@ -8,7 +8,13 @@ import { PanelError } from '@/components/ui/panel-error'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { api } from '@/lib/api'
 import { formatGameDate } from '@/lib/format-date'
-import { describeRatingGoal, monthOf, readRatingGoal, writeRatingGoal } from '@/lib/training/rating'
+import {
+  describeRatingGoal,
+  monthOf,
+  readRatingGoal,
+  signed,
+  writeRatingGoal,
+} from '@/lib/training/rating'
 import type { RatingGoal } from '@/lib/training/types'
 
 const WIDTH = 320
@@ -121,6 +127,17 @@ export function RatingGoalCard({ username }: { username: string }) {
   }
 
   const words = describeRatingGoal(data)
+  const form = data.form ?? null
+  // A flat month can hide a real climb: show the recent games when they moved more.
+  const formMoved =
+    form != null &&
+    form.rating_change !== 0 &&
+    Math.abs(form.rating_change) > Math.abs(data.change_30d ?? 0)
+  const nowNote = formMoved
+    ? `${signed(form.rating_change)} last ${form.games} games`
+    : data.change_30d != null
+      ? `${data.change_30d > 0 ? '+' : ''}${data.change_30d} in 30 days`
+      : undefined
   return (
     <div className="rating-goal train-card">
       <div className="train-card__title">
@@ -150,27 +167,31 @@ export function RatingGoalCard({ username }: { username: string }) {
       <div className="train-tiles">
         <StatTile
           label="Now"
-          note={
-            data.change_30d != null
-              ? `${data.change_30d > 0 ? '+' : ''}${data.change_30d} in 30 days`
-              : undefined
-          }
-          value={data.current != null ? String(data.current) : '—'}
+          note={nowNote}
+          value={data.current != null ? String(data.current) : '-'}
         />
         <StatTile
           label="Peak"
           note={data.peak_at ? monthOf(data.peak_at) : undefined}
-          value={data.peak != null ? String(data.peak) : '—'}
+          value={data.peak != null ? String(data.peak) : '-'}
         />
-        <StatTile
-          label={`Against ~${shown} players`}
-          note={
-            data.vs_goal
-              ? `${data.vs_goal.games.toLocaleString()} games · half is the goal`
-              : undefined
-          }
-          value={data.vs_goal?.score != null ? `${Math.round(data.vs_goal.score * 100)}%` : '—'}
-        />
+        {data.vs_goal?.score == null && form?.performance != null ? (
+          <StatTile
+            label="Recent form"
+            note={`${form.wins}W-${form.draws}D-${form.losses}L (last ${form.games})`}
+            value={`~${form.performance}`}
+          />
+        ) : (
+          <StatTile
+            label={`Against ~${shown} players`}
+            note={
+              data.vs_goal
+                ? `${data.vs_goal.games.toLocaleString()} games · half is the goal`
+                : undefined
+            }
+            value={data.vs_goal?.score != null ? `${Math.round(data.vs_goal.score * 100)}%` : '-'}
+          />
+        )}
       </div>
       <RatingLine data={data} />
       {words.detail ? <p className="train-card__detail">{words.detail}</p> : null}

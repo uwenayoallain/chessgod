@@ -17,9 +17,6 @@ from starlette.requests import Request
 from app.config import settings
 from app.database import async_session_factory, engine, pool_stats
 from app.routers import analysis, games, health, import_games, improvement, sparring, theory, training, tree
-from sqlalchemy import select
-
-from app.models.game import Game
 from app.routers.theory import family_summaries_bulk
 from app.services import auto_sync
 from app.services.cache import get_shared_cache
@@ -105,7 +102,7 @@ async def maintain_master_openings(http_client: httpx.AsyncClient, stop_event: a
 
 
 async def _cache_warmup_worker(stop_event: asyncio.Event) -> None:
-    """Keep the expensive response caches hot in the shared cache.
+    """Keep expensive response caches hot for recently active players.
 
     The heavy read paths (mistakes, repertoire, family stats, coverage) cost
     1-2s cold at millions of rows. Refreshing them here means users only ever
@@ -138,13 +135,14 @@ async def _cache_warmup_worker(stop_event: asyncio.Event) -> None:
         error: str | None = None
         warmed = 0
         idle_for = store.seconds_since_interactive_request()
-        if idle_for > settings.cache_warmup_idle_after_seconds:
+        usernames = store.recently_active_usernames(settings.cache_warmup_idle_after_seconds)
+        if not usernames:
             store.record_background_task(
                 "cache_warmup",
                 started_at=started_at,
                 finished_at=datetime.now(UTC),
                 error=None,
-                meta={"skipped": "idle", "idle_seconds": round(idle_for)},
+                meta={"skipped": "no active usernames", "idle_seconds": round(idle_for)},
             )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=50)
@@ -154,15 +152,12 @@ async def _cache_warmup_worker(stop_event: asyncio.Event) -> None:
                 break
         try:
             async with async_session_factory() as session:
-                usernames = list(
-                    (
-                        await session.execute(select(Game.username).distinct().limit(5))
-                    ).scalars()
-                )
                 for username in usernames:
                     await find_mistakes_cached(
                         session, username, color="both", min_occurrences=1
                     )
+                    # End the transaction that can disable nested loops for mistakes.
+                    await session.commit()
                     # Through the served path: a no-op while the plan is fresh,
                     # one background rebuild when it is stale.
                     await improvement_plan_route(
@@ -176,10 +171,6 @@ async def _cache_warmup_worker(stop_event: asyncio.Event) -> None:
                     await family_summaries_bulk(
                         session, families, username=username, color="both", time_class=None
                     )
-                    # Warm the analysis-coverage counts (min_depth matches the
-                    # frontend's request); limit=1 skips most of the fens work.
-                    # Not the analysis queue: it walks the whole library (~1.5s)
-                    # to warm a progress count the crawler refreshes anyway.
                     warmed += 1
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -419,7 +410,11 @@ async def track_request_metrics(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.request_id = request_id
     store = get_observability_store()
-    store.note_interactive_request(request.url.path)
+    path = request.url.path
+    crawler_repertoire = (
+        path == "/api/training/repertoire"
+        and request.query_params.get("fresh", "").lower() in {"true", "1", "yes", "on", "t", "y"}
+    )
     counter_token = store.begin_request_query_counter()
     store.inflight_increment()
     started_at = time.perf_counter()
@@ -433,13 +428,22 @@ async def track_request_metrics(request: Request, call_next):
         duration_ms = (time.perf_counter() - started_at) * 1000
         query_count = store.end_request_query_counter(counter_token)
         store.inflight_decrement()
+        route_path = getattr(request.scope.get("route"), "path", None)
+        if not crawler_repertoire:
+            username = None
+            if route_path and 200 <= status_code < 400:
+                username = request.path_params.get("username") or request.query_params.get("username")
+                if username and (len(username) > 64 or not username.strip()):
+                    username = None
+            store.note_interactive_request(path, username=username)
         store.record_backend_request(
             method=request.method,
-            path=request.url.path,
+            path=path,
             status_code=status_code,
             duration_ms=duration_ms,
             request_id=request_id,
             query_count=query_count,
+            route_path=route_path or "<unmatched>",
         )
 
 app.include_router(health.router, prefix="/api", tags=["health"])

@@ -18,35 +18,54 @@ export function profileQueryKey(username: string | null) {
 
 /**
  * Queries that read the player's training state, besides the profile: what
- * is due, what to learn next, the week's XP, the drill themes, the checks.
+ * is due, what to learn next, the week's XP, the drill themes.
  * Each key starts with its name and then the username.
  */
 const TRAINING_QUERY_NAMES = new Set([
   'training-repertoire',
-  'repertoire-check',
   'threats-overview',
-  'training-challenges',
   'improvement-plan',
   'week-scoresheet',
 ])
 
+const GAME_CHECK_QUERY_NAMES = new Set(['repertoire-check', 'training-challenges'])
+
+export type RefreshTrainingOptions = {
+  includeGameChecks?: boolean
+  full?: boolean
+}
+
 /**
- * Mark every training query for the player stale, so whatever is on screen
+ * Mark training queries for the player stale, so whatever is on screen
  * refetches now and any page opened next reads the state after the action,
- * never a recommendation that was just acted on. The profile itself arrives
- * with the reward and is set directly.
+ * never a recommendation that was just acted on. Imported-game checks
+ * (`repertoire-check` and `training-challenges`) are skipped on per-question
+ * rewards unless requested. The profile itself arrives with the reward and is
+ * set directly.
  */
-export function refreshTrainingQueries(queryClient: QueryClient, username: string | null) {
+export function refreshTrainingQueries(
+  queryClient: QueryClient,
+  username: string | null,
+  options?: RefreshTrainingOptions,
+) {
   if (!username) return
+  const includeChecks = Boolean(options?.includeGameChecks || options?.full)
   void queryClient.invalidateQueries({
-    predicate: (query) =>
-      TRAINING_QUERY_NAMES.has(String(query.queryKey[0])) && query.queryKey[1] === username,
+    predicate: (query) => {
+      const name = String(query.queryKey[0])
+      return (
+        query.queryKey[1] === username &&
+        (TRAINING_QUERY_NAMES.has(name) || (includeChecks && GAME_CHECK_QUERY_NAMES.has(name)))
+      )
+    },
   })
 }
 
 /** What Blunder Check has to ask and what it cannot see yet; refreshed with every reward. */
-export function useThreatsOverview(username: string) {
+export function useThreatsOverview(username: string, options?: boolean | { enabled?: boolean }) {
+  const enabled = typeof options === 'boolean' ? options : (options?.enabled ?? true)
   return useQuery({
+    enabled: enabled && Boolean(username),
     queryKey: ['threats-overview', username],
     queryFn: async ({ signal }) =>
       (
@@ -109,7 +128,7 @@ export function diffProfiles(
 
 /**
  * Apply what an XP-earning write returned: the new profile, and the moments
- * worth celebrating — the XP itself, a level, a met goal, a badge.
+ * worth celebrating: the XP itself, a level, a met goal, a badge.
  */
 export function useApplyReward(username: string | null) {
   const queryClient = useQueryClient()
@@ -117,7 +136,11 @@ export function useApplyReward(username: string | null) {
   const unlocked = useTrainingStore((state) => state.unlocked)
   const promote = useTrainingStore((state) => state.promote)
   return useCallback(
-    async (given: TrainingReward | null | undefined, label?: string) => {
+    async (
+      given: TrainingReward | null | undefined,
+      label?: string,
+      options?: RefreshTrainingOptions,
+    ) => {
       if (!given) return
       let reward = given
       const previous = queryClient.getQueryData<TrainingProfile>(profileQueryKey(username))
@@ -138,7 +161,7 @@ export function useApplyReward(username: string | null) {
       if (reward.profile) queryClient.setQueryData(profileQueryKey(username), reward.profile)
       // Anything the action changed beyond the profile: due moves, the next
       // fix, the drill themes, this week's XP.
-      refreshTrainingQueries(queryClient, username)
+      refreshTrainingQueries(queryClient, username, options)
       if (reward.xp_gained > 0) {
         celebrate({ kind: 'xp', title: `+${reward.xp_gained} XP`, detail: label })
       }

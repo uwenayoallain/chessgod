@@ -71,9 +71,12 @@ it.each([false, true])(
         })
       })
       expect(post).toHaveBeenCalledTimes(2)
+      // The deeper search queues beside the review-depth rows, not over them:
+      // the surviving depth-22 line still goes, and the rejected one does not.
       expect(post.mock.calls[1][1].items).toEqual(
         replaceRejected
           ? [
+              expect.objectContaining({ depth: 22, multipv_rank: 2 }),
               expect.objectContaining({ depth: 30, multipv_rank: 1 }),
               expect.objectContaining({ depth: 30, multipv_rank: 2 }),
             ]
@@ -211,5 +214,148 @@ it('uploads fresh variations added to a database-hydrated snapshot', async () =>
   ])
   await act(() => vi.advanceTimersByTimeAsync(6_000))
   expect(post).toHaveBeenCalledTimes(1)
+  unmount()
+})
+
+it('uploads nothing searched below the trust floor', async () => {
+  vi.useFakeTimers()
+  post.mockClear()
+  post.mockResolvedValue({ data: { stored: 1 } })
+  const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -'
+  const line = (depth: number, multipv: number, move: string) => ({
+    depth,
+    multipv,
+    score: { type: 'cp' as const, value: 20 },
+    pv: [move],
+    nodes: null,
+    nps: null,
+    time: null,
+    seldepth: null,
+  })
+  useEngineStore.setState({ analysisByFen: {}, analysisVersion: 0 })
+  const { unmount } = renderHook(() => useEngineEvalSync())
+  act(() => {
+    useEngineStore.setState((state) => ({
+      // A look cut short at depth 12 when the player stepped on, beside a
+      // second line that did reach the floor.
+      analysisByFen: {
+        [fen]: {
+          bestMove: 'e7e5',
+          depth: 12,
+          engine: 'stockfish-19',
+          lines: [line(12, 1, 'e7e5'), line(18, 2, 'c7c5')],
+        },
+      },
+      analysisVersion: state.analysisVersion + 1,
+    }))
+  })
+  await act(() => vi.advanceTimersByTimeAsync(3_000))
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(post.mock.calls[0][1].items).toEqual([
+    expect.objectContaining({ depth: 18, best_move_uci: 'c7c5', multipv_rank: 2 }),
+  ])
+  unmount()
+})
+
+const REVIEWED_FEN = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -'
+
+function searched(depth: number, move: string, multipv = 1) {
+  return {
+    depth,
+    multipv,
+    score: { type: 'cp' as const, value: depth },
+    pv: [move],
+    nodes: null,
+    nps: null,
+    time: null,
+    seldepth: null,
+  }
+}
+
+it('uploads a review search that lands beside a stored deeper board search', async () => {
+  vi.useFakeTimers()
+  post.mockClear()
+  post.mockResolvedValue({ data: { stored: 1 } })
+  useEngineStore.setState({ analysisByFen: {}, analysisVersion: 0 })
+  // The board searched this position to 28 on an earlier visit; it is stored.
+  useEngineStore.getState().hydrateAnalysisCache({
+    [REVIEWED_FEN]: {
+      depth: 28,
+      eval_cp: 30,
+      eval_mate: null,
+      best_move_uci: 'g1f3',
+      pv_uci: 'g1f3',
+      multipv_rank: 1,
+      engine: 'stockfish-19',
+    },
+  })
+  const { unmount } = renderHook(() => useEngineEvalSync())
+  await act(() => vi.advanceTimersByTimeAsync(3_000))
+  expect(post).not.toHaveBeenCalled()
+
+  // The game review searches it again at 20 and prefers another move.
+  const stored = useEngineStore.getState().analysisByFen[REVIEWED_FEN]
+  const merged = mergeEngineAnalysis<CachedEngineAnalysis>(stored, {
+    bestMove: 'f1c4',
+    depth: 20,
+    engine: 'stockfish-19',
+    lines: [searched(20, 'f1c4')],
+  })
+  expect(merged.persisted).toBe(true)
+  act(() => {
+    useEngineStore.setState((state) => ({
+      analysisByFen: { [REVIEWED_FEN]: merged },
+      analysisVersion: state.analysisVersion + 1,
+    }))
+  })
+  await act(() => vi.advanceTimersByTimeAsync(3_000))
+  // Only the review row is new, and it carries its own move, not the board's.
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(post.mock.calls[0][1].items).toEqual([
+    expect.objectContaining({ depth: 20, best_move_uci: 'f1c4', multipv_rank: 1 }),
+  ])
+  await act(() => vi.advanceTimersByTimeAsync(6_000))
+  expect(post).toHaveBeenCalledTimes(1)
+  unmount()
+})
+
+it('keeps an unsent review row when a deeper board search lands before the flush', async () => {
+  vi.useFakeTimers()
+  post.mockClear()
+  post.mockResolvedValue({ data: { stored: 2 } })
+  useEngineStore.setState({ analysisByFen: {}, analysisVersion: 0 })
+  const { unmount } = renderHook(() => useEngineEvalSync())
+  const review: CachedEngineAnalysis = {
+    bestMove: 'f1c4',
+    depth: 20,
+    engine: 'stockfish-19',
+    lines: [searched(20, 'f1c4')],
+  }
+  act(() => {
+    useEngineStore.setState((state) => ({
+      analysisByFen: { [REVIEWED_FEN]: review },
+      analysisVersion: state.analysisVersion + 1,
+    }))
+  })
+  // Within the same three seconds the player studies the position on the board.
+  act(() => {
+    useEngineStore.setState((state) => ({
+      analysisByFen: {
+        [REVIEWED_FEN]: mergeEngineAnalysis<CachedEngineAnalysis>(review, {
+          bestMove: 'g1f3',
+          depth: 28,
+          engine: 'stockfish-19',
+          lines: [searched(28, 'g1f3')],
+        }),
+      },
+      analysisVersion: state.analysisVersion + 1,
+    }))
+  })
+  await act(() => vi.advanceTimersByTimeAsync(3_000))
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(post.mock.calls[0][1].items).toEqual([
+    expect.objectContaining({ depth: 20, best_move_uci: 'f1c4', multipv_rank: 1 }),
+    expect.objectContaining({ depth: 28, best_move_uci: 'g1f3', multipv_rank: 1 }),
+  ])
   unmount()
 })

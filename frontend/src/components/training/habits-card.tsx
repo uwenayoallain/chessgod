@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronRight, Microscope, Swords } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { openBlunderCheck } from '@/components/training/blunder-check'
 import { Emblem } from '@/components/training/trophies'
@@ -52,6 +52,17 @@ export function HabitsCard({
   const jumpToFen = useAppStore((state) => state.jumpToFen)
   const setTrainerArrows = useAppStore((state) => state.setTrainerArrows)
   const [opening, setOpening] = useState<number | null>(null)
+  const momentTimer = useRef<number | null>(null)
+
+  useEffect(
+    () => () => {
+      if (momentTimer.current !== null) {
+        window.clearTimeout(momentTimer.current)
+        momentTimer.current = null
+      }
+    },
+    [],
+  )
 
   if (query.error && !query.data) {
     return (
@@ -75,7 +86,11 @@ export function HabitsCard({
       onOpenGame(game)
       const fen = moment.fen
       // The game loads on Explore first; then the board steps to the move.
-      window.setTimeout(() => {
+      if (momentTimer.current !== null) {
+        window.clearTimeout(momentTimer.current)
+      }
+      momentTimer.current = window.setTimeout(() => {
+        momentTimer.current = null
         jumpToFen(fen)
         setTrainerArrows(
           [

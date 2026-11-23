@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
 
@@ -16,6 +17,16 @@ engine = create_async_engine(
     pool_recycle=settings.db_pool_recycle_seconds,
 )
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+def _async_engine_for(session: AsyncSession) -> AsyncEngine | None:
+    """Find the engine for a separate session without reusing a bound connection."""
+    bind = getattr(session, "bind", None)
+    if isinstance(bind, AsyncEngine):
+        return bind
+    if isinstance(bind, Engine) and bind.dialect.is_async:
+        return AsyncEngine(bind)
+    return None
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

@@ -3,16 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
 from app.database import async_session_factory, get_db
 from app.models.game import Game
+from app.models.game_position import GamePosition
 from app.models.import_job import ImportEvent, ImportJob
 from app.services.import_jobs import (
     TERMINAL_EVENT_TYPES, ImportEventPublisher, ImportJobInactive, cancel_import_job,
@@ -21,16 +23,17 @@ from app.services.import_jobs import (
 from app.schemas.import_progress import ImportSummary
 from app.services.chesscom import ChessComClient
 from app.services.import_cache import (
+    archive_fetch_decision,
     archive_month_from_url,
-    get_cached_archive,
     mark_archive_cached,
-    should_fetch_archive,
 )
 from app.services.improvement import invalidate_improvement_caches
 from app.services.pgn_parser import parse_game_pgn
 from app.services.game_ingest import insert_game
 from app.services.cache import get_shared_cache
-from app.services.tree_builder import backfill_position_clocks, update_tree_from_game
+from app.services.tree_builder import (
+    backfill_position_clocks, backfill_position_clocks_by_game_id, update_tree_from_game,
+)
 
 router = APIRouter()
 
@@ -74,6 +77,75 @@ def describe_game(raw_game: dict) -> str:
     black_username = raw_game.get("black", {}).get("username", "Black")
     time_class = raw_game.get("time_class", "game")
     return f"Loading {white_username} vs {black_username} ({time_class})"
+
+
+def termination_for(raw_game: dict, user_color: str) -> str | None:
+    """Why the game ended: the opponent's result for a win, the player's own otherwise."""
+    white = raw_game.get("white", {})
+    black = raw_game.get("black", {})
+    user_side = white if user_color == "white" else black
+    opp_side = black if user_color == "white" else white
+    user_chesscom = user_side.get("result", "")
+    opp_chesscom = opp_side.get("result", "")
+    return (opp_chesscom or None) if user_chesscom == "win" else (user_chesscom or None)
+
+
+@dataclass(frozen=True)
+class StoredGame:
+    id: int
+    user_color: str
+    needs_termination: bool
+    needs_clocks: bool
+
+
+# IN lists are read in slices of this many values; a busy month holds thousands.
+_PREFETCH_CHUNK = 900
+
+
+async def stored_games(session: AsyncSession, username: str, urls: list[str]) -> dict[str, StoredGame]:
+    """The player's already-imported games among `urls`, and what each still lacks.
+
+    Read in two batched queries per archive before any PGN is parsed, so a game
+    stored complete is skipped without parsing it: a re-fetched month of 200
+    finished games used to spend ~1.1s of synchronous PGN parsing on the event
+    loop only to learn that every insert conflicted.
+    """
+    found: dict[str, tuple[int, str, bool]] = {}
+    unique = list(dict.fromkeys(url for url in urls if url))
+    for start in range(0, len(unique), _PREFETCH_CHUNK):
+        rows = await session.execute(
+            select(Game.chesscom_game_url, Game.id, Game.user_color, Game.termination.is_(None))
+            .where(Game.username == username, Game.chesscom_game_url.in_(unique[start:start + _PREFETCH_CHUNK]))
+        )
+        for url, game_id, user_color, no_termination in rows.all():
+            found[url] = (int(game_id), user_color, bool(no_termination))
+    ids = [game_id for game_id, _, _ in found.values()]
+    missing_clocks: set[int] = set()
+    for start in range(0, len(ids), _PREFETCH_CHUNK):
+        missing_clocks.update(
+            await session.scalars(
+                select(GamePosition.game_id).where(
+                    GamePosition.game_id.in_(ids[start:start + _PREFETCH_CHUNK]),
+                    GamePosition.clock_seconds_after.is_(None),
+                    GamePosition.ply > 0,
+                ).distinct()
+            )
+        )
+    return {
+        url: StoredGame(game_id, user_color, no_termination, game_id in missing_clocks)
+        for url, (game_id, user_color, no_termination) in found.items()
+    }
+
+
+async def _backfill_termination(session: AsyncSession, stored: StoredGame, raw_game: dict) -> None:
+    if not stored.needs_termination:
+        return
+    termination = termination_for(raw_game, stored.user_color)
+    if termination is None:
+        return
+    await session.execute(
+        update(Game).where(Game.id == stored.id, Game.termination.is_(None)).values(termination=termination)
+    )
 
 
 # played_at uses datetime(1970, 1, 1) as the "unknown date" fallback; anything
@@ -155,30 +227,31 @@ async def run_import(
                     }
                 )
 
-                if not await should_fetch_archive(
+                fetch, cached_games = await archive_fetch_decision(
                     session, username, archive_url, force=force
-                ):
-                    cached_archive = await get_cached_archive(
-                        session, username, archive_url
-                    )
+                )
+                # End the read before any network wait: an open transaction
+                # held across the Chess.com fetch (or the event write) sat
+                # idle in transaction and pinned the xmin horizon.
+                await session.commit()
+                if not fetch:
                     total_cached_archives += 1
                     await queue.put(
                         {
                             "type": "archive_complete",
                             "archive": archive_label,
-                            "games_in_archive": cached_archive.games_in_archive
-                            if cached_archive
-                            else 0,
+                            "games_in_archive": cached_games,
                             "new_games": 0,
-                            "skipped_games": cached_archive.games_in_archive
-                            if cached_archive
-                            else 0,
+                            "skipped_games": cached_games,
                             "cached": True,
                         }
                     )
                     continue
 
                 month_games = list(reversed(await client.fetch_monthly_games(archive_url)))
+                known = await stored_games(
+                    session, username, [raw_game.get("url") for raw_game in month_games]
+                )
                 new_games = 0
                 skipped_games = 0
                 clock_rows_backfilled = 0
@@ -202,10 +275,22 @@ async def run_import(
                     )
 
                 for game_index, raw_game in enumerate(month_games, start=1):
+                    stored = known.get(raw_game.get("url"))
+                    if (
+                        stored is not None
+                        and (not stored.needs_clocks or "[%clk" not in (raw_game.get("pgn") or ""))
+                        and raw_game.get("rules", "chess") == "chess"
+                    ):
+                        # All clocks are stored, or the PGN has none to add.
+                        await _backfill_termination(session, stored, raw_game)
+                        total_skipped += 1
+                        skipped_games += 1
+                        await emit_game_progress(game_index, raw_game)
+                        continue
                     try:
                         if raw_game.get("rules", "chess") != "chess":
                             raise ValueError("Unsupported chess variant")
-                        parsed = parse_game_pgn(raw_game.get("pgn", ""))
+                        parsed = await asyncio.to_thread(parse_game_pgn, raw_game.get("pgn", ""))
                         if parsed.result not in {"1-0", "0-1", "1/2-1/2"}:
                             raise ValueError("Game has no final result")
                         if username.lower() not in {parsed.white_username.lower(), parsed.black_username.lower()}:
@@ -218,6 +303,16 @@ async def run_import(
                         skipped_games += 1
                         await emit_game_progress(game_index, raw_game)
                         continue
+                    if stored is not None:
+                        # Stored, but some plies still lack the clock this PGN carries.
+                        await _backfill_termination(session, stored, raw_game)
+                        clock_rows_backfilled += await backfill_position_clocks_by_game_id(
+                            session, stored.id, parsed
+                        )
+                        total_skipped += 1
+                        skipped_games += 1
+                        await emit_game_progress(game_index, raw_game)
+                        continue
                     white = raw_game.get("white", {})
                     black = raw_game.get("black", {})
                     user_color = (
@@ -226,12 +321,8 @@ async def run_import(
                         else "black"
                     )
                     user_result = infer_user_result(user_color, parsed.result)
-                    user_side = white if user_color == "white" else black
-                    opp_side = black if user_color == "white" else white
-                    user_chesscom = user_side.get("result", "")
-                    opp_chesscom = opp_side.get("result", "")
                     # For wins use opponent's result (why they lost); for losses/draws use user's
-                    termination = (opp_chesscom or None) if user_chesscom == "win" else (user_chesscom or None)
+                    termination = termination_for(raw_game, user_color)
                     game = Game(
                         chesscom_game_url=raw_game["url"],
                         chesscom_game_id=raw_game["url"].rstrip("/").split("/")[-1],
@@ -269,8 +360,7 @@ async def run_import(
                     await update_tree_from_game(
                         session, inserted_id, parsed, parsed.result
                     )
-                    # Commit once per archive (below), not per game — per-game
-                    # commits were a major chunk of import time.
+                    # Games and the archive cache record commit together below.
                     new_games += 1
                     total_new_games += 1
                     await emit_game_progress(game_index, raw_game)

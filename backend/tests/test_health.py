@@ -19,7 +19,7 @@ def client(tmp_path_factory):
 
     This used to be `with TestClient(app)`: that ran the app's lifespan and its
     background jobs (master-theory sync, cache warmup) and wrote the fake
-    "frontend failure" event below into the real database on every test run —
+    "frontend failure" event below into the real database on every test run:
     29 of them showed up in the observability panel as unexplained errors.
     """
     path = tmp_path_factory.mktemp("health") / "health.db"

@@ -10,7 +10,8 @@ in their zone), the same one the challenges and the rival use.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,19 @@ def notation(color: str, result: str) -> str:
 RESULT_POINTS = {"win": 1.0, "draw": 0.5, "loss": 0.0}
 
 
+def week_bounds(monday: date, zone: ZoneInfo) -> tuple[datetime, datetime]:
+    """The week's start and end in UTC, each a local midnight in the player's zone.
+
+    The end is the next local Monday converted on its own, never start plus
+    seven days: a week that crosses a clock change is 167 or 169 hours long,
+    and adding a fixed 168 drifted the boundary by an hour into the next week
+    (spring) or out of this one (autumn).
+    """
+    start = datetime.combine(monday, time.min, tzinfo=zone).astimezone(UTC)
+    end = datetime.combine(monday + timedelta(days=7), time.min, tzinfo=zone).astimezone(UTC)
+    return start, end
+
+
 async def build_week_recap(
     session: AsyncSession, username: str, repertoires: list[dict], *,
     tz: str | None = None, weeks_back: int = 1, now: datetime | None = None,
@@ -36,8 +50,7 @@ async def build_week_recap(
     now = now or datetime.now(UTC)
     zone = training._zone(tz)
     monday = week_start(now.astimezone(zone).date()) - timedelta(days=7 * weeks_back)
-    start = datetime.combine(monday, datetime.min.time(), tzinfo=zone).astimezone(UTC)
-    end = start + timedelta(days=7)
+    start, end = week_bounds(monday, zone)
     rows = (
         await session.execute(
             select(Game.id, Game.chesscom_game_url, Game.played_at, Game.user_color, Game.time_class,

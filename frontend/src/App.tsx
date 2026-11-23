@@ -23,13 +23,19 @@ export default function App() {
         <Header />
         <main className="content">
           {isAdminRoute ? (
-            <PageBoundary>
+            <PageBoundary name="admin-observability">
               <Suspense fallback={null}>
                 <AdminObservabilityPage />
               </Suspense>
             </PageBoundary>
           ) : (
-            <Dashboard />
+            // The pages inside the dashboard have boundaries of their own;
+            // this one is for the workspace around them (the board, the rail,
+            // the landing screen). An error there used to unmount everything
+            // down to the root and leave a blank page with no way back.
+            <PageBoundary name="dashboard">
+              <Dashboard />
+            </PageBoundary>
           )}
         </main>
       </div>

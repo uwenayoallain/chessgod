@@ -30,7 +30,7 @@ function fullFen(fen: string) {
 /**
  * Opening Rush: every move of the player's repertoire, against the clock.
  *
- * Puzzle Rush's shape — three minutes, three lives, a best to beat — asked
+ * Puzzle Rush's shape (three minutes, three lives, a best to beat) asked
  * from the player's own repertoire, easiest moves first. A miss shows the
  * right move for a moment and sends that move back to the review queue; the
  * run is scored on the server from the moves actually played.
@@ -63,6 +63,14 @@ export function OpeningRush({ username, onBegin }: { username: string; onBegin?:
   const runId = useRef('')
   // The clock and a last wrong answer can both end a run in the same tick.
   const finishing = useRef(false)
+  const pauseTimer = useRef<number | null>(null)
+
+  function clearPauseTimer() {
+    if (pauseTimer.current !== null) {
+      window.clearTimeout(pauseTimer.current)
+      pauseTimer.current = null
+    }
+  }
 
   const question = set?.questions[index]
   // A hint costs clock, which is Rush's own price.
@@ -72,6 +80,7 @@ export function OpeningRush({ username, onBegin }: { username: string; onBegin?:
   )
 
   function ask(next: RushSet, at: number) {
+    if (finishing.current) return
     const item = next.questions[at]
     if (!item) {
       void finish()
@@ -86,6 +95,7 @@ export function OpeningRush({ username, onBegin }: { username: string; onBegin?:
   }
 
   async function start() {
+    clearPauseTimer()
     endSession()
     onBegin?.()
     setPhase('loading')
@@ -121,6 +131,7 @@ export function OpeningRush({ username, onBegin }: { username: string; onBegin?:
     if (finishing.current) return
     finishing.current = true
     locked.current = true
+    clearPauseTimer()
     setPhase('scoring')
     setDrillSolving(false)
     setTrainerArrows([])
@@ -168,6 +179,7 @@ export function OpeningRush({ username, onBegin }: { username: string; onBegin?:
 
   useEffect(
     () => () => {
+      clearPauseTimer()
       setDrillSolving(false)
       setTrainerArrows([])
     },
@@ -185,7 +197,11 @@ export function OpeningRush({ username, onBegin }: { username: string; onBegin?:
       setScore((value) => value + 1)
       play('right')
       setFlash({ kind: 'right', text: `${question.answer_san}, right` })
-      window.setTimeout(() => ask(set, index + 1), RIGHT_PAUSE_MS)
+      clearPauseTimer()
+      pauseTimer.current = window.setTimeout(() => {
+        pauseTimer.current = null
+        ask(set, index + 1)
+      }, RIGHT_PAUSE_MS)
       return
     }
     const left = lives - 1
@@ -201,7 +217,9 @@ export function OpeningRush({ username, onBegin }: { username: string; onBegin?:
         color: PLAY_ARROW_COLOR,
       },
     ])
-    window.setTimeout(() => {
+    clearPauseTimer()
+    pauseTimer.current = window.setTimeout(() => {
+      pauseTimer.current = null
       if (left <= 0) void finish()
       else ask(set, index + 1)
     }, WRONG_PAUSE_MS)

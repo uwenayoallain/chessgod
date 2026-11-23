@@ -285,3 +285,49 @@ async def test_activity_reports_when_the_engine_last_stored_anything() -> None:
     finally:
         await get_shared_cache().delete_prefix(_ACTIVITY_CACHE_KEY)
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_evaluations_prefers_the_review_depth_over_a_deeper_board_search() -> None:
+    # A position studied on the board at 34 and reviewed at 20 must hand the
+    # review its 20: graded against a child at 20, the 34 invents an eval drop.
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as session:
+        for position_id, fen in ((1, "fen-a"), (2, "fen-b"), (3, "fen-c")):
+            session.add(Position(
+                id=position_id, fen=fen, total_games=1, white_wins=1, draws=0, black_wins=0,
+            ))
+        rows = (
+            # fen-a: 34 from the board, 22 from the library, 20 from a review.
+            (1, 34, "e2e4"), (1, 22, "d2d4"), (1, 20, "c2c4"),
+            # fen-b: 21 and 19 are equally close to 20; the deeper wins.
+            (2, 19, "e2e4"), (2, 21, "d2d4"), (2, 30, "c2c4"),
+            # fen-c: nothing within the gap, so the deepest as before.
+            (3, 26, "e2e4"), (3, 30, "d2d4"),
+        )
+        for position_id, depth, move in rows:
+            session.add(AnalysisResult(
+                position_id=position_id, depth=depth, eval_cp=10, best_move_uci=move,
+                best_move_san=move, pv_uci=move, multipv_rank=1,
+            ))
+        await session.commit()
+
+        deepest = await get_evaluations(fens="fen-a,fen-b,fen-c", min_depth=18, session=session)
+        assert {fen: row.depth for fen, row in deepest.items()} == {
+            "fen-a": 34, "fen-b": 30, "fen-c": 30,
+        }
+
+        preferred = await get_evaluations(
+            fens="fen-a,fen-b,fen-c", min_depth=18, prefer_depth=20, session=session,
+        )
+        assert {fen: row.depth for fen, row in preferred.items()} == {
+            "fen-a": 20, "fen-b": 21, "fen-c": 30,
+        }
+        assert preferred["fen-a"].best_move_uci == "c2c4"
+
+    await engine.dispose()

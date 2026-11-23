@@ -49,8 +49,21 @@ export function clampSparRating(rating: number) {
  * look already shows losing two pawns on 8.6% of moves — that is what
  * brainless measured as. No setting can be that weak without it: a sensible
  * chooser tops out near 50cp. At CALIBRATION_RATING this plays depth 2, T 110:
- * ~50cp a move, 2.2% of moves losing three pawns, 4.0% visibly bad — beatable,
+ * ~50cp a move, 2.2% of moves losing three pawns, 4.0% visibly bad: beatable,
  * and half as brainless. Stronger adds horizon and lowers T; weaker raises T.
+ *
+ * Above the calibration point the horizon is what makes the difference. The
+ * opponent's strength is set by T, by how often it settles for a near-equal
+ * move, but what it can *see* is set by the horizon, and a 2000 opponent on a
+ * four-ply horizon (the old curve) chose crisply among moves that a five-ply
+ * tactic refuted: sound for twenty moves, then a piece left to a fork nobody
+ * at that level misses. The player's own games cannot calibrate this end: in
+ * the library, opponents rated 1800 and up have opening moves analysed and
+ * nothing else. So the curve follows what a stronger player is, someone who
+ * still chooses among good moves but no longer misses the short tactics: a ply
+ * of horizon every DEPTH_STEP_POINTS (depth 7 at 2000, 10 at 2200), and a
+ * guard on the strong side that never picks a move far worse than the best
+ * (see `chooseSparMove`).
  */
 export const CALIBRATION_RATING = 1669
 const CALIBRATED_DEPTH = 2
@@ -58,7 +71,18 @@ const CALIBRATED_TEMPERATURE = 110
 /** Every this many rating points doubles (weaker) or halves (stronger) the temperature. */
 const TEMPERATURE_DOUBLING_POINTS = 300
 /** Past the calibration point, every this many points adds a ply of horizon. */
-const DEPTH_STEP_POINTS = 200
+const DEPTH_STEP_POINTS = 75
+/** The horizon never goes past this: a MultiPV-8 search deeper costs seconds a move. */
+const MAX_SPAR_DEPTH = 12
+/**
+ * On the strong side, a candidate this many temperatures worse than the best
+ * is never played: 2000 plays nothing more than ~130cp worse than its best
+ * move, 2200 nothing more than ~80cp. Its weight there was already e^-2.5
+ * (8% of the best's), and that tail is where a strong opponent's odd
+ * oversights came from. At and below the calibration point there is no guard,
+ * because visible mistakes are what a weaker opponent is.
+ */
+const STRONG_SIDE_GUARD_TEMPERATURES = 2.5
 export const SPAR_CANDIDATES = 8
 
 export type SparSearch = { depth: number; multiPV: number; temperature: number }
@@ -66,9 +90,9 @@ export type SparSearch = { depth: number; multiPV: number; temperature: number }
 export function sparSearchParams(rating: number): SparSearch {
   const offset = clampSparRating(rating) - CALIBRATION_RATING
   // Never below a two-ply horizon: a one-ply chooser is the limiter again.
-  const extraDepth = Math.max(0, Math.floor((offset + DEPTH_STEP_POINTS / 2) / DEPTH_STEP_POINTS))
+  const extraDepth = Math.max(0, Math.ceil(offset / DEPTH_STEP_POINTS))
   return {
-    depth: Math.min(12, CALIBRATED_DEPTH + extraDepth),
+    depth: Math.min(MAX_SPAR_DEPTH, CALIBRATED_DEPTH + extraDepth),
     multiPV: SPAR_CANDIDATES,
     temperature: Math.min(
       400,
@@ -89,16 +113,24 @@ function lineScore(score: UCIInfo['score']) {
 /**
  * Pick one of the candidate lines: the best-looking most often, a worse one
  * with a probability that falls exponentially with how much worse it looks.
+ * Below the calibrated temperature (a stronger opponent) a candidate more than
+ * STRONG_SIDE_GUARD_TEMPERATURES worse than the best is left out entirely.
  */
 export function chooseSparMove(
   lines: UCIInfo[],
   temperature: number,
   random: () => number = Math.random,
 ): string | null {
-  const candidates = lines.filter((line) => line.pv[0])
-  if (!candidates.length) return null
+  const offered = lines.filter((line) => line.pv[0])
+  if (!offered.length) return null
+  const best = Math.max(...offered.map((line) => lineScore(line.score)))
+  const guard =
+    temperature < CALIBRATED_TEMPERATURE
+      ? STRONG_SIDE_GUARD_TEMPERATURES * Math.max(1, temperature)
+      : Number.POSITIVE_INFINITY
+  const candidates = offered.filter((line) => best - lineScore(line.score) <= guard)
   const scores = candidates.map((line) => lineScore(line.score))
-  const top = Math.max(...scores)
+  const top = best
   const weights = scores.map((score) => Math.exp((score - top) / Math.max(1, temperature)))
   let pick = random() * weights.reduce((sum, weight) => sum + weight, 0)
   for (const [index, weight] of weights.entries()) {

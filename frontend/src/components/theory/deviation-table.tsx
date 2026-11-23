@@ -3,16 +3,34 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { PanelError } from '@/components/ui/panel-error'
 import { Table } from '@/components/ui/table'
-import type { TheoryDeviation } from '@/hooks/use-theory'
+import { useTheory, type TheoryComparison, type TheoryDeviation } from '@/hooks/use-theory'
 import { BEST_MOVE_ARROW_COLOR, THREAT_ARROW_COLOR } from '@/lib/analysis/board-guidance'
 import { sanToUci } from '@/lib/chess-utils'
-import { useAppStore } from '@/store/app-store'
+import { STARTING_FEN, useAppStore } from '@/store/app-store'
 
 function formatWinRate(rate: number | null | undefined) {
   if (rate == null) {
     return 'n/a'
   }
   return `${(rate * 100).toFixed(0)}%`
+}
+
+/**
+ * Whether there are master games to compare against at all, read off the
+ * starting position: the most played position there is, and the first one the
+ * master sync fetches. An empty scan means "your moves match the masters" only
+ * when this says `loaded`. With nothing fetched (no Lichess token, or a sync
+ * that has not run) the scan is empty because it had nothing to compare with,
+ * and saying the player matches the masters would be a claim about their chess
+ * that nobody checked.
+ */
+export function masterGamesState(
+  start: Pick<TheoryComparison, 'master_data_state' | 'master_moves'> | null | undefined,
+): 'loaded' | 'unfetched' | 'unknown' {
+  if (!start) return 'unknown'
+  const hasGames =
+    start.master_data_state === 'synced' && start.master_moves.some((move) => move.game_count > 0)
+  return hasGames ? 'loaded' : 'unfetched'
 }
 
 export function DeviationTable({
@@ -29,6 +47,12 @@ export function DeviationTable({
   const loadPosition = useAppStore((state) => state.loadPosition)
   const setTrainerArrows = useAppStore((state) => state.setTrainerArrows)
   const alignBoardToUserColor = useAppStore((state) => state.alignBoardToUserColor)
+  // Asked only when the scan came back empty, and through the Theory panel's
+  // own cache entry for the starting position.
+  const isEmpty = !isLoading && !error && !deviations.length
+  const start = useTheory(STARTING_FEN, { enabled: isEmpty })
+  const masterGames = masterGamesState(start.data)
+  const checkingMasters = isEmpty && masterGames === 'unknown' && start.isLoading
 
   // The row's whole point is the difference between two moves, so show both on
   // the board: yours in red, the masters' in best-move amber. The server sends
@@ -75,15 +99,29 @@ export function DeviationTable({
           changes — and a six-row skeleton growing into 150 table rows is the
           same shift by another name. */}
       <CardBody className="panel-region">
-        {isLoading ? <PanelSkeleton label="Loading your deviations" rows={6} /> : null}
+        {isLoading || checkingMasters ? (
+          <PanelSkeleton label="Loading your deviations" rows={6} />
+        ) : null}
         {error && !deviations.length && !isLoading ? (
           <PanelError error={error} what="your deviations" />
         ) : null}
-        {!isLoading && !error && !deviations.length ? (
-          <EmptyState
-            title="No deviations found"
-            message="All your moves as this color match the masters. Try the other color."
-          />
+        {isEmpty && !checkingMasters ? (
+          masterGames === 'loaded' ? (
+            <EmptyState
+              title="No deviations found"
+              message="All your moves as this color match the masters. Try the other color."
+            />
+          ) : masterGames === 'unfetched' ? (
+            <EmptyState
+              title="No master games to compare with yet"
+              message="Your moves have not been checked: the master games are not loaded. They are fetched from Lichess in the background."
+            />
+          ) : (
+            <EmptyState
+              title="No deviations listed"
+              message="Could not confirm the master games are loaded, so your moves may not have been checked."
+            />
+          )
         ) : null}
         {!isLoading && deviations.length ? (
           <div className="table-scroll table-scroll--fill">
@@ -99,35 +137,35 @@ export function DeviationTable({
               </thead>
               <tbody>
                 {deviations.map((deviation) => (
-                  <tr key={`${deviation.fen}-${deviation.move_number}`}>
+                  // One button a row. Three identical buttons made three tab
+                  // stops and three announcements for one action; the row
+                  // itself takes the click, and the button names the whole row.
+                  <tr
+                    className="deviation-table__row"
+                    key={`${deviation.fen}-${deviation.move_number}`}
+                    onClick={() => showDeviation(deviation)}
+                  >
                     <td className="table__num">
                       <button
+                        aria-label={`Show move ${deviation.move_number} on the board: you play ${deviation.user_top_move.san}, masters play ${deviation.master_top_move.san}`}
                         className="button button--ghost"
-                        onClick={() => showDeviation(deviation)}
+                        onClick={(event) => {
+                          // The row hears the click too; once is enough.
+                          event.stopPropagation()
+                          showDeviation(deviation)
+                        }}
                         type="button"
                       >
                         {deviation.move_number}
                       </button>
                     </td>
                     <td>
-                      <button
-                        className="button button--ghost"
-                        onClick={() => showDeviation(deviation)}
-                        type="button"
-                      >
-                        {deviation.user_top_move.san} ·{' '}
-                        {formatWinRate(deviation.user_top_move.win_rate)}
-                      </button>
+                      {deviation.user_top_move.san} ·{' '}
+                      {formatWinRate(deviation.user_top_move.win_rate)}
                     </td>
                     <td>
-                      <button
-                        className="button button--ghost"
-                        onClick={() => showDeviation(deviation)}
-                        type="button"
-                      >
-                        {deviation.master_top_move.san} ·{' '}
-                        {formatWinRate(deviation.master_top_move.win_rate)}
-                      </button>
+                      {deviation.master_top_move.san} ·{' '}
+                      {formatWinRate(deviation.master_top_move.win_rate)}
                     </td>
                     <td
                       className="table__truncate"

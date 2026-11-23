@@ -24,9 +24,21 @@ MAX_PAIR_DEPTH_GAP = 2
 # target — which the background crawler did at first — fills the library at a
 # depth the browser's own coverage query does not count, so the work is redone.
 #
+# 20 rather than the 22 it was: a single-threaded wasm search to 22 costs about
+# four times what one to 20 does, which made a game review take minutes, while
+# 20 is still a search far stronger than any player it grades. It sits exactly
+# MAX_PAIR_DEPTH_GAP below 22, so every row the library already holds at 22
+# (173k of them when this changed) still pairs with a new row at 20, and it
+# clears MIN_TRUSTED_DEPTH by the same gap, so a decision graded at the floor
+# still pairs with one at the target.
+#
 # The frontend keeps the same number in `lib/analysis/review-depth.ts`;
 # tests/test_engine_contract.py fails if the two drift apart.
-GAME_REVIEW_DEPTH = 22
+GAME_REVIEW_DEPTH = 20
+
+# The depth the library was filled at before GAME_REVIEW_DEPTH moved to 20.
+# Kept so the test below can prove the move did not strand those rows.
+PREVIOUS_REVIEW_DEPTH = 22
 
 # The shallowest search a decision may be graded from. Evaluations below this
 # are kept — they still pair with each other — but the learning surfaces ignore

@@ -54,7 +54,10 @@ _REPERTOIRE_TTL_SECONDS = 600.0  # imports and marks clear it
 
 
 async def invalidate_repertoire_cache(username: str, color: str) -> None:
-    await get_shared_cache().delete_prefix(f"repertoire:{username}:{color}:")
+    cache = get_shared_cache()
+    await cache.delete_prefix(f"repertoire:{username}:{color}:", versioned_only=True)
+    await cache.delete_prefix(f"improvement:repertoire:{username}:{color}:", versioned_only=True)
+    await cache.delete_prefix(f"training:repertoirelast:{username}:{color}:")
 
 
 async def derive_repertoire(
@@ -227,7 +230,6 @@ async def upsert_repertoire_mark(
         existing.family_id = payload.family_id
         existing.note = payload.note
 
-    await invalidate_repertoire_cache(payload.username, payload.color)
     return RepertoireMarkOut(
         id=existing.id,
         username=existing.username,
@@ -255,4 +257,3 @@ async def delete_repertoire_mark(
             RepertoireMark.color == color,
         )
     )
-    await invalidate_repertoire_cache(username, color)

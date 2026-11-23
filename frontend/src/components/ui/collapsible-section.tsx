@@ -1,17 +1,18 @@
 import { ChevronRight } from 'lucide-react'
 import { useEffect, useState, type PropsWithChildren, type ReactNode } from 'react'
 
+import { safeGetItem, safeSetItem } from '@/lib/storage'
+
 const STORAGE_PREFIX = 'chessgod.study-room.section.'
 
 export function readSectionOpen(id: string, fallback: boolean): boolean {
-  if (typeof window === 'undefined') return fallback
-  const stored = window.localStorage.getItem(STORAGE_PREFIX + id)
+  const stored = safeGetItem(STORAGE_PREFIX + id)
   return stored == null ? fallback : stored === 'true'
 }
 
 export function writeSectionOpen(id: string, open: boolean) {
-  if (typeof window === 'undefined') return
-  window.localStorage.setItem(STORAGE_PREFIX + id, String(open))
+  // A refused write only loses the remembered state of the section.
+  safeSetItem(STORAGE_PREFIX + id, String(open))
 }
 
 export const OPEN_SECTION_EVENT = 'chessgod:open-section'

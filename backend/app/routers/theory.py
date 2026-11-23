@@ -39,11 +39,15 @@ from app.services.opening_families import (
 )
 from app.services.mistakes import find_mistakes_cached
 from app.services.game_scope import time_class_condition
-from app.services.repertoire import delete_repertoire_mark, derive_repertoire, upsert_repertoire_mark
+from app.services.repertoire import (
+    delete_repertoire_mark,
+    derive_repertoire,
+    invalidate_repertoire_cache,
+    upsert_repertoire_mark,
+)
 from app.services.pgn_parser import parse_game_pgn
 from app.services.theory import (
     DEFAULT_CANDIDATE_POSITION_LIMIT,
-    build_deep_training_line,
     build_training_line_from_parsed_game,
     build_deviation,
     build_seeded_deviation,
@@ -52,6 +56,7 @@ from app.services.theory import (
     load_moves_for_position,
     load_position_by_fen,
     master_data_state,
+    same_move,
     serialize_master_move,
     serialize_user_move,
 )
@@ -150,11 +155,7 @@ async def find_representative_deviation_game(
         (
             move
             for move in moves
-            if (
-                user_top_move.get("uci")
-                and move.move_uci == user_top_move.get("uci")
-            )
-            or move.move_san == user_top_move.get("san")
+            if same_move(user_top_move, {"uci": move.move_uci, "san": move.move_san})
         ),
         None,
     )
@@ -202,11 +203,7 @@ async def find_representative_deviation_games(
             (
                 move
                 for move in moves
-                if (
-                    user_top_move.get("uci")
-                    and move.move_uci == user_top_move.get("uci")
-                )
-                or move.move_san == user_top_move.get("san")
+                if same_move(user_top_move, {"uci": move.move_uci, "san": move.move_san})
             ),
             None,
         )
@@ -289,31 +286,11 @@ async def theory_compare(
         data_state = master_data_state(position, user_moves)
         master_data = get_local_master_data(position, user_moves)
 
-    combined_master_moves: list[dict] = list(master_data.get("moves", []))
-    combined_move_ucis = {
-        move.get("uci") for move in combined_master_moves if move.get("uci")
-    }
-    combined_move_sans = {
-        move.get("san") for move in combined_master_moves if move.get("san")
-    }
-    for book_move in await asyncio.to_thread(get_common_book_moves, fen):
-        uci = book_move.get("uci")
-        san = book_move.get("san")
-        if (uci and uci in combined_move_ucis) or (san and san in combined_move_sans):
-            continue
-        combined_master_moves.append(
-            {
-                "san": san,
-                "uci": uci,
-                "white": 0,
-                "draws": 0,
-                "black": 0,
-            }
-        )
-        if uci:
-            combined_move_ucis.add(uci)
-        if san:
-            combined_move_sans.add(san)
+    book_moves = await asyncio.to_thread(get_common_book_moves, fen)
+    combined_master_moves: list[dict] = []
+    for move in [*master_data.get("moves", []), *book_moves]:
+        if not any(same_move(move, existing) for existing in combined_master_moves):
+            combined_master_moves.append({"white": 0, "draws": 0, "black": 0, **move})
 
     return TheoryComparisonOut(
         fen=fen,
@@ -475,7 +452,11 @@ async def _find_deviations(
         master_moves = [
             serialize_master_move(move, color) for move in master_data.get("moves", [])
         ]
-        deviation_builder = build_deviation if data_state == "synced" else build_seeded_deviation
+        deviation_builder = (
+            build_deviation
+            if data_state == "synced" and any(move["game_count"] > 0 for move in master_moves)
+            else build_seeded_deviation
+        )
         deviation = deviation_builder(
             fen=position.fen,
             user_moves=user_moves,
@@ -533,6 +514,7 @@ async def mark_repertoire(
 ) -> RepertoireMarkOut:
     mark = await upsert_repertoire_mark(session, payload)
     await session.commit()
+    await invalidate_repertoire_cache(payload.username, payload.color)
     return mark
 
 
@@ -545,6 +527,7 @@ async def unmark_repertoire(
 ) -> Response:
     await delete_repertoire_mark(session, username=username, fen=fen, color=color)
     await session.commit()
+    await invalidate_repertoire_cache(username, color)
     return Response(status_code=204)
 
 
@@ -591,6 +574,7 @@ async def theory_opening_quiz(
     return [OpeningQuizPositionOut.model_validate(item) for item in payload]
 
 
+@router.get("/line", response_model=TrainingLineOut, include_in_schema=False)
 @router.get("/training-line", response_model=TrainingLineOut)
 async def theory_training_line(
     username: str = Query(...),
@@ -617,10 +601,10 @@ async def theory_training_line(
     if game is None:
         raise HTTPException(status_code=404, detail="Training line not found")
 
-    moves = await build_deep_training_line(session)
-    if not moves:
-        parsed = parse_game_pgn(game.pgn)
-        moves = await build_training_line_from_parsed_game(session, parsed)
+    parsed = parse_game_pgn(game.pgn)
+    moves = await build_training_line_from_parsed_game(
+        session, parsed, opening_name=game.opening_name
+    )
     if not moves:
         raise HTTPException(
             status_code=404, detail="No master-theory line found for this opening"

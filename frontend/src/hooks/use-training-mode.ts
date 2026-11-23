@@ -12,10 +12,23 @@ export function useTrainingMode() {
 
   const replayMoves = useAppStore((state) => state.replayMoves)
   const currentFen = useAppStore((state) => state.currentFen)
-  const loadReplay = useAppStore((state) => state.loadReplay)
   const jumpToIndex = useAppStore((state) => state.jumpToIndex)
   const boardOrientation = useAppStore((state) => state.boardOrientation)
+  const setDrillSolving = useAppStore((state) => state.setDrillSolving)
   const autoPlayTimer = useRef<number | null>(null)
+  const statusTimer = useRef<number | null>(null)
+  const wasActive = useRef(false)
+
+  function clearTimers() {
+    if (autoPlayTimer.current !== null) {
+      clearTimeout(autoPlayTimer.current)
+      autoPlayTimer.current = null
+    }
+    if (statusTimer.current !== null) {
+      clearTimeout(statusTimer.current)
+      statusTimer.current = null
+    }
+  }
 
   const totalMoves = replayMoves.length
   const expectedMove = replayMoves[stepIndex] ?? null
@@ -29,37 +42,67 @@ export function useTrainingMode() {
 
   function start() {
     if (!replayMoves.length) return
+    clearTimers()
     const side = boardOrientation === 'black' ? 'black' : 'white'
     setUserSide(side)
     setStepIndex(0)
     setStatus('waiting')
+    wasActive.current = true
     setActive(true)
-    loadReplay(replayMoves)
+    setDrillSolving(true)
     jumpToIndex(0)
   }
 
   function stop() {
+    clearTimers()
+    if (wasActive.current) {
+      wasActive.current = false
+      setDrillSolving(false)
+    }
     setActive(false)
     setStatus('idle')
     setStepIndex(0)
-    if (autoPlayTimer.current) {
-      clearTimeout(autoPlayTimer.current)
-      autoPlayTimer.current = null
-    }
   }
 
   function retry() {
+    clearTimers()
     jumpToIndex(stepIndex)
     setStatus('waiting')
   }
+
+  useEffect(() => {
+    if (active) {
+      wasActive.current = true
+      setDrillSolving(true)
+    } else if (wasActive.current) {
+      wasActive.current = false
+      setDrillSolving(false)
+    }
+  }, [active, setDrillSolving])
+
+  useEffect(
+    () => () => {
+      clearTimers()
+      if (wasActive.current) {
+        wasActive.current = false
+        useAppStore.getState().setDrillSolving(false)
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
     if (!active || !expectedMove) return
 
     if (!isUserTurn(expectedMove.ply)) {
       autoPlayTimer.current = window.setTimeout(() => {
-        loadReplay(replayMoves, stepIndex + 1)
+        autoPlayTimer.current = null
+        if (statusTimer.current !== null) {
+          clearTimeout(statusTimer.current)
+          statusTimer.current = null
+        }
         const next = stepIndex + 1
+        jumpToIndex(next)
         setStepIndex(next)
         if (next >= totalMoves) {
           setStatus('complete')
@@ -69,13 +112,13 @@ export function useTrainingMode() {
       }, 400)
 
       return () => {
-        if (autoPlayTimer.current) {
+        if (autoPlayTimer.current !== null) {
           clearTimeout(autoPlayTimer.current)
           autoPlayTimer.current = null
         }
       }
     }
-  }, [active, expectedMove, isUserTurn, stepIndex, totalMoves, loadReplay, replayMoves])
+  }, [active, expectedMove, isUserTurn, stepIndex, totalMoves, jumpToIndex])
 
   useEffect(() => {
     if (!active || status !== 'waiting' || !expectedMove) return
@@ -85,10 +128,20 @@ export function useTrainingMode() {
       const next = stepIndex + 1
       setStepIndex(next)
       if (next >= totalMoves) {
+        if (statusTimer.current !== null) {
+          clearTimeout(statusTimer.current)
+          statusTimer.current = null
+        }
         setStatus('complete')
       } else {
         setStatus('correct')
-        setTimeout(() => setStatus('waiting'), 600)
+        if (statusTimer.current !== null) {
+          clearTimeout(statusTimer.current)
+        }
+        statusTimer.current = window.setTimeout(() => {
+          statusTimer.current = null
+          setStatus('waiting')
+        }, 600)
       }
     }
   }, [active, currentFen, expectedMove, isUserTurn, status, stepIndex, totalMoves])

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 
 import { GameReviewPanel } from '@/components/analysis/game-review-panel'
 import { reviewCoverage } from '@/lib/analysis/game-review'
@@ -10,10 +10,11 @@ import { TheoryComparison } from '@/components/theory/theory-comparison'
 import { OPEN_SECTION_EVENT } from '@/components/ui/collapsible-section'
 import { GameListPanel } from '@/components/workspace/game-list-panel'
 import { OpeningGroupsPanel } from '@/components/workspace/opening-groups-panel'
-import type { useBoardWorkspace } from '@/hooks/use-board-workspace'
-import { useStableCallback } from '@/hooks/use-stable-callback'
+import type { OpeningSelection } from '@/hooks/use-board-workspace'
+import { useGameReview } from '@/hooks/use-game-line'
 import { useTheory } from '@/hooks/use-theory'
-import type { ReplayMoveAnnotation } from '@/lib/analysis/replay-annotations'
+import type { WorkspaceGame } from '@/hooks/use-workspace-data'
+import { safeGetItem, safeSetItem } from '@/lib/storage'
 import { useAppStore } from '@/store/app-store'
 import { useIsSparring, useSparStore } from '@/store/spar-store'
 
@@ -75,9 +76,61 @@ function isExplorePage(id: string | null): id is ExplorePage {
 }
 
 function readStoredPage(): ExplorePage {
-  if (typeof window === 'undefined') return 'explore-library'
-  const stored = window.localStorage.getItem(PAGE_STORAGE)
+  const stored = safeGetItem(PAGE_STORAGE)
   return isExplorePage(stored) ? stored : 'explore-library'
+}
+
+/**
+ * The line under the page chips. On the Game review page it counts graded
+ * moves, which changes while a review runs, so it subscribes on its own and
+ * the panel around it does not re-render with every position searched.
+ */
+function ReviewCaption({ fallback }: { fallback: string }) {
+  const { annotations } = useGameReview()
+  if (!annotations.length) return <>{fallback}</>
+  const coverage = reviewCoverage(annotations)
+  return (
+    <>
+      {coverage.judged} of {coverage.total} moves graded
+    </>
+  )
+}
+
+/**
+ * The review of the game on the board. It reads the game's line and grades
+ * here, where they are drawn, instead of receiving them from the workspace
+ * root: read there, every graded position re-rendered the whole workspace.
+ */
+function GameReviewPage({ activeGame }: { activeGame: WorkspaceGame | null }) {
+  const { line, annotations } = useGameReview()
+  const sparReview = useSparStore((state) => state.reviewing)
+  const sparGameId = useSparStore((state) => state.savedGameId)
+  const treeEpoch = useAppStore((state) => state.treeEpoch)
+  // A finished game against the engine, still on the board.
+  const reviewingSparGame = sparReview !== null && sparReview.epoch === treeEpoch
+  const userColor = activeGame?.user_color === 'black' ? 'black' : activeGame ? 'white' : null
+
+  return (
+    <GameReviewPanel
+      annotations={annotations}
+      fenHistory={line.fenHistory}
+      gameId={reviewingSparGame ? null : (activeGame?.id ?? null)}
+      opponentTitle={reviewingSparGame ? 'Stockfish' : 'Opponent'}
+      reviewDepth={reviewingSparGame ? QUICK_REVIEW_DEPTH : undefined}
+      sparringGameId={reviewingSparGame ? sparGameId : null}
+      userColor={reviewingSparGame ? sparReview.userColor : userColor}
+    />
+  )
+}
+
+/**
+ * The game list follows the board ("Games through this position"), so it reads
+ * the position itself. Passed down from the workspace root, the position made
+ * the root, and everything under it, re-render on every step through a game.
+ */
+function GamesAtPosition(props: Omit<Parameters<typeof GameListPanel>[0], 'currentFen'>) {
+  const currentFen = useAppStore((state) => state.currentFen)
+  return <GameListPanel {...props} currentFen={currentFen} />
 }
 
 /**
@@ -88,47 +141,46 @@ function readStoredPage(): ExplorePage {
  * that turned Review into pages. The engine searches on the pages that read
  * the board and rests while the Library is being browsed.
  */
-export function ExplorePanel({
+export const ExplorePanel = memo(function ExplorePanel({
   username,
   color,
   timeClass,
-  workspace,
+  activeGame,
+  selectedGameId,
+  selectedOpening,
+  previewLoading,
+  previewError,
+  onLoadGame,
+  onLoadOpening,
+  onClearContext,
   onEngineOpenChange,
-  annotations,
-  fenHistory,
-  userColor,
 }: {
   username: string
   color: 'white' | 'black' | 'both'
   timeClass: string | null
-  workspace: ReturnType<typeof useBoardWorkspace>
-  engineOpen: boolean
+  /** The imported game on the board, if there is one. */
+  activeGame: WorkspaceGame | null
+  selectedGameId: number | null
+  selectedOpening: OpeningSelection | null
+  previewLoading: boolean
+  previewError: string | null
+  // Handlers must keep their identity between renders (the dashboard passes
+  // stable callbacks): the panel is memoised and the opening list under it too.
+  onLoadGame: (game: WorkspaceGame) => void
+  onLoadOpening: (opening: OpeningSelection) => void
+  onClearContext: () => void
   onEngineOpenChange: (open: boolean) => void
-  annotations: ReplayMoveAnnotation[]
-  fenHistory: string[]
-  userColor: 'white' | 'black' | null
 }) {
   const [page, setPage] = useState<ExplorePage>(readStoredPage)
   const [libraryView, setLibraryView] = useState<'openings' | 'games'>('openings')
-  // Stable, so the memoised opening list does not re-render on every board step.
-  const selectOpening = useStableCallback(workspace.loadOpening)
   const sparring = useIsSparring()
   // A retried mistake is being asked: the engine's lines are its answer.
   const drillSolving = useAppStore((state) => state.drillSolving)
-  const sparReview = useSparStore((state) => state.reviewing)
-  const sparGameId = useSparStore((state) => state.savedGameId)
-  const treeEpoch = useAppStore((state) => state.treeEpoch)
-  // A finished game against the engine, still on the board.
-  const reviewingSparGame = sparReview !== null && sparReview.epoch === treeEpoch
-  const coverage = reviewCoverage(annotations)
 
   function choosePage(next: ExplorePage) {
     setPage(next)
-    try {
-      window.localStorage.setItem(PAGE_STORAGE, next)
-    } catch {
-      // A blocked store only loses the remembered page.
-    }
+    // A blocked store only loses the remembered page.
+    safeSetItem(PAGE_STORAGE, next)
   }
 
   // The engine searches on every page that reads the board — trying "what if
@@ -171,10 +223,6 @@ export function ExplorePanel({
   }, [sparStatus])
 
   const active = PAGES.find((item) => item.id === page) ?? PAGES[0]
-  const caption =
-    page === 'explore-game-review' && annotations.length
-      ? `${coverage.judged} of ${coverage.total} moves graded`
-      : active.description
 
   return (
     <div className="theory-stack">
@@ -191,22 +239,20 @@ export function ExplorePanel({
           </button>
         ))}
       </div>
-      <span className="muted review-pages__caption">{caption}</span>
+      <span className="muted review-pages__caption">
+        {page === 'explore-game-review' ? (
+          <ReviewCaption fallback={active.description} />
+        ) : (
+          active.description
+        )}
+      </span>
 
       <div className="theory-stack" data-section-id={page} id={page}>
         {page === 'explore-game-review' ? (
           sparring ? (
             <p className="muted sparring__note">The review opens when the game ends.</p>
           ) : (
-            <GameReviewPanel
-              annotations={annotations}
-              fenHistory={fenHistory}
-              gameId={reviewingSparGame ? null : (workspace.activeGame?.id ?? null)}
-              opponentTitle={reviewingSparGame ? 'Stockfish' : 'Opponent'}
-              reviewDepth={reviewingSparGame ? QUICK_REVIEW_DEPTH : undefined}
-              sparringGameId={reviewingSparGame ? sparGameId : null}
-              userColor={reviewingSparGame ? sparReview.userColor : userColor}
-            />
+            <GameReviewPage activeGame={activeGame} />
           )
         ) : page === 'explore-engine' ? (
           <EngineLines
@@ -214,7 +260,7 @@ export function ExplorePanel({
             hiddenReason={sparring ? undefined : 'Hidden until you answer.'}
           />
         ) : page === 'explore-sparring' ? (
-          <SparringPanel onBeforeNewGame={workspace.clearLoadedContext} username={username} />
+          <SparringPanel onBeforeNewGame={onClearContext} username={username} />
         ) : page === 'explore-library' ? (
           <>
             <div aria-label="Library view" className="workspace-tabs__list" role="group">
@@ -233,27 +279,26 @@ export function ExplorePanel({
             {libraryView === 'openings' ? (
               <OpeningGroupsPanel
                 color={color}
-                isLoadingPreview={workspace.trainingLine.isLoading}
-                onSelectOpening={selectOpening}
-                previewError={workspace.trainingLine.error}
-                selectedOpening={workspace.selectedOpening}
+                isLoadingPreview={previewLoading}
+                onSelectOpening={onLoadOpening}
+                previewError={previewError}
+                selectedOpening={selectedOpening}
                 timeClass={timeClass}
                 username={username}
               />
             ) : (
-              <GameListPanel
+              <GamesAtPosition
                 color={color}
-                currentFen={workspace.currentFen}
-                eco={workspace.gameFilters.eco}
+                eco={null}
                 onSelectGame={(game) => {
                   // A loaded game's payoff is its review, so that is where it
-                  // lands — if there was a game to load.
+                  // lands, if there was a game to load.
                   if (!game.pgn) return
-                  workspace.loadGame(game)
+                  onLoadGame(game)
                   choosePage('explore-game-review')
                 }}
-                openingName={workspace.gameFilters.openingName}
-                selectedGameId={workspace.selectedGameId}
+                openingName={null}
+                selectedGameId={selectedGameId}
                 timeClass={timeClass}
                 username={username}
               />
@@ -268,4 +313,4 @@ export function ExplorePanel({
       </div>
     </div>
   )
-}
+})

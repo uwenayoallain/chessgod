@@ -78,7 +78,8 @@ export function WherePointsGo({
 
   if (points.isLoading)
     return <PanelSkeleton label="Measuring where your games are lost" rows={6} />
-  if (points.error || !points.data) {
+  // A refetch that fails in the background keeps what is already measured.
+  if (points.error && !points.data) {
     return (
       <PanelError
         error={points.error}
@@ -87,6 +88,7 @@ export function WherePointsGo({
       />
     )
   }
+  if (!points.data) return <PanelSkeleton label="Measuring where your games are lost" rows={6} />
 
   const data = points.data
   const verdict = describeOpeningVerdict(data)

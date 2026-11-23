@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import async_session_factory, get_db
+from app.database import get_db
 from app.services.cache import get_shared_cache
 from app.schemas.improvement import (
     DrillAttemptIn,
@@ -17,12 +14,11 @@ from app.schemas.improvement import (
 from app.services.game_scope import player_rating_floor
 from app.services.improvement import DEFAULT_TIME_CLASS, build_improvement_plan, record_drill_attempt
 from app.services.points_lost import build_points_lost
-from app.services.swr import stale_while_revalidate
+from app.services.swr import _refreshes as _plan_refreshes, stale_while_revalidate
 from app.services import training
 
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 # The plan is served stale-while-revalidate. Every evaluation upload bumps the
 # player's generation (the crawler uploads about every forty seconds), so a plain
@@ -32,7 +28,6 @@ logger = logging.getLogger(__name__)
 # player's own progress is never shown stale.
 _PLAN_FRESH_SECONDS = 1_800.0
 _PLAN_LAST_SECONDS = 86_400.0
-_plan_refreshes: dict[str, asyncio.Task] = {}
 
 
 def _plan_keys(username: str, params: dict) -> tuple[str, str]:
@@ -41,35 +36,6 @@ def _plan_keys(username: str, params: dict) -> tuple[str, str]:
         f"improvement:plan:{username}:{suffix}".lower(),
         f"improvement:planlast:{username}:{suffix}".lower(),
     )
-
-
-async def _build_and_store(session: AsyncSession, username: str, params: dict) -> ImprovementPlanOut:
-    cache = get_shared_cache()
-    fresh_base, last_key = _plan_keys(username, params)
-    # Capture the generation before reading, so a result computed across an
-    # upload is filed under the generation it actually saw.
-    fresh_key = await cache.versioned_key(fresh_base)
-    plan = await build_improvement_plan(session, username=username, **params)
-    payload = plan.model_dump(mode="json")
-    await cache.set_json(fresh_key, payload, ttl_seconds=_PLAN_FRESH_SECONDS)
-    await cache.set_json(last_key, payload, ttl_seconds=_PLAN_LAST_SECONDS)
-    return plan
-
-
-def _refresh_in_background(username: str, params: dict) -> None:
-    _, last_key = _plan_keys(username, params)
-    running = _plan_refreshes.get(last_key)
-    if running is not None and not running.done():
-        return
-
-    async def refresh() -> None:
-        try:
-            async with async_session_factory() as session:
-                await _build_and_store(session, username, params)
-        except Exception:
-            logger.warning("Background plan refresh failed for %s", username, exc_info=True)
-
-    _plan_refreshes[last_key] = asyncio.create_task(refresh())
 
 
 async def invalidate_plan(username: str) -> None:
@@ -100,16 +66,17 @@ async def improvement_plan(
         "min_user_rating": min_user_rating,
         "pattern_key": pattern_key,
     }
-    cache = get_shared_cache()
+
+    async def compute(db: AsyncSession) -> dict:
+        plan = await build_improvement_plan(db, username=username, **params)
+        return plan.model_dump(mode="json")
+
     fresh_base, last_key = _plan_keys(username, params)
-    fresh = await cache.get_json(await cache.versioned_key(fresh_base))
-    if fresh is not None:
-        return ImprovementPlanOut.model_validate(fresh)
-    last = await cache.get_json(last_key)
-    if last is not None:
-        _refresh_in_background(username, params)
-        return ImprovementPlanOut.model_validate(last)
-    return await _build_and_store(session, username, params)
+    payload = await stale_while_revalidate(
+        session, fresh_base=fresh_base, last_key=last_key, compute=compute,
+        fresh_ttl=_PLAN_FRESH_SECONDS, last_ttl=_PLAN_LAST_SECONDS,
+    )
+    return ImprovementPlanOut.model_validate(payload)
 
 
 @router.get("/where-points-go", response_model=PointsLostOut)

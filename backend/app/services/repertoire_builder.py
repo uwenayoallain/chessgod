@@ -36,7 +36,9 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.engine_contract import DECISIVE_CP, ENGINE_NAME, ENGINE_VERSION, MIN_TRUSTED_DEPTH
+from app.engine_contract import (
+    DECISIVE_CP, ENGINE_NAME, ENGINE_VERSION, MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH,
+)
 from app.models.analysis import AnalysisResult
 from app.models.game import Game
 from app.models.game_position import GamePosition
@@ -143,6 +145,7 @@ class _Loader:
         self.min_user_rating = min_user_rating
         self.nodes: dict[str, _NodeData] = {}
         self.fen_by_id: dict[int, str] = {}
+        self.id_by_fen: dict[str, int] = {}
         self.marks: dict[str, str] = {}
         # The move the player has been taught at each position (see `_choose`).
         self.learned: dict[str, str] = {}
@@ -228,17 +231,22 @@ class _Loader:
                 await self.session.execute(select(Position.id, Position.fen).where(Position.id.in_(chunk)))
             ).all():
                 self.fen_by_id[position_id] = fen
+                self.id_by_fen[fen] = position_id
 
-    async def node(self, fen: str) -> _NodeData:
-        node = self.nodes.get(fen)
-        if node is None:
-            position_id = (
-                await self.session.execute(select(Position.id).where(Position.fen == fen))
-            ).scalar_one_or_none()
-            node = self.nodes[fen] = _NodeData(position_id=position_id, fen=fen)
-        return node
+    async def load_nodes(self, fens: set[str]) -> None:
+        new_fens = fens - self.nodes.keys()
+        missing = list(new_fens - self.id_by_fen.keys())
+        for start in range(0, len(missing), 1000):
+            rows = await self.session.execute(
+                select(Position.id, Position.fen).where(Position.fen.in_(missing[start:start + 1000]))
+            )
+            for position_id, fen in rows:
+                self.fen_by_id[position_id] = fen
+                self.id_by_fen[fen] = position_id
+        for fen in new_fens:
+            self.nodes[fen] = _NodeData(position_id=self.id_by_fen.get(fen), fen=fen)
 
-    async def enrich(self, nodes: list[_NodeData], *, with_evals: bool) -> None:
+    async def enrich(self, nodes: list[_NodeData], players: list[_NodeData]) -> None:
         """Master moves for every node; engine lines for the player's."""
         ids = [node.position_id for node in nodes if node.position_id is not None]
         if not ids:
@@ -254,7 +262,8 @@ class _Loader:
         ).all():
             by_id[from_id].master[uci] = (int(games), to_id)
         await self._load_fens({to_id for node in nodes for _, to_id in node.master.values()})
-        if not with_evals:
+        player_ids = {node.position_id for node in players if node.position_id is not None}
+        if not player_ids:
             return
         rows = (
             await self.session.execute(
@@ -263,7 +272,7 @@ class _Loader:
                     AnalysisResult.eval_cp, AnalysisResult.eval_mate, AnalysisResult.best_move_uci,
                     AnalysisResult.pv_uci,
                 ).where(
-                    AnalysisResult.position_id.in_(ids),
+                    AnalysisResult.position_id.in_(player_ids),
                     AnalysisResult.engine == ENGINE_NAME,
                     AnalysisResult.engine_version == ENGINE_VERSION,
                     AnalysisResult.depth >= MIN_TRUSTED_DEPTH,
@@ -284,8 +293,8 @@ class _Loader:
             node.lines = sorted(by_depth[depth], key=lambda line: line.rank)
             node.multipv = bool(multi)
 
-    async def child_evals(self, ids: set[int]) -> dict[int, int]:
-        """Rank-one evaluation of positions, White's view."""
+    async def child_evals(self, ids: set[int]) -> dict[int, dict[int, int]]:
+        """Rank-one scores by position and depth, from White's view."""
         if not ids:
             return {}
         rows = (
@@ -302,13 +311,12 @@ class _Loader:
                 )
             )
         ).all()
-        best: dict[int, tuple[int, int]] = {}
+        by_position: dict[int, dict[int, int]] = defaultdict(dict)
         for position_id, depth, eval_cp, eval_mate in rows:
             if eval_cp is None and eval_mate is None:
                 continue
-            if position_id not in best or depth > best[position_id][0]:
-                best[position_id] = (depth, _fold(eval_cp, eval_mate))
-        return {position_id: value for position_id, (_, value) in best.items()}
+            by_position[position_id][depth] = _fold(eval_cp, eval_mate)
+        return by_position
 
 
 def _san(fen: str, uci: str) -> str:
@@ -347,7 +355,14 @@ def _surely_worse(node: _NodeData, mover_sign: int, best_eval: int | None) -> bo
     return best_eval - mover_sign * node.lines[-1].eval_cp > KEEP_CP
 
 
-def _choose(node: _NodeData, *, mover_sign: int, child_eval: dict[int, int],
+def _comparable_eval(scores: dict[int, int], depth: int) -> int | None:
+    nearest = min(scores, key=lambda candidate: (abs(candidate - depth), -candidate), default=None)
+    if nearest is None or abs(nearest - depth) > MAX_PAIR_DEPTH_GAP:
+        return None
+    return scores[nearest]
+
+
+def _choose(node: _NodeData, *, mover_sign: int, child_eval: dict[int, dict[int, int]],
             mark: str | None, learned: str | None = None) -> dict | None:
     """The player's move at `node`, and the evidence for it.
 
@@ -374,8 +389,10 @@ def _choose(node: _NodeData, *, mover_sign: int, child_eval: dict[int, int],
             return evals[uci]
         edge = node.edges.get(uci)
         child_id = edge.child_id if edge else node.master.get(uci, (0, None))[1]
-        if child_id is not None and child_id in child_eval:
-            return mover_sign * child_eval[child_id]
+        if child_id is not None and node.lines:
+            value = _comparable_eval(child_eval.get(child_id, {}), node.lines[0].depth)
+            if value is not None:
+                return mover_sign * value
         return None
 
     def sound(uci: str, bar: int = SOUND_CP) -> bool | None:
@@ -475,10 +492,12 @@ async def build_repertoire(
     finished: list[list[dict]] = []
     needs_engine: set[str] = set()
     while frontier:
-        nodes = [await loader.node(fen) for fen, _ in frontier]
-        players = [node for node in nodes if node.fen.split(" ")[1] == player_turn]
-        await loader.enrich(nodes, with_evals=False)
-        await loader.enrich(players, with_evals=True)
+        fens = {fen for fen, _ in frontier}
+        await loader.load_nodes(fens)
+        nodes = [loader.nodes[fen] for fen, _ in frontier]
+        unique_nodes = [loader.nodes[fen] for fen in fens]
+        players = [node for node in unique_nodes if node.fen.split(" ")[1] == player_turn]
+        await loader.enrich(unique_nodes, players)
         # The evaluation after each candidate, for moves outside the MultiPV lines,
         # and after each opponent reply, to spot the ones that are mistakes.
         child_ids = {
@@ -510,7 +529,9 @@ async def build_repertoire(
                     # The move was not among the lines: judging it takes a search of
                     # the position it leads to.
                     edge = node.edges.get(choice["uci"])
-                    if edge is not None and edge.child_id not in child_eval:
+                    if edge is not None and _comparable_eval(
+                        child_eval.get(edge.child_id, {}), node.lines[0].depth
+                    ) is None:
                         needs_engine.add(_after(fen, choice["uci"]))
                 step = {"ply": ply + 1, "fen": fen, "side": "you", **choice}
                 next_frontier.append((_after(fen, choice["uci"]), [*path, step]))
@@ -538,13 +559,17 @@ async def build_repertoire(
             if not replies:
                 finished.append(path)
                 continue
-            before = child_eval.get(node.position_id) if node.position_id is not None else None
+            before_scores = child_eval.get(node.position_id, {})
+            before_depth = max(before_scores, default=None)
             for edge in replies:
-                after = child_eval.get(edge.child_id)
+                after = (
+                    _comparable_eval(child_eval.get(edge.child_id, {}), before_depth)
+                    if before_depth is not None else None
+                )
                 # The opponent's loss, from their side.
                 trap_cp = (
-                    mover_sign * (after - before)
-                    if before is not None and after is not None else None
+                    mover_sign * (after - before_scores[before_depth])
+                    if before_depth is not None and after is not None else None
                 )
                 step = {
                     "ply": ply + 1,
@@ -587,14 +612,10 @@ async def build_repertoire(
             if node and node.position_id in loader.opening_names:
                 name_id = node.position_id
         games = last_known["games"] if last_known else first_games
-        if signature in seen:
-            kept = lines[seen[signature]]
-            if games > kept["games"]:
-                kept.update(moves=path, id=_line_id(ucis), first_move=path[0]["san"])
-            kept["games"] = max(kept["games"], games)
+        kept_index = seen.get(signature)
+        if kept_index is not None and games <= lines[kept_index]["games"]:
             continue
-        seen[signature] = len(lines)
-        lines.append({
+        line = {
             "id": _line_id(ucis),
             "name": loader.opening_names.get(name_id) if name_id else None,
             "first_move": path[0]["san"],
@@ -603,7 +624,12 @@ async def build_repertoire(
             "changes": sum(1 for step in yours if step["status"] == "change"),
             "traps": sum(1 for step in path if step.get("trap_cp")),
             "unchecked": sum(1 for step in yours if not step["checked"]),
-        })
+        }
+        if kept_index is None:
+            seen[signature] = len(lines)
+            lines.append(line)
+        else:
+            lines[kept_index] = line
     lines.sort(key=lambda line: line["games"], reverse=True)
     return {
         "username": username,

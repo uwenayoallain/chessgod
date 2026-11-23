@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BookOpen, GraduationCap } from 'lucide-react'
 
 import { BoardRail } from '@/components/board/board-rail'
@@ -6,7 +6,6 @@ import { Medal } from '@/components/training/trophies'
 import type { EmblemName } from '@/lib/training/emblem-art'
 import { ChessBoard } from '@/components/board/chess-board'
 import { WorkspaceTabs } from '@/components/board/workspace-tabs'
-import { EvaluationProgress } from '@/components/analysis/evaluation-progress'
 import { ImportProgress } from '@/components/import/import-progress'
 import { UsernameForm } from '@/components/import/username-form'
 import { Button } from '@/components/ui/button'
@@ -17,9 +16,10 @@ import { useBoardWorkspace } from '@/hooks/use-board-workspace'
 import { useAutoAnalysis } from '@/hooks/use-engine'
 import { useEngineEvalSync } from '@/hooks/use-engine-eval-sync'
 import { useImportSummary } from '@/hooks/use-import-summary'
-import { useGameLine } from '@/hooks/use-game-line'
-import { useMoveAnnotations } from '@/hooks/use-move-annotations'
+import type { WorkspaceGame } from '@/hooks/use-workspace-data'
+import { useGameReview } from '@/hooks/use-game-line'
 import { useSparringController, useSparringRecorder, useStartSparring } from '@/hooks/use-sparring'
+import { useStableCallback } from '@/hooks/use-stable-callback'
 import { useSyncOnReturn } from '@/hooks/use-sync-on-return'
 import { isServerUnreachable } from '@/lib/api-errors'
 import { getAppAccessState } from '@/lib/app-access'
@@ -155,12 +155,63 @@ function Landing({ isLoading }: { isLoading: boolean }) {
   )
 }
 
+/**
+ * Saves a finished engine game and sends its reviewed mistakes to drills.
+ * A component of its own, drawing nothing: it reads the game's grades, which
+ * change several times a second while a review runs, and read from the
+ * workspace root they re-rendered the board, the rail and both tabs each time.
+ */
+function SparringRecorder() {
+  const { line, annotations } = useGameReview()
+  useSparringRecorder(annotations, line)
+  return null
+}
+
+/**
+ * Everything the workspace runs rather than draws: the board's own search,
+ * saving evaluations, the opponent in a game against the engine, and fetching
+ * new games on return. Each follows the position or the engine, so they live
+ * in a component that renders nothing instead of in the root, where every
+ * step through a game would redraw the whole workspace.
+ */
+function WorkspaceBackground({
+  engineVisible,
+  username,
+}: {
+  engineVisible: boolean
+  username: string
+}) {
+  // Auto-analysis only runs while a page that reads the board is showing.
+  // Nor while a sparring game is in progress: the evaluation is the answer.
+  const sparring = useIsSparring()
+  // Nor while a position is being asked (a retried mistake): the search is its answer.
+  const drillSolving = useAppStore((state) => state.drillSolving)
+  useAutoAnalysis(engineVisible && !sparring && !drillSolving)
+  // Persist browser engine evals no matter which section produced them.
+  useEngineEvalSync()
+  // Owned here, not by the panel, so a game keeps moving whichever tab or
+  // section is showing.
+  useSparringController()
+  // Games played on Chess.com since the last look arrive on coming back.
+  useSyncOnReturn(username)
+  return <SparringRecorder />
+}
+
+// The rail's own state is the store's; from here it only needs to hear about a
+// different label or handler.
+const Rail = memo(BoardRail)
+
 function Workspace({ username }: { username: string }) {
   const colorFilter = useAppStore((state) => state.colorFilter)
   const timeClassFilter = useAppStore((state) => state.timeClassFilter)
   const status = useAppStore((state) => state.importStatus)
 
   const workspace = useBoardWorkspace({ username, color: colorFilter, timeClass: timeClassFilter })
+  // The workspace hook hands back new functions on every render. The panels
+  // below are memoised, so they get one identity that always calls the latest.
+  const clearLoadedContext = useStableCallback(workspace.clearLoadedContext)
+  const loadGame = useStableCallback(workspace.loadGame)
+  const loadOpening = useStableCallback(workspace.loadOpening)
   const [initialLayout] = useState(() => readDashboardLayout(getDashboardLayoutStorage()))
   const [activeTab, setActiveTab] = useState(initialLayout.activeTab)
   // Off until Explore reports which page is showing; only its Engine page turns it on.
@@ -188,26 +239,8 @@ function Workspace({ username }: { username: string }) {
       window.removeEventListener(OPEN_EXPLORE_EVENT, openExplore)
     }
   }, [])
-  // Auto-analysis only runs while the Engine section is visible — avoids burning
-  // CPU on every FEN change when the user is looking at anything else.
-  // Nor while a sparring game is in progress: the evaluation is the answer.
-  const sparring = useIsSparring()
-  // Nor while a position is being asked (a retried mistake): the search is its answer.
-  const drillSolving = useAppStore((state) => state.drillSolving)
-  useAutoAnalysis(activeTab === 'explore' && engineOpen && !sparring && !drillSolving)
-  // Persist browser engine evals no matter which section produced them.
-  useEngineEvalSync()
-  // Owned here, not by the panel, so a game keeps moving whichever tab or
-  // section is showing.
-  useSparringController()
-  const { playOut } = useStartSparring(username, workspace.clearLoadedContext)
-  // The review covers the whole loaded game, wherever the board happens to be.
-  const gameLine = useGameLine()
-  const gameAnnotations = useMoveAnnotations(gameLine)
-  // Saves a finished engine game and sends its reviewed mistakes to drills.
-  useSparringRecorder(gameAnnotations, gameLine)
-  // Games played on Chess.com since the last look arrive on coming back.
-  useSyncOnReturn(username)
+  const { playOut } = useStartSparring(username, clearLoadedContext)
+  const playOutLatest = useStableCallback(playOut)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialLayout.sidebarCollapsed)
   const [sidebarWidth, setSidebarWidth] = useState(initialLayout.sidebarWidth)
   const [railWidth, setRailWidth] = useState(initialLayout.railWidth)
@@ -285,12 +318,101 @@ function Workspace({ username }: { username: string }) {
   // tells every trainer its line is gone; the retry, arrows and hint ring are
   // the pieces that live beside the tree, so they go here.
   const resetBoard = useCallback(() => {
-    workspace.clearLoadedContext()
+    clearLoadedContext()
     useRetryStore.getState().end()
     const store = useAppStore.getState()
     store.setTrainerArrows([])
     store.setHintSquare(null)
-  }, [workspace])
+  }, [clearLoadedContext])
+
+  const openExplore = useCallback((section: string) => {
+    setActiveTab('explore')
+    // The tab mounts its sections on the next render.
+    window.setTimeout(() => revealSection(section), 60)
+  }, [])
+  const openGame = useCallback(
+    (game: WorkspaceGame) => {
+      setActiveTab('explore')
+      loadGame(game)
+      window.setTimeout(() => revealSection('explore-game-review'), 60)
+    },
+    [loadGame],
+  )
+  const playOutOnExplore = useCallback(
+    (position: { fen: string; lastUci: string | null; origin?: string }) => {
+      // The game's controls and move list live on Explore.
+      setActiveTab('explore')
+      playOutLatest(position)
+    },
+    [playOutLatest],
+  )
+  const toggleSidebar = useCallback(() => setSidebarCollapsed((prev) => !prev), [])
+
+  const { activeGame, selectedGameId, selectedOpening } = workspace
+  const previewLoading = workspace.trainingLine.isLoading
+  const previewError = workspace.trainingLine.error
+  // Built once per change that a tab can show. Both panels are memoised and
+  // every prop here is stable, so the root re-rendering (the workspace hook
+  // still follows the position) stops at this line instead of redrawing them.
+  const tabs = useMemo(
+    () => [
+      {
+        id: 'explore' as const,
+        label: 'Explore',
+        icon: <BookOpen size={15} />,
+        content: (
+          <ExplorePanel
+            activeGame={activeGame}
+            color={colorFilter}
+            onClearContext={clearLoadedContext}
+            onEngineOpenChange={setEngineOpen}
+            onLoadGame={loadGame}
+            onLoadOpening={loadOpening}
+            previewError={previewError}
+            previewLoading={previewLoading}
+            selectedGameId={selectedGameId}
+            selectedOpening={selectedOpening}
+            timeClass={timeClassFilter}
+            username={username}
+          />
+        ),
+      },
+      {
+        id: 'review' as const,
+        label: 'Review',
+        icon: <GraduationCap size={16} />,
+        content: (
+          <ReviewPanel
+            color={colorFilter}
+            importStatus={status}
+            onBeginDrill={clearLoadedContext}
+            onOpenExplore={openExplore}
+            onOpenGame={openGame}
+            onPlayOut={playOutOnExplore}
+            timeClass={timeClassFilter}
+            username={username}
+          />
+        ),
+      },
+    ],
+    [
+      activeGame,
+      clearLoadedContext,
+      colorFilter,
+      loadGame,
+      loadOpening,
+      openExplore,
+      openGame,
+      playOutOnExplore,
+      previewError,
+      previewLoading,
+      selectedGameId,
+      selectedOpening,
+      status,
+      timeClassFilter,
+      username,
+    ],
+  )
 
   const effectiveSidebarWidth = sidebarCollapsed
     ? '108px'
@@ -299,6 +421,10 @@ function Workspace({ username }: { username: string }) {
 
   return (
     <div className="page">
+      <WorkspaceBackground
+        engineVisible={activeTab === 'explore' && engineOpen}
+        username={username}
+      />
       <Celebrations />
       <div
         className="workspace"
@@ -314,14 +440,14 @@ function Workspace({ username }: { username: string }) {
         <div className="workspace__board-shell">
           <div className="workspace__board-panel">
             <ChessBoard
-              activeGame={workspace.activeGame}
-              selectedOpening={workspace.selectedOpening}
-              onClearContext={workspace.clearLoadedContext}
+              activeGame={activeGame}
+              selectedOpening={selectedOpening}
+              onClearContext={clearLoadedContext}
               username={username}
             />
           </div>
           <div className="resize-handle" onMouseDown={handleRailResizeStart} />
-          <BoardRail
+          <Rail
             loadedContextLabel={loadedContextLabel}
             onClearLoadedContext={resetBoard}
             showColorFilter
@@ -333,65 +459,10 @@ function Workspace({ username }: { username: string }) {
           activeTab={activeTab}
           collapsed={sidebarCollapsed}
           onChange={setActiveTab}
-          onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
-          tabs={[
-            {
-              id: 'explore',
-              label: 'Explore',
-              icon: <BookOpen size={15} />,
-              content: (
-                <ExplorePanel
-                  color={colorFilter}
-                  annotations={gameAnnotations}
-                  fenHistory={gameLine.fenHistory}
-                  userColor={
-                    workspace.activeGame?.user_color === 'black'
-                      ? 'black'
-                      : workspace.activeGame
-                        ? 'white'
-                        : null
-                  }
-                  engineOpen={engineOpen}
-                  onEngineOpenChange={setEngineOpen}
-                  timeClass={timeClassFilter}
-                  username={username}
-                  workspace={workspace}
-                />
-              ),
-            },
-            {
-              id: 'review',
-              label: 'Review',
-              icon: <GraduationCap size={16} />,
-              content: (
-                <ReviewPanel
-                  color={colorFilter}
-                  importStatus={status}
-                  onBeginDrill={workspace.clearLoadedContext}
-                  onPlayOut={(position) => {
-                    // The game's controls and move list live on Explore.
-                    setActiveTab('explore')
-                    playOut(position)
-                  }}
-                  onOpenGame={(game) => {
-                    setActiveTab('explore')
-                    workspace.loadGame(game)
-                    window.setTimeout(() => revealSection('explore-game-review'), 60)
-                  }}
-                  onOpenExplore={(section) => {
-                    setActiveTab('explore')
-                    // The tab mounts its sections on the next render.
-                    window.setTimeout(() => revealSection(section), 60)
-                  }}
-                  timeClass={timeClassFilter}
-                  username={username}
-                />
-              ),
-            },
-          ]}
+          onToggleCollapse={toggleSidebar}
+          tabs={tabs}
         />
       </div>
-      <EvaluationProgress />
       <ImportProgress />
     </div>
   )

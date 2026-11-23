@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, memo, Suspense, useEffect, useState } from 'react'
 
 import { PageBoundary } from '@/components/ui/page-boundary'
 import { OpeningCourse } from '@/components/training/opening-course'
@@ -24,6 +24,7 @@ import { useGameStats } from '@/hooks/use-game-stats'
 import { useMistakes } from '@/hooks/use-mistakes'
 import { useRepertoire } from '@/hooks/use-repertoire'
 import { useTheoryDeviations } from '@/hooks/use-theory'
+import { safeGetItem, safeSetItem } from '@/lib/storage'
 import { useAppStore } from '@/store/app-store'
 
 // Pages past Today load the first time they are opened: they were most of
@@ -350,8 +351,7 @@ export const SECTION_VIEWS: Record<string, ReviewView> = Object.fromEntries(
 )
 
 function readStoredView(): ReviewView {
-  if (typeof window === 'undefined') return 'train'
-  const stored = window.localStorage.getItem(VIEW_STORAGE)
+  const stored = safeGetItem(VIEW_STORAGE)
   return stored === 'progress' || stored === 'reference' ? stored : 'train'
 }
 
@@ -360,8 +360,7 @@ function firstPageOf(view: ReviewView): string {
 }
 
 function readStoredPage(view: ReviewView): string {
-  if (typeof window === 'undefined') return firstPageOf(view)
-  const stored = window.localStorage.getItem(PAGE_STORAGE + view)
+  const stored = safeGetItem(PAGE_STORAGE + view)
   return PAGES.some((page) => page.id === stored && page.view === view)
     ? (stored as string)
     : firstPageOf(view)
@@ -374,8 +373,11 @@ function readStoredPage(view: ReviewView): string {
  * now you pick what you are looking at and see only that. Nothing was removed.
  * A page mounts (and therefore fetches) only while it is the one showing, and
  * a link to a page (`revealSection`) switches view and page first.
+ *
+ * Memoised: the dashboard passes stable handlers, so the panel re-renders for
+ * its own state and scope and not each time the workspace root does.
  */
-export function ReviewPanel({
+export const ReviewPanel = memo(function ReviewPanel({
   username,
   color,
   timeClass,
@@ -404,12 +406,12 @@ export function ReviewPanel({
 
   function chooseView(next: ReviewView) {
     setView(next)
-    if (typeof window !== 'undefined') window.localStorage.setItem(VIEW_STORAGE, next)
+    safeSetItem(VIEW_STORAGE, next)
   }
 
   function choosePage(home: ReviewView, id: string) {
     setPageByView((previous) => ({ ...previous, [home]: id }))
-    if (typeof window !== 'undefined') window.localStorage.setItem(PAGE_STORAGE + home, id)
+    safeSetItem(PAGE_STORAGE + home, id)
   }
 
   // Links to a page ("Go" on a quest, "last week" on the Today card, the
@@ -551,4 +553,4 @@ export function ReviewPanel({
       </div>
     </div>
   )
-}
+})

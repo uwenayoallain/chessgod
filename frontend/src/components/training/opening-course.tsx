@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Chess } from 'chess.js'
 import { ArrowLeft, BookOpen, Crown, Cpu, Dumbbell, Play, RotateCcw } from 'lucide-react'
@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { PanelError } from '@/components/ui/panel-error'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { repertoireQueryKey, useRepertoire } from '@/hooks/use-training'
+import { GAME_REVIEW_DEPTH } from '@/lib/analysis/review-depth'
 import { api } from '@/lib/api'
 import { scoreToWhitePerspective } from '@/lib/stockfish/eval'
 import {
@@ -26,8 +27,6 @@ import { useEngineStore } from '@/store/engine-store'
 import { useTrainingStore } from '@/store/training-store'
 
 const COLOR_KEY = 'chessgod.courseColor'
-// Deep enough to rank four candidates reliably, quick enough to watch.
-const CHECK_DEPTH = 18
 
 function readColor(): 'white' | 'black' {
   try {
@@ -62,23 +61,45 @@ function EngineCheck({ repertoire, username }: { repertoire: Repertoire; usernam
   const playMove = useEngineStore((state) => state.playMove)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const cancelled = useRef(false)
+  const running = useRef(false)
+
+  useEffect(() => {
+    cancelled.current = false
+    return () => {
+      cancelled.current = true
+      if (running.current) {
+        running.current = false
+        useEngineStore.getState().stop()
+      }
+    }
+  }, [])
+
   const total = repertoire.needs_engine.length
   if (!total && !progress) return null
 
   async function run() {
+    if (running.current) return
+    running.current = true
     setError(null)
     let round = repertoire
     let done
     try {
       // A changed move can lead into positions nobody searched yet: go round again.
       for (let pass = 0; pass < 3 && round.needs_engine.length; pass += 1) {
+        if (cancelled.current) return
         const work = round.needs_engine
         done = 0
         setProgress({ done, total: work.length })
         let batch: unknown[] = []
         for (const fen of work) {
+          if (cancelled.current) return
           const full = `${fen} 0 1`
-          const lines = await playMove(full, { depth: CHECK_DEPTH, multiPV: round.multipv })
+          const lines = await playMove(full, {
+            depth: GAME_REVIEW_DEPTH,
+            multiPV: round.multipv,
+          })
+          if (cancelled.current) return
           for (const line of lines ?? []) {
             if (!line.pv.length) continue
             const score = scoreToWhitePerspective(line.score, full)
@@ -93,24 +114,35 @@ function EngineCheck({ repertoire, username }: { repertoire: Repertoire; usernam
             })
           }
           done += 1
+          if (cancelled.current) return
           setProgress({ done, total: work.length })
           if (batch.length >= 40) {
             await api.post('/api/analysis/evaluations', { items: batch })
             batch = []
+            if (cancelled.current) return
           }
         }
+        if (cancelled.current) return
         if (batch.length) await api.post('/api/analysis/evaluations', { items: batch })
+        if (cancelled.current) return
         round = (
           await api.get<Repertoire>('/api/training/repertoire', {
             params: { username, color: repertoire.color, fresh: true },
           })
         ).data
+        if (cancelled.current) return
         queryClient.setQueryData(repertoireQueryKey(username, repertoire.color), round)
       }
-      setProgress(null)
+      if (!cancelled.current) setProgress(null)
     } catch {
-      setError('The engine check stopped. What it finished is saved, so run it again to carry on.')
-      setProgress(null)
+      if (!cancelled.current) {
+        setError(
+          'The engine check stopped. What it finished is saved, so run it again to carry on.',
+        )
+        setProgress(null)
+      }
+    } finally {
+      running.current = false
     }
   }
 
@@ -188,7 +220,7 @@ function LineMoves({ line }: { line: RepertoireLine }) {
  * Where a boss fight starts: the line's last position with the player to move.
  *
  * A game played out takes the side to move as the player's, and most lines
- * end on the player's own move — starting after it would hand the player the
+ * end on the player's own move; starting after it would hand the player the
  * opponent's pieces. So the fight starts before the player's last move: they
  * play it themselves, then carry on alone.
  */
@@ -329,7 +361,10 @@ export function OpeningCourse({
   if (repertoire.isLoading && !session) {
     return <PanelSkeleton label="Building your repertoire" rows={5} rowHeight={56} />
   }
-  if (repertoire.error || !data) {
+  // Only a failure with nothing to show is an error screen. A background
+  // refetch that fails keeps the repertoire already on screen: replacing it
+  // with an error unmounted a session in the middle of a line.
+  if (repertoire.error && !data) {
     return (
       <PanelError
         error={repertoire.error}
@@ -337,6 +372,9 @@ export function OpeningCourse({
         what="your repertoire"
       />
     )
+  }
+  if (!data) {
+    return <PanelSkeleton label="Building your repertoire" rows={5} rowHeight={56} />
   }
 
   const lines = data.lines
@@ -540,7 +578,7 @@ export function OpeningCourse({
         </div>
       </div>
 
-      <EngineCheck repertoire={data} username={username} />
+      <EngineCheck key={color} repertoire={data} username={username} />
 
       {chapters.map((chapter) => (
         <section className="course-chapter" key={chapter.key}>

@@ -3,16 +3,16 @@ import type { CSSProperties } from 'react'
 
 import { findOpponentHangingPieceThreat } from './hanging-threats'
 
-// Amber reads on both square colors; red is reserved for the threat arrow.
-export const BEST_MOVE_ARROW_COLOR = 'rgba(255, 170, 0, 0.85)'
-export const THREAT_ARROW_COLOR = 'rgba(214, 60, 45, 0.8)'
+// Deep amber reads cleanly on both warm parchment and walnut squares;
+// red is reserved for the hanging-piece threat arrow.
+export const BEST_MOVE_ARROW_COLOR = 'rgba(234, 138, 16, 0.9)'
+export const THREAT_ARROW_COLOR = 'rgba(214, 60, 45, 0.88)'
 /**
- * "Play this" — a trainer's hint or answer arrow. Blue, not the app's green:
- * the dark squares are green (#739552), and a green arrow vanished on them.
- * Every mark on the board contrasts with the squares, never with the theme.
+ * "Play this": a trainer's hint or answer arrow. Green matches the app's
+ * primary action accent and contrasts sharply against the walnut board squares.
  */
-export const PLAY_ARROW_COLOR = 'rgba(36, 98, 214, 0.92)'
-export const LAST_MOVE_SQUARE = 'rgba(255, 255, 51, 0.42)'
+export const PLAY_ARROW_COLOR = 'rgba(38, 174, 82, 0.92)'
+export const LAST_MOVE_SQUARE = 'rgba(205, 210, 106, 0.56)'
 
 export type BoardArrow = {
   startSquare: string

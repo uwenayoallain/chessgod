@@ -17,12 +17,18 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from hashlib import sha256
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import func, select
+import chess
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.engine_contract import ENGINE_NAME, ENGINE_VERSION, MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
+from app.models.analysis import AnalysisResult
 from app.models.drill_progress import DrillProgress
 from app.models.training import LineMoveProgress, TrainingEvent
 from app.services import quests
@@ -88,6 +94,8 @@ MAX_FREEZES = 2
 CLIENT_EVENTS = {"quiz_correct", "quiz_answer", "game_reviewed", "retry_found", "retry_missed"}
 DAILY_GOALS = (20, 50, 100)
 DEFAULT_DAILY_GOAL = 50
+_LINE_REVIEW_RECEIPT = "line_review_receipt"
+_EQUIVALENT_MOVE_CP = 30
 
 TITLES = ((18, "King"), (12, "Queen"), (8, "Rook"), (5, "Bishop"), (3, "Knight"), (1, "Pawn"))
 
@@ -180,6 +188,70 @@ async def award(
     except IntegrityError:
         return 0
     return amount
+
+
+async def accepted_trainer_move_san(
+    session: AsyncSession,
+    *,
+    position_id: int,
+    fen: str,
+    expected_uci: str,
+    expected_san: str,
+    played_uci: str,
+) -> str | None:
+    if played_uci == expected_uci:
+        return expected_san
+    try:
+        board = chess.Board(fen)
+        played_move = chess.Move.from_uci(played_uci)
+        if played_move not in board.legal_moves:
+            return None
+    except ValueError:
+        return None
+
+    result = await session.execute(
+        select(
+            AnalysisResult.multipv_rank, AnalysisResult.depth,
+            AnalysisResult.eval_cp, AnalysisResult.eval_mate,
+        ).where(
+            AnalysisResult.position_id == position_id,
+            AnalysisResult.engine == ENGINE_NAME,
+            AnalysisResult.engine_version == ENGINE_VERSION,
+            AnalysisResult.depth >= MIN_TRUSTED_DEPTH,
+            or_(AnalysisResult.eval_cp.is_not(None), AnalysisResult.eval_mate.is_not(None)),
+            or_(
+                and_(AnalysisResult.multipv_rank == 1, AnalysisResult.best_move_uci == expected_uci),
+                and_(AnalysisResult.multipv_rank > 1, AnalysisResult.best_move_uci == played_uci),
+            ),
+        ).order_by(AnalysisResult.depth.desc(), AnalysisResult.multipv_rank.asc())
+    )
+    rows = result.all()
+    rank_one = [row for row in rows if row.multipv_rank == 1]
+    alternatives = [row for row in rows if row.multipv_rank > 1]
+    pair = min(
+        (
+            (best, alternative)
+            for best in rank_one
+            for alternative in alternatives
+            if abs(best.depth - alternative.depth) <= MAX_PAIR_DEPTH_GAP
+        ),
+        key=lambda pair: (abs(pair[0].depth - pair[1].depth), -(pair[0].depth + pair[1].depth)),
+        default=None,
+    )
+    if pair is None:
+        return None
+
+    best, alternative = pair
+    sign = 1 if board.turn == chess.WHITE else -1
+    if alternative.eval_mate is not None:
+        equivalent = sign * alternative.eval_mate > 0 and (
+            best.eval_mate is None or sign * best.eval_mate > 0
+        )
+    elif best.eval_mate is not None:
+        equivalent = False
+    else:
+        equivalent = sign * (best.eval_cp - alternative.eval_cp) <= _EQUIVALENT_MOVE_CP
+    return board.san(played_move) if equivalent else None
 
 
 def _zone(tz: str | None) -> ZoneInfo:
@@ -278,7 +350,7 @@ async def profile(
     events = (
         await session.execute(
             select(TrainingEvent.kind, TrainingEvent.xp, TrainingEvent.detail, TrainingEvent.created_at)
-            .where(TrainingEvent.username == username)
+            .where(TrainingEvent.username == username, TrainingEvent.kind != _LINE_REVIEW_RECEIPT)
             .order_by(TrainingEvent.created_at, TrainingEvent.id)
         )
     ).all()
@@ -474,6 +546,23 @@ def annotate_repertoire(repertoire: dict, progress: dict[tuple[str, str], LineMo
     return repertoire
 
 
+def _receipt_request_id(request_id: str) -> str:
+    # The stored key is longer than the raw IDs accepted by the event API.
+    return f"line-review-receipt:{sha256(request_id.encode()).hexdigest()}"
+
+
+async def line_review_receipt(
+    session: AsyncSession, username: str, request_id: str,
+) -> dict | None:
+    return await session.scalar(
+        select(TrainingEvent.detail).where(
+            TrainingEvent.username == username,
+            TrainingEvent.request_id == _receipt_request_id(request_id),
+            TrainingEvent.kind == _LINE_REVIEW_RECEIPT,
+        )
+    )
+
+
 async def record_line_review(
     session: AsyncSession,
     *,
@@ -491,6 +580,26 @@ async def record_line_review(
     they made there. Correctness is decided here, against the line, never
     taken from the client.
     """
+    receipt = None
+    if request_id is not None:
+        # Claim the request before touching any progress. The unique index
+        # makes concurrent retries wait for the first transaction's outcome.
+        insert = sqlite_insert if session.get_bind().dialect.name == "sqlite" else pg_insert
+        receipt = await session.scalar(
+            insert(TrainingEvent)
+            .values(
+                username=username, kind=_LINE_REVIEW_RECEIPT, xp=0,
+                request_id=_receipt_request_id(request_id),
+            )
+            .on_conflict_do_nothing(index_elements=["username", "request_id"])
+            .returning(TrainingEvent)
+        )
+        if receipt is None:
+            recorded = await line_review_receipt(session, username, request_id)
+            if recorded is None:
+                raise RuntimeError("Line review receipt has no recorded outcome")
+            return recorded
+
     now = now or datetime.now(UTC)
     progress = await load_move_progress(session, username)
     yours = [step for step in line["moves"] if step["side"] == "you"]
@@ -548,7 +657,10 @@ async def record_line_review(
     if mode == "practice" and not misses and any_due:
         xp += await award(session, username, "line_perfect", detail=detail,
                           request_id=f"{request_id}:perfect" if request_id else None)
-    return {"results": results, "misses": misses, "xp_gained": xp}
+    outcome = {"results": results, "misses": misses, "xp_gained": xp}
+    if receipt is not None:
+        receipt.detail = outcome
+    return outcome
 
 
 async def settle_quests(

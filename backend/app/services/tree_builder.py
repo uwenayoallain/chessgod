@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import bindparam, func, select, update
+from sqlalchemy import Float, case, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -45,7 +45,7 @@ async def update_tree_from_game(
     draw_inc = increment if game_result == "1/2-1/2" else 0
     black_inc = increment if game_result == "0-1" else 0
 
-    # Distinct FENs, first-appearance order is irrelevant — we map back by FEN.
+    # Each FEN is written once. The returned ids are keyed by FEN.
     unique_fens = list(dict.fromkeys(record.fen for record in parsed.positions))
     position_stmt = (
         pg_insert(Position)
@@ -159,44 +159,28 @@ async def backfill_position_clocks_by_game_id(
     game_id: int,
     parsed: ParsedGame,
 ) -> int:
-    """Fill clock metadata when the caller already resolved the game id."""
-
-    clock_rows = [record for record in parsed.positions if record.clock_seconds_after is not None]
-    if not clock_rows:
-        return 0
-    missing_count = await session.scalar(
-        select(func.count())
-        .select_from(GamePosition)
-        .where(
-            GamePosition.game_id == game_id,
-            GamePosition.clock_seconds_after.is_(None),
-            GamePosition.ply > 0,
+    """Fill missing clocks for matching plies and return the number actually written."""
+    game_positions = GamePosition.__table__
+    ply = game_positions.c.ply
+    records = [r for r in parsed.positions if r.ply > 0 and r.clock_seconds_after is not None]
+    written = 0
+    # Five parameters per ply. Keep long games under SQLite's bind limit.
+    for start in range(0, len(records), 128):
+        batch = records[start:start + 128]
+        clocks = {r.ply: r.clock_seconds_after for r in batch}
+        thinks = {r.ply: literal(r.think_seconds, type_=Float()) for r in batch}
+        updated = await session.scalars(
+            update(game_positions)
+            .where(
+                game_positions.c.game_id == game_id,
+                game_positions.c.clock_seconds_after.is_(None),
+                ply.in_(clocks),
+            )
+            .values(
+                clock_seconds_after=case(clocks, value=ply),
+                think_seconds=case(thinks, value=ply),
+            )
+            .returning(ply)
         )
-    )
-    if not missing_count:
-        return 0
-    stmt = (
-        update(GamePosition.__table__)
-        .where(
-            GamePosition.game_id == bindparam("target_game_id"),
-            GamePosition.ply == bindparam("target_ply"),
-            GamePosition.clock_seconds_after.is_(None),
-        )
-        .values(
-            clock_seconds_after=bindparam("new_clock_seconds_after"),
-            think_seconds=bindparam("new_think_seconds"),
-        )
-    )
-    await session.execute(
-        stmt,
-        [
-            {
-                "target_game_id": game_id,
-                "target_ply": record.ply,
-                "new_clock_seconds_after": record.clock_seconds_after,
-                "new_think_seconds": record.think_seconds,
-            }
-            for record in clock_rows
-        ],
-    )
-    return min(int(missing_count), len(clock_rows))
+        written += len(updated.all())
+    return written

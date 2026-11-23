@@ -287,3 +287,180 @@ it('reports a failed phase-coverage request instead of showing an empty breakdow
     cleanup()
   }
 })
+
+describe('Cancel', () => {
+  function crawlInProgress(kind: 'library' | 'game') {
+    const original = engineStore.useEngineStore.getState()
+    const stopLibraryCrawl = vi.fn()
+    const stop = vi.fn()
+    engineStore.useEngineStore.setState({
+      queueReplayAnalysis: vi.fn().mockResolvedValue(0),
+      replayQueueActive: true,
+      replayQueueKind: kind,
+      replayQueueCompleted: 3,
+      replayQueueTotal: 24,
+      stop,
+      stopLibraryCrawl,
+    })
+    return {
+      stop,
+      stopLibraryCrawl,
+      restore: () =>
+        engineStore.useEngineStore.setState({
+          queueReplayAnalysis: original.queueReplayAnalysis,
+          replayQueueActive: false,
+          replayQueueKind: null,
+          replayQueueCompleted: 0,
+          replayQueueTotal: 0,
+          stop: original.stop,
+          stopLibraryCrawl: original.stopLibraryCrawl,
+        }),
+    }
+  }
+
+  it('switches the crawl off and drops only the crawl', async () => {
+    // It used to call the engine's own stop, which also ended a game review on
+    // its pool, and left the crawl switched on, so the next tick queued the
+    // same batch again.
+    window.localStorage.setItem(KEY, 'true')
+    const engine = crawlInProgress('library')
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { fens: [], missing_count: 40 } })
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ data: { fens: [], missing_count: 40 } })
+    try {
+      render(<EngineAnalyzeBatch username="tester" color="both" timeClass="rapid_blitz" />)
+      expect(screen.getByRole('button', { name: 'Pause analysis' })).toBeTruthy()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+      expect(engine.stopLibraryCrawl).toHaveBeenCalledOnce()
+      expect(engine.stop).not.toHaveBeenCalled()
+      // Off, and remembered as off: a reload must not start it again.
+      expect(screen.getByRole('button', { name: 'Analyze my games' })).toBeTruthy()
+      await waitFor(() => expect(window.localStorage.getItem(KEY)).toBe('false'))
+
+      // With the queue now empty nothing asks for another batch.
+      act(() => engineStore.useEngineStore.setState({ replayQueueActive: false }))
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(post).not.toHaveBeenCalled()
+      expect(screen.queryByText('Analyzing…')).toBeNull()
+    } finally {
+      cleanup()
+      engine.restore()
+    }
+  })
+
+  it('is not offered while the work in hand is a game review', () => {
+    // The queue is busy with a review the player is reading. This panel must
+    // not present a button that looks like it would end it.
+    const engine = crawlInProgress('game')
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { fens: [], missing_count: 40 } })
+    try {
+      render(<EngineAnalyzeBatch username="tester" color="both" timeClass="rapid_blitz" />)
+      expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull()
+    } finally {
+      cleanup()
+      engine.restore()
+    }
+  })
+})
+
+describe('a failing request for work', () => {
+  it('backs off between attempts and switches itself off on the third', async () => {
+    // Each failure used to re-run the scheduling effect, which asked again at
+    // once: three attempts in a few milliseconds, then a panel reading
+    // "Analyzing…" above "Analysis stopped after an error", still switched on.
+    vi.useFakeTimers()
+    const originalQueue = engineStore.useEngineStore.getState().queueReplayAnalysis
+    const queue = vi.fn().mockResolvedValue(0)
+    engineStore.useEngineStore.setState({ queueReplayAnalysis: queue, replayQueueActive: false })
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { fens: [], missing_count: 5 } })
+    const post = vi.spyOn(api, 'post').mockRejectedValue(new Error('offline'))
+    const settle = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+    try {
+      const { RETRY_BACKOFF_MS } = await import('./engine-analyze-batch')
+      render(<EngineAnalyzeBatch username="tester" color="both" timeClass="rapid_blitz" />)
+      fireEvent.click(screen.getByRole('button', { name: 'Analyze my games' }))
+      await settle()
+
+      // First failure: it says it will try again, and does not claim to analyze.
+      expect(post).toHaveBeenCalledTimes(1)
+      expect(screen.getByText(/Trying again in 5 seconds/)).toBeTruthy()
+      expect(screen.queryByText('Analyzing…')).toBeNull()
+      expect(screen.queryByText(/Analysis stopped/)).toBeNull()
+      expect(screen.getByRole('button', { name: 'Pause analysis' })).toBeTruthy()
+
+      // Nothing more until the wait is over.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[0] - 100)
+      })
+      expect(post).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100)
+      })
+      expect(post).toHaveBeenCalledTimes(2)
+      expect(screen.getByText(/Trying again in 20 seconds/)).toBeTruthy()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RETRY_BACKOFF_MS[1])
+      })
+      expect(post).toHaveBeenCalledTimes(3)
+
+      // Third failure: off, with one message, and the way to start again.
+      expect(screen.getByText(/Analysis stopped after three failed attempts/)).toBeTruthy()
+      expect(screen.queryByText('Analyzing…')).toBeNull()
+      expect(screen.queryByText(/Trying again/)).toBeNull()
+      expect(screen.getByRole('button', { name: 'Analyze my games' })).toBeTruthy()
+
+      // And it stays off: no fourth attempt however long it is left.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5 * 60_000)
+      })
+      expect(post).toHaveBeenCalledTimes(3)
+      expect(queue).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+      engineStore.useEngineStore.setState({ queueReplayAnalysis: originalQueue })
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the old failure when the crawl is started again', async () => {
+    vi.useFakeTimers()
+    const originalQueue = engineStore.useEngineStore.getState().queueReplayAnalysis
+    engineStore.useEngineStore.setState({
+      queueReplayAnalysis: vi.fn().mockResolvedValue(2),
+      replayQueueActive: false,
+    })
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { fens: [], missing_count: 5 } })
+    const post = vi.spyOn(api, 'post').mockRejectedValue(new Error('offline'))
+    try {
+      render(<EngineAnalyzeBatch username="tester" color="both" timeClass="rapid_blitz" />)
+      fireEvent.click(screen.getByRole('button', { name: 'Analyze my games' }))
+      // One wait per attempt: each retry is scheduled by the render that
+      // follows the failure before it.
+      for (const wait of [0, 5_000, 20_000]) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(wait)
+        })
+      }
+      expect(screen.getByText(/Analysis stopped after three failed attempts/)).toBeTruthy()
+
+      post.mockResolvedValue({ data: { fens: ['a-position'], missing_count: 5 } })
+      fireEvent.click(screen.getByRole('button', { name: 'Analyze my games' }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(screen.queryByText(/Analysis stopped/)).toBeNull()
+      expect(screen.getByText('Analyzing…')).toBeTruthy()
+    } finally {
+      cleanup()
+      engineStore.useEngineStore.setState({ queueReplayAnalysis: originalQueue })
+      vi.useRealTimers()
+    }
+  })
+})

@@ -31,14 +31,23 @@ help:
 	@printf "  make crawl USERNAME=name           Background-analyse the library, yielding whenever the machine is busy\n"
 	@printf "  make outcome-backfill USERNAME=name  Record checkmate/stalemate facts from imported final boards\n"
 
+# The crawler is an opt-in compose profile, and a stack started without it left
+# the crawler dead for weeks: `make run` after a reboot or a rebuild brought
+# back everything but the one service whose stopping leaves no error anywhere.
+# So the stack starts it whenever a crawl is configured: CRAWL_USERNAME in the
+# environment or in .env (`CRAWL=0 make run` leaves it out). The last
+# assignment in .env wins, as it does for compose itself.
+CRAWL_USERNAME_CONFIGURED := $(strip $(or $(CRAWL_USERNAME),$(shell sed -n 's/^[[:space:]]*CRAWL_USERNAME[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1 | tr -d "\"' ")))
+CRAWL_PROFILE := $(if $(filter 0,$(CRAWL)),,$(if $(CRAWL_USERNAME_CONFIGURED),--profile crawl,))
+
 run:
-	docker compose up --build $(RUN_ARGS)
+	docker compose $(CRAWL_PROFILE) up --build $(RUN_ARGS)
 
 up: run
 
 .PHONY: start-local
 start-local:
-	docker compose up -d --no-build --pull never
+	docker compose $(CRAWL_PROFILE) up -d --no-build --pull never
 
 # Restarts the *process* only. Docker reuses the existing container, so a
 # changed cpus/memory limit in docker-compose.yml is NOT applied -- the crawler
@@ -65,7 +74,7 @@ backend-restart:
 TUNNEL_COMPOSE = docker compose --env-file .env --env-file .env.tunnel -f docker-compose.yml -f docker-compose.tunnel.yml
 
 tunnel:
-	$(TUNNEL_COMPOSE) up --build
+	$(TUNNEL_COMPOSE) $(CRAWL_PROFILE) up --build
 
 tunnel-down:
 	$(TUNNEL_COMPOSE) --profile crawl down

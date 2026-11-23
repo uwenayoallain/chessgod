@@ -158,3 +158,52 @@ it('reports a worker that cannot be created through onError and settles init', a
   expect(FakeWorker.instance.commands.at(-1)).toMatchObject({ type: 'init', hash: 16, threads: 1 })
   expect(onError).toHaveBeenCalledOnce()
 })
+
+it('returns only the lines of the deepest depth a search reached', async () => {
+  vi.stubGlobal('Worker', FakeWorker)
+  const engine = new StockfishEngine({
+    onInfo: vi.fn(),
+    onBestMove: vi.fn(),
+    onReady: vi.fn(),
+    onStatus: vi.fn(),
+    onError: vi.fn(),
+  })
+  const lines = engine.play('sparring', { depth: 6, multiPV: 3, movetime: 500 })
+  const worker = FakeWorker.instance
+  const command = worker.commands.at(-1)
+  if (command?.type !== 'analyze') throw new Error('Expected a search')
+  expect(command).toMatchObject({ depth: 6, multiPV: 3, movetime: 500 })
+  const id = command.searchId
+  // Stopped mid-iteration: rank 1 reached depth 6, ranks 2 and 3 did not.
+  for (const line of [
+    'info depth 5 multipv 1 score cp 20 pv g8f6',
+    'info depth 5 multipv 2 score cp 15 pv e7e5',
+    'info depth 5 multipv 3 score cp 90 pv d7d5',
+    'info depth 6 multipv 1 score cp 25 pv g8f6',
+  ]) {
+    worker.emit({ type: 'line', line, searchId: id })
+  }
+  worker.emit({ type: 'line', line: 'bestmove g8f6', searchId: id })
+  // A depth-5 score beside a depth-6 one is not a fair comparison.
+  expect((await lines)?.map((line) => [line.multipv, line.depth])).toEqual([[1, 6]])
+})
+
+it('finishes a search early with what it reached, where stop gives up on it', async () => {
+  vi.stubGlobal('Worker', FakeWorker)
+  const engine = new StockfishEngine({
+    onInfo: vi.fn(),
+    onBestMove: vi.fn(),
+    onReady: vi.fn(),
+    onStatus: vi.fn(),
+    onError: vi.fn(),
+  })
+  expect(engine.finish()).toBe(false)
+  const lines = engine.play('review', { depth: 20, multiPV: 1 })
+  const worker = FakeWorker.instance
+  const id = worker.latestSearch()
+  worker.emit({ type: 'line', line: 'info depth 19 score cp 40 pv e2e4 e7e5', searchId: id })
+  expect(engine.finish()).toBe(true)
+  expect(worker.commands.at(-1)).toEqual({ type: 'stop' })
+  worker.emit({ type: 'line', line: 'bestmove e2e4', searchId: id })
+  expect((await lines)?.map((line) => [line.depth, line.pv[0]])).toEqual([[19, 'e2e4']])
+})

@@ -7,9 +7,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import settings
 from app.models.external_sync_state import ExternalSyncState
+from app.models.opening_family import OpeningFamily
 from app.models.position import Position
 from app.models.position_move import PositionMove
 from app.services.observability import get_observability_store
@@ -97,6 +99,12 @@ def classify_deviation_severity(user_win_rate: float, master_win_rate: float) ->
     return "major"
 
 
+def same_move(left: dict, right: dict) -> bool:
+    if left.get("uci") and right.get("uci"):
+        return left["uci"] == right["uci"]
+    return bool(left.get("san") and left["san"] == right.get("san"))
+
+
 def build_deviation(
     fen: str,
     user_moves: list[dict],
@@ -104,12 +112,12 @@ def build_deviation(
     eco: str | None,
     opening_name: str | None,
 ) -> dict | None:
-    if not user_moves or not master_moves:
+    master_top_move = max(master_moves, key=lambda move: move["game_count"], default=None)
+    if not user_moves or master_top_move is None or not master_top_move["game_count"]:
         return None
 
     user_top_move = user_moves[0]
-    master_top_move = master_moves[0]
-    if user_top_move["san"] == master_top_move["san"]:
+    if same_move(user_top_move, master_top_move):
         return None
 
     return {
@@ -142,9 +150,7 @@ def build_seeded_deviation(
         return None
 
     user_top_move = user_moves[0]
-    master_uci_set = {move.get("uci") for move in master_moves if move.get("uci")}
-    master_san_set = {move.get("san") for move in master_moves if move.get("san")}
-    if user_top_move.get("uci") in master_uci_set or user_top_move["san"] in master_san_set:
+    if any(same_move(user_top_move, move) for move in master_moves):
         return None
 
     master_top_move = master_moves[0]
@@ -223,13 +229,13 @@ def serialize_user_move(move: PositionMove, color: str) -> dict:
 
 
 def serialize_master_move(move: dict, color: str) -> dict:
-    total_games = max(move["white"] + move["draws"] + move["black"], 1)
+    total_games = move.get("master_total", move["white"] + move["draws"] + move["black"])
     win_count = move["white"] if color == "white" else move["black"]
     return {
         "san": move["san"],
         "uci": move.get("uci"),
         "game_count": total_games,
-        "win_rate": round(win_count / total_games, 4),
+        "win_rate": round(win_count / total_games, 4) if total_games else 0.0,
     }
 
 
@@ -255,7 +261,8 @@ async def cache_master_stats(
     move_map = {move.move_uci: move for move in moves}
     san_map = {move.move_san: move for move in moves}
     for master_move in master_data.get("moves") or []:
-        move = move_map.get(master_move.get("uci")) or san_map.get(master_move.get("san"))
+        uci = master_move.get("uci")
+        move = move_map.get(uci) if uci else san_map.get(master_move.get("san"))
         if move is None:
             continue
         move.master_game_count = master_move.get("white", 0) + master_move.get("draws", 0) + master_move.get("black", 0)
@@ -277,11 +284,14 @@ def build_local_master_data(position: Position, moves: list[PositionMove]) -> di
             {
                 "san": move.move_san,
                 "uci": move.move_uci,
+                "master_total": move.master_game_count,
                 "white": move.master_white_wins or 0,
                 "draws": move.master_draws or 0,
                 "black": move.master_black_wins or 0,
             }
-            for move in moves
+            for move in sorted(
+                moves, key=lambda move: (-(move.master_game_count or 0), move.move_uci)
+            )
             if move.master_game_count is not None
         ],
     }
@@ -381,92 +391,102 @@ MAX_DEEP_LINE_DEPTH = 30
 async def build_deep_training_line(
     session: AsyncSession,
     starting_fen: str = STARTING_FEN,
+    *,
+    ply_offset: int = 0,
 ) -> list[dict]:
     training_moves: list[dict] = []
     current_fen = starting_fen
-    ply = 0
-
-    for _ in range(MAX_DEEP_LINE_DEPTH):
-        position = await load_position_by_fen(session, current_fen)
-        if position is None:
+    child = aliased(Position)
+    for ply in range(ply_offset + 1, MAX_DEEP_LINE_DEPTH + 1):
+        row = (await session.execute(
+            select(PositionMove.move_san, PositionMove.move_uci, child.fen)
+            .select_from(PositionMove)
+            .join(Position, Position.id == PositionMove.from_position_id)
+            .join(child, child.id == PositionMove.to_position_id)
+            .where(Position.fen == current_fen, PositionMove.master_game_count.is_not(None))
+            .order_by(
+                PositionMove.master_game_count.desc(),
+                PositionMove.game_count.desc(),
+                PositionMove.move_uci,
+            )
+            .limit(1)
+        )).one_or_none()
+        if row is None:
             break
-
-        moves = await load_moves_for_position(session, position.id)
-        if not moves:
-            break
-
-        master_data = get_local_master_data(position, moves)
-        master_moves = master_data.get("moves", [])
-        if not master_moves:
-            break
-
-        master_uci_set = {m.get("uci") for m in master_moves if m.get("uci")}
-        master_san_set = {m.get("san") for m in master_moves if m.get("san")}
-
-        best_move: PositionMove | None = None
-        for pm in moves:
-            if pm.move_uci in master_uci_set or pm.move_san in master_san_set:
-                if best_move is None or (pm.master_game_count or 0) > (best_move.master_game_count or 0):
-                    best_move = pm
-                elif (pm.master_game_count or 0) == (best_move.master_game_count or 0) and pm.game_count > best_move.game_count:
-                    best_move = pm
-
-        if best_move is None:
-            break
-
-        to_position = await session.get(Position, best_move.to_position_id)
-        if to_position is None:
-            break
-
-        ply += 1
-        training_moves.append(
-            {
-                "ply": ply,
-                "fen": current_fen,
-                "san": best_move.move_san,
-                "uci": best_move.move_uci,
-                "resulting_fen": to_position.fen,
-            }
-        )
-        current_fen = to_position.fen
-
+        san, uci, resulting_fen = row
+        training_moves.append({
+            "ply": ply, "fen": current_fen, "san": san, "uci": uci,
+            "resulting_fen": resulting_fen,
+        })
+        current_fen = resulting_fen
     return training_moves
+
+
+def _opening_key(name: str) -> str:
+    return "".join(char for char in name.casefold() if char.isalnum())
 
 
 async def build_training_line_from_parsed_game(
     session: AsyncSession,
     parsed_game: ParsedGame,
+    *,
+    opening_name: str | None = None,
 ) -> list[dict]:
+    prefix = parsed_game.positions[:MAX_DEEP_LINE_DEPTH + 1]
+    if len(prefix) < 2:
+        return []
+
+    positions = {
+        row.fen: row for row in (await session.execute(
+            select(Position.id, Position.fen, Position.master_opening_name)
+            .where(Position.fen.in_({step.fen for step in prefix}))
+        ))
+    }
+    book_moves = {(position_id, uci) for position_id, uci in (await session.execute(
+        select(PositionMove.from_position_id, PositionMove.move_uci)
+        .where(
+            PositionMove.from_position_id.in_({row.id for row in positions.values()}),
+            PositionMove.master_game_count.is_not(None),
+        )
+    ))}
+    name = opening_name or parsed_game.opening_name
+    anchor = None
+    if name:
+        key = _opening_key(name)
+        anchor = next((
+            step.ply for step in prefix[1:]
+            if (position := positions.get(step.fen)) is not None
+            and position.master_opening_name
+            and _opening_key(position.master_opening_name) == key
+        ), None)
+        if anchor is None:
+            families = await session.execute(
+                select(OpeningFamily.full_name, OpeningFamily.root_fen)
+                .where(OpeningFamily.root_fen.in_({step.fen for step in prefix[1:]}))
+            )
+            family_fens = {fen for full_name, fen in families if _opening_key(full_name) == key}
+            anchor = next((step.ply for step in prefix[1:] if step.fen in family_fens), None)
+
     training_moves: list[dict] = []
-
-    for index in range(1, len(parsed_game.positions)):
-        previous = parsed_game.positions[index - 1]
-        current = parsed_game.positions[index]
-        position = await load_position_by_fen(session, previous.fen)
-        if position is None:
+    current_fen = prefix[0].fen
+    for previous, current in zip(prefix, prefix[1:]):
+        position = positions.get(previous.fen)
+        in_book = position is not None and (position.id, current.move_uci) in book_moves
+        # A named source game supplies the initial exchange even if a book
+        # edge is missing. A known opening position anchors the whole prefix.
+        if anchor is not None:
+            if current.ply > anchor:
+                break
+        elif not in_book and (not name or current.ply > 2):
             break
+        training_moves.append({
+            "ply": current.ply, "fen": previous.fen, "san": current.move_san,
+            "uci": current.move_uci, "resulting_fen": current.fen,
+        })
+        current_fen = current.fen
 
-        moves = await load_moves_for_position(session, position.id)
-        master_data = get_local_master_data(position, moves)
-        matching_master_move = next(
-            (
-                move
-                for move in master_data.get("moves", [])
-                if move.get("uci") == current.move_uci or move.get("san") == current.move_san
-            ),
-            None,
-        )
-        if matching_master_move is None:
-            break
-
-        training_moves.append(
-            {
-                "ply": current.ply,
-                "fen": previous.fen,
-                "san": matching_master_move.get("san") or current.move_san,
-                "uci": matching_master_move.get("uci") or current.move_uci,
-                "resulting_fen": current.fen,
-            }
-        )
-
-    return training_moves
+    if not training_moves:
+        return []
+    return training_moves + await build_deep_training_line(
+        session, current_fen, ply_offset=training_moves[-1]["ply"]
+    )

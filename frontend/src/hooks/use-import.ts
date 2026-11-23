@@ -9,8 +9,11 @@ import { useAppStore } from '@/store/app-store'
 
 export function useImport(username: string) {
   const [error, setError] = useState<string | null>(null)
-  const { importStatus, importProgress, setImportStatus, setImportProgress, setImportQuiet } =
-    useAppStore()
+  const importStatus = useAppStore((s) => s.importStatus)
+  const importProgress = useAppStore((s) => s.importProgress)
+  const setImportStatus = useAppStore((s) => s.setImportStatus)
+  const setImportProgress = useAppStore((s) => s.setImportProgress)
+  const setImportQuiet = useAppStore((s) => s.setImportQuiet)
 
   /**
    * `quiet`: a sync nobody asked for. It shows nothing while it runs and

@@ -21,6 +21,11 @@ def test_the_main_control_prefers_rapid_with_enough_games() -> None:
     assert clock.parse_control("-") is None
 
 
+@pytest.mark.parametrize("control", ["0", "-60", "nan", "inf", "600+nan", "600+inf", "600+-1"])
+def test_invalid_base_or_increment_is_ignored(control: str) -> None:
+    assert clock.parse_control(control) is None
+
+
 def _summary(**extra) -> dict:
     return {"games": 100, "mistakes": 200, "initial_seconds": 600.0, "left_in_losses": 360.0,
             "mistakes_with_half_clock": 0.87, "mistakes_in_time_trouble": 0.01, **extra}
@@ -34,12 +39,13 @@ def test_the_verdict_names_unused_time_and_time_trouble() -> None:
 
 
 @pytest.mark.asyncio
-async def test_big_mistakes_are_timed_against_the_clock_left_before_the_move() -> None:
+@pytest.mark.parametrize("negative_times", [False, True])
+async def test_clock_groups_finishes_and_think_times(negative_times: bool) -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-    # Knights out and back: 24 legal plies, past the opening's 20.
-    sans = ["Nf3", "Nf6", "Ng1", "Ng8"] * 6
+    # Knights out and back, past the opening and far enough to score the finish.
+    sans = ["Nf3", "Nf6", "Ng1", "Ng8"] * 15
     board = chess.Board()
     fens = [normalize_fen(board.fen())]
     ucis: list[str | None] = [None]
@@ -59,11 +65,12 @@ async def test_big_mistakes_are_timed_against_the_clock_left_before_the_move() -
             played_at=datetime(2026, 9, 1, tzinfo=UTC), num_moves=len(sans),
         ))
         await session.flush()
+        think_seconds = -2.0 if negative_times else 4.0
         for ply, (fen, uci) in enumerate(zip(fens, ucis, strict=True)):
+            remaining = -1.0 if negative_times else 600.0 - 5 * ply
             session.add(GamePosition(game_id=1, position_id=ids[fen], ply=ply, move_uci=uci,
-                                     think_seconds=4.0 if ply else None,
-                                     clock_seconds_after=600.0 - 10 * ply if ply else None))
-        # The same four positions repeat; the drop is the knight's return at ply 23.
+                                     think_seconds=think_seconds if ply else None,
+                                     clock_seconds_after=remaining if ply else None))
         session.add_all(
             AnalysisResult(position_id=position_id, depth=20, eval_cp=0, best_move_uci="g1f3",
                            best_move_san="Nf3", multipv_rank=1)
@@ -74,8 +81,13 @@ async def test_big_mistakes_are_timed_against_the_clock_left_before_the_move() -
     await engine.dispose()
 
     assert (before["time_control"], before["games"], before["losses"]) == ("600", 1, 1)
-    # Plies 21 and 23 are White's moves past the opening; nothing was lost.
-    assert before["moves"] == 2
+    # White played twenty moves past the opening.
+    assert before["moves"] == 20
     assert before["mistakes"] == 0
-    assert before["left_in_losses"] == 600.0 - 10 * 23
-    assert sum(band["moves"] for band in before["by_think"]) == 2
+    assert before["left_in_losses"] == (-1.0 if negative_times else 305.0)
+    assert [band["label"] for band in before["by_think"] if band["moves"]] == [
+        "Under 3s" if negative_times else "3-10s"
+    ]
+    assert [band["label"] for band in before["by_finish"] if band["games"]] == [
+        "Under 10%" if negative_times else "Half or more"
+    ]

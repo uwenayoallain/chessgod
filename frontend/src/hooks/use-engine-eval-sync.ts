@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 import { isAxiosError } from 'axios'
 
+import { isReviewBandDepth } from '@/lib/analysis/analysis-cache'
+import { MIN_TRUSTED_DEPTH } from '@/lib/analysis/review-depth'
 import { api } from '@/lib/api'
 import { scoreToWhitePerspective } from '@/lib/stockfish/eval'
 import { STOCKFISH_ENGINE_ID, STOCKFISH_VERSION } from '@/lib/stockfish/version'
@@ -58,27 +60,61 @@ function rejectedItemIndexes(error: unknown, batchSize: number): Set<number> {
   return indexes
 }
 
+/**
+ * The lines of a snapshot the server does not have yet. `persisted` speaks for
+ * `lines`; the review-depth line a deeper board search displaced answers to
+ * `reviewLinePersisted`. Reading `lines` alone, a game review of a position
+ * the board had already searched deeper (and stored) uploaded nothing: the
+ * snapshot read as persisted, and the review-depth row, the one a move is
+ * graded from, never reached the library.
+ */
+function unsentLines(analysis: CachedEngineAnalysis) {
+  const reviewLine =
+    analysis.reviewLine && !analysis.reviewLinePersisted ? analysis.reviewLine : null
+  const lines = analysis.persisted ? [] : [...analysis.lines]
+  if (
+    reviewLine &&
+    !lines.some((line) => line.multipv === reviewLine.multipv && line.depth === reviewLine.depth)
+  ) {
+    lines.push(reviewLine)
+  }
+  return { lines, reviewLine }
+}
+
 function collectNewItems(): EvalItem[] {
   const { analysisByFen } = useEngineStore.getState()
   const newItems: EvalItem[] = []
   collectionCut = false
 
   for (const [fen, analysis] of Object.entries(analysisByFen)) {
-    if (analysis.persisted || collectedAnalyses.has(analysis)) continue
+    if (collectedAnalyses.has(analysis)) continue
+    const { lines, reviewLine } = unsentLines(analysis)
+    if (!lines.length) continue
     const engine = analysis.engine ?? STOCKFISH_ENGINE_ID
     if (engine !== STOCKFISH_ENGINE_ID) continue
-    if (pendingItems.size + analysis.lines.length > MAX_PENDING_ITEMS) {
+    if (pendingItems.size + lines.length > MAX_PENDING_ITEMS) {
       collectionCut = true
       break
     }
-    for (const line of analysis.lines) {
-      // Keep one pending result per position/rank; a deeper search replaces
-      // unsent intermediate results instead of generating another upload.
-      const key = `${fen}|${engine}|${line.multipv}`
+    for (const line of lines) {
+      // A look the player cut short by stepping on (depth 8, 12, ...) is fine
+      // on the board and useless to the library: nothing is graded from below
+      // the trust floor, so it was only ever storage and upload traffic.
+      if (line.depth < MIN_TRUSTED_DEPTH) continue
+      // Keep one pending result per position, rank and depth band; a deeper
+      // search replaces unsent intermediate results in its own band instead of
+      // generating another upload. The bands are apart because the server
+      // stores a row per depth and grades a move only across depths its two
+      // positions share: a depth-28 look at the board must not push the
+      // unsent depth-20 review row out of the queue.
+      const band = isReviewBandDepth(line.depth) ? 'review' : 'deep'
+      const key = `${fen}|${engine}|${line.multipv}|${band}`
       if ((pendingItems.get(key)?.depth ?? 0) > line.depth) continue
 
       const score = scoreToWhitePerspective(line.score, fen)
-      const bestMoveUci = line.pv[0] ?? analysis.bestMove ?? ''
+      // `bestMove` belongs to the deeper search in `lines`, never to the kept
+      // review line, which may have preferred another move.
+      const bestMoveUci = line.pv[0] ?? (line === reviewLine ? '' : analysis.bestMove) ?? ''
       if (!bestMoveUci) continue
 
       const item: EvalItem = {
