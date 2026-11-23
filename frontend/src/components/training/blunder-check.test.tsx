@@ -18,6 +18,7 @@ vi.mock('@/hooks/use-training', () => ({
     data: { threats_spotted: 0, threats_seen: 0, punish_found: 0, punish_seen: 0 },
   }),
   useApplyReward: () => vi.fn(),
+  useThreatsOverview: () => ({ data: undefined }),
 }))
 
 // From the first player's games: 44...Rc1+ hung the rook to Bxc1, and they played Kg2.

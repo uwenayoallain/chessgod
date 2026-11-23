@@ -11,9 +11,10 @@ import { revealSection } from '@/components/ui/collapsible-section'
 import { play } from '@/lib/sound'
 import { Button } from '@/components/ui/button'
 import { formatGameDate } from '@/lib/format-date'
-import { useApplyReward, useTrainingProfile } from '@/hooks/use-training'
+import { useApplyReward, useThreatsOverview, useTrainingProfile } from '@/hooks/use-training'
 import { api } from '@/lib/api'
 import {
+  describeThreatsOverview,
   punishLesson,
   punishPrompt,
   punishSummary,
@@ -148,6 +149,7 @@ const MODES = {
  */
 export function BlunderCheck({ username, onBegin }: { username: string; onBegin?: () => void }) {
   const profile = useTrainingProfile(username).data
+  const overview = useThreatsOverview(username).data
   const applyReward = useApplyReward(username)
   const loadPosition = useAppStore((state) => state.loadPosition)
   const alignBoardToUserColor = useAppStore((state) => state.alignBoardToUserColor)
@@ -224,7 +226,7 @@ export function BlunderCheck({ username, onBegin }: { username: string; onBegin?
     try {
       const response = await api.get<{ questions: (ThreatQuestion & PunishQuestion)[] }>(
         chosen.get,
-        { params: { username, seed: Math.floor(Math.random() * 1_000_000) } },
+        { params: { username } },
       )
       if (!response.data.questions.length) {
         setPhase('empty')
@@ -467,6 +469,17 @@ export function BlunderCheck({ username, onBegin }: { username: string; onBegin?
               ? `${found.toLocaleString()} of ${seen.toLocaleString()} ${chosen.found} so far.`
               : ''}
           </span>
+          {/* Where the set comes from, so a set of September positions is not
+              read as the app ignoring this week's games: the count behind it,
+              and the recent games that are not analysed yet. */}
+          {overview ? (
+            <span className="muted blunder-check__source">
+              {describeThreatsOverview(overview, mode).source}
+              {describeThreatsOverview(overview, mode).missing ? (
+                <> {describeThreatsOverview(overview, mode).missing}</>
+              ) : null}
+            </span>
+          ) : null}
         </div>
         <Button
           disabled={phase === 'loading'}

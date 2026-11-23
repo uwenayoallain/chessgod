@@ -140,6 +140,12 @@ async def test_recent_games_are_checked_against_the_repertoire_and_misses_come_d
         result = await check_recent_games(session, "tester", [BLACK], now=NOW)
         await session.commit()
         again = await check_recent_games(session, "tester", [BLACK], now=NOW)
+        # The player reviews the move after the game: the departure is settled
+        # and leaves the list instead of being asked for again.
+        learned.last_reviewed_at = NOW
+        learned.level = 2
+        await session.commit()
+        settled = await check_recent_games(session, "tester", [BLACK], now=NOW)
     await engine.dispose()
 
     assert result["games_checked"] == 2
@@ -149,5 +155,7 @@ async def test_recent_games_are_checked_against_the_repertoire_and_misses_come_d
     assert deviation["result"] == "loss"
     # The learned move the player forgot over the board is due again now.
     assert result["requeued"] == 1
-    assert learned.level == 1
     assert again["requeued"] == 0
+    assert again["handled"] == 0
+    assert settled["deviations"] == [] and settled["handled"] == 1
+    assert settled["games_checked"] == 2 and settled["requeued"] == 0

@@ -43,6 +43,7 @@ from app.models.game_position import GamePosition
 from app.models.position import Position
 from app.models.position_move import PositionMove
 from app.models.repertoire_mark import RepertoireMark
+from app.models.training import LineMoveProgress
 from app.services.game_scope import time_class_condition, user_rating_condition
 from app.utils.fen import normalize_fen
 
@@ -143,6 +144,8 @@ class _Loader:
         self.nodes: dict[str, _NodeData] = {}
         self.fen_by_id: dict[int, str] = {}
         self.marks: dict[str, str] = {}
+        # The move the player has been taught at each position (see `_choose`).
+        self.learned: dict[str, str] = {}
         self.opening_names: dict[int, str] = {}
 
     async def load_games(self) -> None:
@@ -198,6 +201,24 @@ class _Loader:
             )
         ).all()
         self.marks = {normalize_fen(fen): uci for fen, uci in marks}
+        taught = (
+            await self.session.execute(
+                select(LineMoveProgress.fen, LineMoveProgress.move_uci)
+                .where(
+                    LineMoveProgress.username == self.username,
+                    LineMoveProgress.color == self.color,
+                    LineMoveProgress.level >= 1,
+                )
+                # Two moves taught at one position: the one reviewed last is the
+                # one the player was last told to play.
+                .order_by(
+                    LineMoveProgress.last_reviewed_at.asc().nulls_first(),
+                    LineMoveProgress.level.asc(),
+                    LineMoveProgress.id.asc(),
+                )
+            )
+        ).all()
+        self.learned = {fen: uci for fen, uci in taught}
 
     async def _load_fens(self, ids: set[int]) -> None:
         missing = [position_id for position_id in ids if position_id not in self.fen_by_id]
@@ -327,10 +348,24 @@ def _surely_worse(node: _NodeData, mover_sign: int, best_eval: int | None) -> bo
 
 
 def _choose(node: _NodeData, *, mover_sign: int, child_eval: dict[int, int],
-            mark: str | None) -> dict | None:
-    """The player's move at `node`, and the evidence for it."""
+            mark: str | None, learned: str | None = None) -> dict | None:
+    """The player's move at `node`, and the evidence for it.
 
-    usual = max(node.edges.values(), key=lambda edge: edge.games, default=None)
+    `learned` is the move the course has already taught here. It stays the
+    repertoire's move for as long as it is sound: two acceptable moves trade
+    places whenever a new game or search nudges the comparison, and each swap
+    turned a line the player had practised into a new one to learn.
+    """
+
+    # A tie on games is broken the same way on every build (most recent, then
+    # the move itself), never by the order rows happened to come back in.
+    usual = max(
+        node.edges.values(),
+        key=lambda edge: (
+            edge.games, edge.last_played.timestamp() if edge.last_played else 0.0, edge.uci,
+        ),
+        default=None,
+    )
     evals = {line.uci: mover_sign * line.eval_cp for line in node.lines}
     best_eval = max(evals.values()) if evals else None
 
@@ -353,7 +388,12 @@ def _choose(node: _NodeData, *, mover_sign: int, child_eval: dict[int, int],
     status = "new"
     reason = "engine"
     chosen: str | None = None
-    for preferred, why in ((mark, "marked"), (usual.uci if usual else None, "usual")):
+    usual_uci = usual.uci if usual else None
+    for preferred, why in (
+        (mark, "marked"),
+        (learned, "usual" if learned == usual_uci else "learned"),
+        (usual_uci, "usual"),
+    ):
         if preferred and sound(preferred, KEEP_CP):
             chosen, reason = preferred, why
             # A marked move the player does not actually play yet is still one to learn.
@@ -378,6 +418,11 @@ def _choose(node: _NodeData, *, mover_sign: int, child_eval: dict[int, int],
             # No evidence against the move the player knows: keep it until the
             # engine has looked, rather than make them learn a replacement.
             chosen, reason = usual.uci, "unchecked"
+        if learned and sound(learned) is None and (
+            not candidates or not _surely_worse(node, mover_sign, best_eval)
+        ):
+            # The same for a move the course already taught: nothing says it is bad.
+            chosen, reason = learned, "unchecked"
         if chosen is None:
             return None
         if usual is not None:
@@ -457,7 +502,7 @@ async def build_repertoire(
                 if node.position_id is not None and not node.multipv:
                     needs_engine.add(fen)
                 choice = _choose(node, mover_sign=mover_sign, child_eval=child_eval,
-                                 mark=loader.marks.get(fen))
+                                 mark=loader.marks.get(fen), learned=loader.learned.get(fen))
                 if choice is None:
                     finished.append(path)
                     continue

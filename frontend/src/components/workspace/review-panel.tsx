@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 
+import { PageBoundary } from '@/components/ui/page-boundary'
 import { OpeningCourse } from '@/components/training/opening-course'
 import { BlunderCheck } from '@/components/training/blunder-check'
 import { HabitsCard } from '@/components/training/habits-card'
@@ -472,72 +473,81 @@ export function ReviewPanel({
 
       <div className="theory-stack" data-section-id={active.id} id={active.id}>
         {/* A page opened for the first time loads its code; the skeleton holds
-            the space it will take so nothing below it jumps. */}
-        <Suspense fallback={<PanelSkeleton label="Opening the page" rows={4} rowHeight={48} />}>
-          {active.id === 'review-today' ? (
-            <TodayCard onOpenExplore={onOpenExplore} onOpenGame={onOpenGame} username={username} />
-          ) : active.id === 'review-threats' ? (
-            <BlunderCheck onBegin={onBeginDrill} username={username} />
-          ) : active.id === 'review-rush' ? (
-            <OpeningRush onBegin={onBeginDrill} username={username} />
-          ) : active.id === 'review-course' ? (
-            <>
-              {/* Where your recent games left the repertoire, above the course
+            the space it will take so nothing below it jumps. The boundary keeps
+            a page that cannot load (a tab older than the last deploy) to its
+            own space instead of blanking the app; keyed so the next page
+            starts clean. */}
+        <PageBoundary key={active.id}>
+          <Suspense fallback={<PanelSkeleton label="Opening the page" rows={4} rowHeight={48} />}>
+            {active.id === 'review-today' ? (
+              <TodayCard
+                onOpenExplore={onOpenExplore}
+                onOpenGame={onOpenGame}
+                username={username}
+              />
+            ) : active.id === 'review-threats' ? (
+              <BlunderCheck onBegin={onBeginDrill} username={username} />
+            ) : active.id === 'review-rush' ? (
+              <OpeningRush onBegin={onBeginDrill} username={username} />
+            ) : active.id === 'review-course' ? (
+              <>
+                {/* Where your recent games left the repertoire, above the course
                 that fixes it; hidden while a session has the board. */}
-              {courseSession ? null : <RepertoireCheckCard username={username} />}
-              <OpeningCourse onBegin={onBeginDrill} onPlayOut={onPlayOut} username={username} />
-            </>
-          ) : active.id === 'review-drills' ? (
-            <ImprovementTrainer
-              color={color}
-              onBeginDrill={onBeginDrill}
-              onPlayOut={onPlayOut}
-              timeClass={timeClass}
-              username={username}
-            />
-          ) : active.id === 'review-opening-quiz' ? (
-            <OpeningQuiz
-              color={color}
-              onBegin={onBeginDrill}
-              timeClass={timeClass}
-              username={username}
-            />
-          ) : active.id === 'review-habits' ? (
-            <HabitsCard onOpenGame={onOpenGame} username={username} />
-          ) : active.id === 'review-week' ? (
-            <>
-              <ChallengeList username={username} />
-              <WeekScoresheet username={username} />
-            </>
-          ) : active.id === 'review-progress' ? (
-            <ProgressCard username={username} />
-          ) : active.id === 'review-points-lost' ? (
-            <WherePointsGo
-              color={color}
-              onShowPosition={onBeginDrill}
-              timeClass={timeClass}
-              username={username}
-            />
-          ) : active.id === 'review-clock' ? (
-            <ClockCard username={username} />
-          ) : active.id === 'review-rating-goal' ? (
-            <RatingGoalCard username={username} />
-          ) : active.id === 'review-achievements' ? (
-            <AchievementsGrid username={username} />
-          ) : active.id === 'review-needs-work' ? (
-            <NeedsWorkSection {...scope} />
-          ) : active.id === 'review-coverage' ? (
-            <EngineAnalyzeBatch color={color} timeClass={timeClass} username={username} />
-          ) : active.id === 'review-openings' ? (
-            <OpeningsHealthSection {...scope} />
-          ) : active.id === 'review-repertoire' ? (
-            <RepertoireSection {...scope} />
-          ) : active.id === 'review-deviations' ? (
-            <DeviationScanSection {...scope} />
-          ) : (
-            <StatsSection importStatus={importStatus} timeClass={timeClass} username={username} />
-          )}
-        </Suspense>
+                {courseSession ? null : <RepertoireCheckCard username={username} />}
+                <OpeningCourse onBegin={onBeginDrill} onPlayOut={onPlayOut} username={username} />
+              </>
+            ) : active.id === 'review-drills' ? (
+              <ImprovementTrainer
+                color={color}
+                onBeginDrill={onBeginDrill}
+                onPlayOut={onPlayOut}
+                timeClass={timeClass}
+                username={username}
+              />
+            ) : active.id === 'review-opening-quiz' ? (
+              <OpeningQuiz
+                color={color}
+                onBegin={onBeginDrill}
+                timeClass={timeClass}
+                username={username}
+              />
+            ) : active.id === 'review-habits' ? (
+              <HabitsCard onOpenGame={onOpenGame} username={username} />
+            ) : active.id === 'review-week' ? (
+              <>
+                <ChallengeList username={username} />
+                <WeekScoresheet username={username} />
+              </>
+            ) : active.id === 'review-progress' ? (
+              <ProgressCard username={username} />
+            ) : active.id === 'review-points-lost' ? (
+              <WherePointsGo
+                color={color}
+                onShowPosition={onBeginDrill}
+                timeClass={timeClass}
+                username={username}
+              />
+            ) : active.id === 'review-clock' ? (
+              <ClockCard username={username} />
+            ) : active.id === 'review-rating-goal' ? (
+              <RatingGoalCard username={username} />
+            ) : active.id === 'review-achievements' ? (
+              <AchievementsGrid username={username} />
+            ) : active.id === 'review-needs-work' ? (
+              <NeedsWorkSection {...scope} />
+            ) : active.id === 'review-coverage' ? (
+              <EngineAnalyzeBatch color={color} timeClass={timeClass} username={username} />
+            ) : active.id === 'review-openings' ? (
+              <OpeningsHealthSection {...scope} />
+            ) : active.id === 'review-repertoire' ? (
+              <RepertoireSection {...scope} />
+            ) : active.id === 'review-deviations' ? (
+              <DeviationScanSection {...scope} />
+            ) : (
+              <StatsSection importStatus={importStatus} timeClass={timeClass} username={username} />
+            )}
+          </Suspense>
+        </PageBoundary>
       </div>
     </div>
   )

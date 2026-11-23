@@ -24,6 +24,8 @@ import { formatGameDate } from '@/lib/format-date'
 import { challengesStale } from '@/lib/training/challenges'
 import {
   dueLines,
+  dueMoveCount,
+  fixProgress,
   lineTitle,
   mostRecentlyTouched,
   nextLineToLearn,
@@ -58,7 +60,12 @@ import {
 import { useHabits } from '@/components/training/habits-card'
 import { describeSitting } from '@/lib/training/habits'
 import { QUEST_TARGETS, questSummary, questsDone } from '@/lib/training/quests'
-import { describeCheck, describeDeviation, deviationLineIds } from '@/lib/training/rush'
+import {
+  describeCheck,
+  describeDeviation,
+  describeHandled,
+  deviationLineIds,
+} from '@/lib/training/rush'
 import type {
   Achievement,
   ChallengeBoard,
@@ -238,15 +245,22 @@ export function RepertoireCheckCard({ username }: { username: string }) {
   const data = useRepertoireCheck(username).data
   if (!data || !data.games_checked) return null
   const summary = describeCheck(data)
-  const color = data.deviations[0]?.color ?? 'black'
-  const ids = deviationLineIds(data, color)
-  const lines = (color === 'black' ? black : white)?.lines ?? []
-  const anyNew = lines.some((line) => ids.includes(line.id) && line.status === 'new')
+  // One button per colour that left the repertoire. Taking the colour of the
+  // newest departure alone offered White lines whenever the last game was a
+  // White game, and the Black departures underneath were never reviewable.
+  const sessions = (['black', 'white'] as const).flatMap((color) => {
+    const ids = deviationLineIds(data, color)
+    if (!ids.length) return []
+    const lines = (color === 'black' ? black : white)?.lines ?? []
+    const anyNew = lines.some((line) => ids.includes(line.id) && line.status === 'new')
+    return [{ color, ids, mode: anyNew ? ('learn' as const) : ('practice' as const) }]
+  })
   return (
     <div className="repertoire-check" data-clean={!data.deviations.length || undefined}>
       <p className="repertoire-check__summary">
         <Emblem name="swords" size={18} /> <span>{summary}</span>
       </p>
+      {describeHandled(data) ? <p className="muted">{describeHandled(data)}</p> : null}
       {data.deviations.length ? (
         <>
           <ul className="repertoire-check__list">
@@ -258,24 +272,25 @@ export function RepertoireCheckCard({ username }: { username: string }) {
               </li>
             ))}
           </ul>
-          {ids.length ? (
-            <Button
-              onClick={() => {
-                startSession({
-                  color,
-                  lineIds: ids,
-                  mode: anyNew ? 'learn' : 'practice',
-                  label: 'From your games',
-                })
-                // The session lives on the Course page; go where it shows.
-                revealSection('review-course')
-              }}
-              type="button"
-              variant="default"
-            >
-              <Dumbbell size={14} /> {anyNew ? 'Learn' : 'Review'}{' '}
-              {ids.length === 1 ? 'that line' : `those ${ids.length} lines`}
-            </Button>
+          {sessions.length ? (
+            <div className="repertoire-check__actions">
+              {sessions.map(({ color, ids, mode }) => (
+                <Button
+                  key={color}
+                  onClick={() => {
+                    startSession({ color, lineIds: ids, mode, label: 'From your games' })
+                    // The session lives on the Course page; go where it shows.
+                    revealSection('review-course')
+                  }}
+                  type="button"
+                  variant={color === 'black' ? 'default' : 'ghost'}
+                >
+                  <Dumbbell size={14} /> {mode === 'learn' ? 'Learn' : 'Review'}{' '}
+                  {ids.length.toLocaleString()} {color === 'black' ? 'Black' : 'White'}{' '}
+                  {ids.length === 1 ? 'line' : 'lines'}
+                </Button>
+              ))}
+            </div>
           ) : null}
         </>
       ) : null}
@@ -546,6 +561,7 @@ export function TodayCard({
   const black = useRepertoire(username, 'black')
   const white = useRepertoire(username, 'white')
   const startSession = useTrainingStore((state) => state.startSession)
+  const showCourse = useTrainingStore((state) => state.showCourse)
   const queryClient = useQueryClient()
   const habits = useHabits(username)
 
@@ -568,9 +584,9 @@ export function TodayCard({
     nextLineToPractise(whiteLines, 'white'),
   ])
   const practiseColor = toPractise && blackLines.includes(toPractise) ? 'black' : 'white'
-  const fixes = blackLines.filter((line) => line.changes > 0)
-  const fixGames = fixes.reduce((n, line) => n + line.games, 0)
-  const unlearnedFixes = fixes.filter((line) => line.status === 'new').length
+  // The Black fixes, counted as they stand now: learned lines leave the count
+  // and their games with it, so the line moves with every lesson.
+  const blackFixes = fixProgress(blackLines)
 
   function changeGoal(xp: number) {
     writeDailyGoal(xp)
@@ -582,7 +598,7 @@ export function TodayCard({
   // The session renders inside the Opening course, which is its own page now,
   // so starting one must also take the player there — without the reveal the
   // button writes store state and nothing visible happens.
-  const dueMoves = due.reduce((n, line) => n + line.due_moves, 0)
+  const dueMoves = dueMoveCount(due)
   // A Black fix still to learn is worth more than any review: the Black
   // openings are where the points leak. Reviews follow it.
   const fixFirst = nextFix != null && nextColor === 'black' && nextFix.changes > 0
@@ -726,14 +742,28 @@ export function TodayCard({
 
       <LatestGame onOpenGame={onOpenGame} username={username} />
 
-      {unlearnedFixes ? (
-        <p className="train-callout today-card__stakes" data-tone="bad">
+      {blackFixes.total ? (
+        <p
+          className="train-callout today-card__stakes"
+          data-tone={blackFixes.left ? 'bad' : 'good'}
+        >
           <span>
-            <Emblem name="crosshair" size={16} /> In {unlearnedFixes.toLocaleString()} of your Black
-            openings the move you usually play loses ground; {fixGames.toLocaleString()} of your
-            games reached those lines. The course has the better move for each.
+            <Emblem name={blackFixes.left ? 'crosshair' : 'shield'} size={16} />{' '}
+            {blackFixes.left
+              ? `${blackFixes.learned.toLocaleString()} of ${blackFixes.total.toLocaleString()} Black fixes learned. The ${blackFixes.left.toLocaleString()} left lose ground in ${blackFixes.games.toLocaleString()} of your games; the course has the better move for each.`
+              : `All ${blackFixes.total.toLocaleString()} Black fixes learned. The reviews keep them sharp.`}
           </span>
-          <Button onClick={() => revealSection('review-course')} type="button" variant="ghost">
+          <Button
+            onClick={() => {
+              // Land on Black: the course remembers the tab last used, and a
+              // line about Black fixes that opened on White trained the wrong
+              // colour.
+              showCourse('black')
+              revealSection('review-course')
+            }}
+            type="button"
+            variant="ghost"
+          >
             Open the course
           </Button>
         </p>

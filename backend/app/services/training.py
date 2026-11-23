@@ -60,6 +60,9 @@ XP = {
     "rush": 0,
     # Blunder Check: the opponent's punishment of the player's own mistake, found.
     "threat_spotted": 5,
+    # A set shown, so a position left unanswered waits its turn again. No XP.
+    "threat_set": 0,
+    "punish_set": 0,
     "threat_missed": 1,
     # Punish it: the move that keeps an opponent's mistake, found (services/threats.py).
     "punish_found": 5,
@@ -427,6 +430,7 @@ def annotate_repertoire(repertoire: dict, progress: dict[tuple[str, str], LineMo
         levels = []
         due = 0
         recalled = 0
+        asked = 0
         for step in yours:
             row = progress.get((step["fen"], step["uci"]))
             level = row.level if row else None
@@ -438,15 +442,23 @@ def annotate_repertoire(repertoire: dict, progress: dict[tuple[str, str], LineMo
             levels.append(level)
             due += int(is_due)
             recalled += int(step["recalled"])
+            # Asked from memory at least once, right or wrong: only practice
+            # mode counts a recall or a lapse.
+            asked += int(bool(row and (
+                (getattr(row, "recalls", 0) or 0) + (getattr(row, "lapses", 0) or 0)
+            ) > 0))
         known = sum(1 for level in levels if level is not None and level >= 1)
         line["your_moves"] = len(yours)
         line["known_moves"] = known
         line["due_moves"] = due
         line["recalled_moves"] = recalled
         # Learned is not practised: a move taught with the hint showing has never
-        # been played from memory. Until every move has, the course offers this
-        # line to practise before it offers another line to learn.
-        line["practised"] = known == len(yours) and recalled == len(yours)
+        # been played from memory. Until every move has been asked that way, the
+        # course offers this line to practise before another line to learn. A
+        # move missed in that pass still counts as asked: the ladder brings it
+        # back in four hours as a review, and offering the whole line again at
+        # once told a player who had just practised it that they had not.
+        line["practised"] = known == len(yours) and asked == len(yours)
         # A line is new until every one of its moves has been taught. Lines share
         # moves (every Black line starts 1...e5), so counting "any move known"
         # turned lines never shown into ones to practise from memory.

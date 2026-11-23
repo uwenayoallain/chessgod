@@ -167,9 +167,46 @@ export function lineStakes(line: RepertoireLine): string {
   return `${reached}.`
 }
 
-/** Lines with moves due, most due first: a review session's queue. */
+function dueKeys(line: RepertoireLine): string[] {
+  return yourSteps(line)
+    .filter((step) => step.due)
+    .map((step) => `${step.fen} ${step.uci}`)
+}
+
+/**
+ * A review session's queue: the fewest lines that between them ask every due
+ * move once, the line with the most still to ask first.
+ *
+ * Lines share moves (every Black line starts 1...e5), so one due move makes
+ * every line through it read as due. Queueing them all asked the player to
+ * replay fifty lines for a move the first of them had already reviewed. A
+ * line not fully taught is left out: it is learned, not recalled.
+ */
 export function dueLines(lines: RepertoireLine[]): RepertoireLine[] {
-  return lines.filter((line) => line.due_moves > 0).sort((a, b) => b.due_moves - a.due_moves)
+  const pool = lines
+    .filter((line) => line.status === 'due')
+    .map((line) => ({ line, keys: dueKeys(line) }))
+  const asked = new Set<string>()
+  const queue: RepertoireLine[] = []
+  for (;;) {
+    let best: (typeof pool)[number] | null = null
+    let bestFresh = 0
+    for (const item of pool) {
+      const fresh = item.keys.filter((key) => !asked.has(key)).length
+      if (fresh > bestFresh) {
+        best = item
+        bestFresh = fresh
+      }
+    }
+    if (!best) return queue
+    queue.push(best.line)
+    for (const key of best.keys) asked.add(key)
+  }
+}
+
+/** How many different moves a review queue asks: a shared move counts once. */
+export function dueMoveCount(queue: RepertoireLine[]): number {
+  return new Set(queue.flatMap(dueKeys)).size
 }
 
 /** The next line to learn: the biggest unlearned fix, else the most-played new line. */
@@ -183,7 +220,8 @@ export function nextLineToLearn(
 /**
  * A line learned with the hints showing and never yet played from memory —
  * the most recently learned one first, since that is the line the player has
- * just been shown and expects to be asked for.
+ * just been shown and expects to be asked for. One practice pass settles it,
+ * misses included: a missed move comes back as a review when it is due.
  */
 export function nextLineToPractise(
   lines: RepertoireLine[],
@@ -225,6 +263,32 @@ export function nextCourseStep(
   if (practise) return { mode: 'practice', line: practise }
   const learn = nextLineToLearn(lines, color)
   return learn ? { mode: 'learn', line: learn } : null
+}
+
+export type FixProgress = {
+  /** Lines where the move the player usually plays is changed. */
+  total: number
+  learned: number
+  left: number
+  /** The player's games that reached a fix still to learn. */
+  games: number
+}
+
+/**
+ * How far the fixes of one colour have got. The games are counted over the
+ * fixes still to learn, so the number falls as lines are learned: a line
+ * about the player's openings that never moved read as if training changed
+ * nothing.
+ */
+export function fixProgress(lines: RepertoireLine[]): FixProgress {
+  const fixes = lines.filter((line) => line.changes > 0)
+  const unlearned = fixes.filter((line) => line.status === 'new')
+  return {
+    total: fixes.length,
+    learned: fixes.length - unlearned.length,
+    left: unlearned.length,
+    games: unlearned.reduce((n, line) => n + line.games, 0),
+  }
 }
 
 /** The chip on a line card: how far the player's memory of it has got. */

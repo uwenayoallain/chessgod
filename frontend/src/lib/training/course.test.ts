@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vite-plus/test'
 import {
   buildChapters,
   dueLines,
+  dueMoveCount,
   explainStep,
   explainTrap,
+  fixProgress,
   formatLine,
   lineStakes,
   lineStatusLabel,
@@ -20,6 +22,8 @@ import { diffProfiles } from '@/hooks/use-training'
 import { freezeMessage, goalProgress, levelProgress, rivalMessage, streakMessage } from './progress'
 import {
   describeCheck,
+  describeHandled,
+  describeThreatsOverview,
   describeDeviation,
   deviationLineIds,
   formatRushTime,
@@ -209,6 +213,20 @@ describe('what to train next', () => {
     expect(nextCourseStep([practised], 'black')).toBeNull()
   })
 
+  it('counts the fixes as they stand, so a learned line leaves the stakes', () => {
+    const learnedFix = line('fixed', 'e4', { changes: 1, games: 40, status: 'learning' })
+    const openFix = line('open', 'd4', { changes: 1, games: 9 })
+    const keep = line('keep', 'c4', { games: 100 })
+    expect(fixProgress([learnedFix, openFix, keep])).toEqual({
+      total: 2,
+      learned: 1,
+      left: 1,
+      games: 9,
+    })
+    expect(fixProgress([learnedFix])).toEqual({ total: 1, learned: 1, left: 0, games: 0 })
+    expect(fixProgress([keep]).total).toBe(0)
+  })
+
   it('offers the line learned last, whichever chapter or colour it sits in', () => {
     const touched = (id: string, first: string, dueAt: string) =>
       line(id, first, {
@@ -224,15 +242,47 @@ describe('what to train next', () => {
     expect(mostRecentlyTouched([null])).toBeNull()
   })
 
-  it('learns the biggest fix first and queues the most-due reviews first', () => {
+  it('learns the biggest fix first', () => {
     const lines = [line('e4-a', 'e4', { games: 99 }), scotch]
     expect(nextLineToLearn(lines, 'black')?.id).toBe('scotch')
-    const due = dueLines([
-      line('a', 'e4', { due_moves: 1 }),
-      line('b', 'e4', { due_moves: 3 }),
-      line('c', 'e4', { due_moves: 0 }),
+  })
+
+  it('reviews each due move once, in as few lines as it takes', () => {
+    // Three lines share 1...e5, which is due; two of them have a due move of
+    // their own. The line with the most to ask goes first, and the one whose
+    // only due move it has already asked is not queued at all.
+    const e5 = yours(2, 'e5', { due: true, level: 1 })
+    const due = (id: string, steps: YourStep[]): RepertoireLine =>
+      line(id, 'e4', {
+        moves: [opponent(1, 'e4'), ...steps],
+        status: 'due',
+        due_moves: steps.filter((step) => step.due).length,
+      })
+    const shared = due('shared', [e5])
+    const one = due('one', [e5, yours(4, 'Nc6', { due: true, level: 1 })])
+    const two = due('two', [
+      e5,
+      yours(4, 'Nf6', { due: true, level: 1 }),
+      yours(6, 'd6', { due: true, level: 1 }),
+      yours(8, 'Be7', { level: 2 }),
     ])
-    expect(due.map((item) => item.id)).toEqual(['b', 'a'])
+    const queue = dueLines([shared, one, two])
+    expect(queue.map((item) => item.id)).toEqual(['two', 'one'])
+    // Four different moves, though the three lines hold six due between them.
+    expect(dueMoveCount(queue)).toBe(4)
+  })
+
+  it('leaves a line that is not fully taught out of a review', () => {
+    // It shares a due move with a learned line, but practising it from memory
+    // would ask for moves the course has never shown.
+    const e5 = yours(2, 'e5', { due: true, level: 1 })
+    const untaught = line('untaught', 'e4', {
+      moves: [opponent(1, 'e4'), e5, yours(4, 'Nc6')],
+      status: 'new',
+      due_moves: 1,
+    })
+    expect(dueLines([untaught])).toEqual([])
+    expect(dueMoveCount(dueLines([untaught]))).toBe(0)
   })
 })
 
@@ -367,11 +417,33 @@ describe('rush', () => {
       games_checked: 15,
       games_followed: 12,
       deviations: [deviation, { ...deviation, game_id: 2 }],
+      handled: 0,
       requeued: 1,
     }
     expect(describeCheck(check)).toBe('In your repertoire for 12 of your last 15 games (80%).')
     expect(deviationLineIds(check, 'black')).toEqual(['scotch'])
     expect(deviationLineIds(check, 'white')).toEqual([])
+    const overview = {
+      threats: { pool: 1120, games: 640, asked: 15 },
+      punish: { pool: 400, games: 300, asked: 3 },
+      recent_unanalysed: 7,
+    }
+    expect(describeThreatsOverview(overview, 'threats')).toEqual({
+      source: '1,120 of your mistakes from 640 games, 15 asked so far.',
+      missing:
+        '7 games from the last month are not analysed yet, so their mistakes are not in here. Reviewing a game adds it at once; the background analysis adds the rest while the laptop is idle.',
+    })
+    expect(
+      describeThreatsOverview({ ...overview, recent_unanalysed: 0 }, 'punish').missing,
+    ).toBeNull()
+    // Departures already reviewed since the game are settled, and the card says so.
+    expect(describeHandled(check)).toBeNull()
+    expect(describeHandled({ ...check, handled: 2 })).toBe(
+      'You have already reviewed the moves from 2 other games.',
+    )
+    expect(describeHandled({ ...check, deviations: [], handled: 1 })).toBe(
+      'You have reviewed the moves from all 1 game that left it. Nothing to go back to.',
+    )
   })
 })
 

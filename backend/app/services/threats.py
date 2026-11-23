@@ -17,7 +17,6 @@ the board.
 
 from __future__ import annotations
 
-import random
 from datetime import UTC, datetime, timedelta
 
 import chess
@@ -29,7 +28,12 @@ from app.engine_contract import MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
 MIN_LOSS_CP = 150
 # A move in a position already this lost punishes nothing the player can fix.
 MIN_BEFORE_CP = -300
-POOL_LIMIT = 400
+# Newest first, so the newest 400 spanned two and a half months of one player's
+# games and nothing older was ever asked. Sets now walk the pool game by game,
+# so it holds the player's relevant history rather than its newest corner.
+POOL_LIMIT = 1500
+# A position shown and left unanswered is not asked again for this long.
+SERVED_REST = timedelta(days=14)
 SET_SIZE = 10
 
 _POOL_SQL = """
@@ -249,24 +253,84 @@ def schedule(answers: list[tuple[int, bool, datetime]], now: datetime) -> tuple[
 
 
 def pick_set(pool: list[dict], *, exclude: set[int], due: list[int] | None = None,
-             size: int = SET_SIZE, seed: int | None = None) -> list[dict]:
-    """Missed positions that are due first, then a set leaning recent.
+             served: set[int] | None = None, size: int = SET_SIZE, seed: int | None = None) -> list[dict]:
+    """Missed positions that are due first, then the pool walked game by game.
 
     A miss is the scan that failed, so it is what comes back: up to half the
-    set, the rest new. Recent games are what the player's habits look like
-    now, but always serving the newest ten would ask the same positions every
-    day, so the rest is drawn from the newest half of what is left.
+    set, the rest new. The rest is taken newest game first, one position per
+    game per pass, so a set reads across the player's games rather than three
+    positions from one afternoon, and a position shown but not answered
+    (`served`) waits its turn again — the old random draw from the newest half
+    of the pool asked much the same positions every day and never reached an
+    older game. `seed` is accepted for old callers and ignored.
     """
+    del seed
     by_id = {item["position_id"]: item for item in pool}
     again = [by_id[position_id] for position_id in (due or []) if position_id in by_id][: size // 2]
     taken = {item["position_id"] for item in again}
-    fresh = [item for item in pool if item["position_id"] not in exclude and item["position_id"] not in taken]
+    served = served or set()
+    unseen = [item for item in pool if item["position_id"] not in exclude and item["position_id"] not in taken]
+    fresh = [item for item in unseen if item["position_id"] not in served] or unseen
     if not fresh and not again:
         fresh = list(pool)
-    window = fresh[: max(size * 4, len(fresh) // 2)]
-    rng = random.Random(seed)
-    picked = rng.sample(window, min(size - len(again), len(window)))
+    picked = _across_games(fresh, size - len(again))
     return [{**item, "again": True} for item in again] + picked
+
+
+def _across_games(items: list[dict], count: int) -> list[dict]:
+    """The first `count` items taking one per game per pass, games in their given order."""
+    by_game: dict[object, list[dict]] = {}
+    for item in items:
+        by_game.setdefault(item.get("game_url", item["position_id"]), []).append(item)
+    picked: list[dict] = []
+    while len(picked) < count and any(by_game.values()):
+        for queue in by_game.values():
+            if queue and len(picked) < count:
+                picked.append(queue.pop(0))
+    return picked
+
+
+def served_recently(sets: list[tuple[list[int], datetime]], now: datetime) -> set[int]:
+    """Positions shown in a set inside SERVED_REST, whatever became of them."""
+    shown: set[int] = set()
+    for position_ids, when in sets:
+        when = when if when.tzinfo else when.replace(tzinfo=UTC)
+        if now - when < SERVED_REST:
+            shown.update(int(position_id) for position_id in position_ids)
+    return shown
+
+
+_RECENT_UNANALYSED_SQL = """
+SELECT count(*) FROM (
+    SELECT g.id, count(gp.position_id) AS total, count(DISTINCT ar.position_id) AS done
+    FROM games g
+    JOIN game_positions gp ON gp.game_id = g.id
+    LEFT JOIN analysis_results ar
+      ON ar.position_id = gp.position_id
+     AND ar.engine = 'stockfish-19' AND ar.engine_version = '19'
+     AND ar.depth >= :min_depth
+    WHERE g.username = :username
+      AND g.time_class IN ('rapid', 'blitz')
+      AND g.played_at >= :since
+    GROUP BY g.id
+) AS recent
+WHERE total > 0 AND done * 10 < total * 6
+"""
+
+
+async def recent_unanalysed_games(session: AsyncSession, *, username: str, now: datetime | None = None,
+                                  days: int = 30) -> int:
+    """Games from the last `days` with under 60% of their positions evaluated.
+
+    Their mistakes cannot be in the pool yet, and a player who sees August
+    positions while their games from this week go unmentioned reads it as the
+    app not looking at their games. The card says so instead.
+    """
+    now = now or datetime.now(UTC)
+    return int((await session.execute(
+        text(_RECENT_UNANALYSED_SQL),
+        {"username": username, "min_depth": MIN_TRUSTED_DEPTH, "since": now - timedelta(days=days)},
+    )).scalar_one() or 0)
 
 
 # Punish it: the mirror image. After move 10 the first player's opponents made

@@ -192,10 +192,11 @@ async def test_achievements_report_progress_and_unlock_at_their_target() -> None
 
 def test_a_line_s_status_follows_the_memory_of_its_moves() -> None:
     class Row:
-        def __init__(self, level: int, due_at: datetime, recalls: int = 0) -> None:
+        def __init__(self, level: int, due_at: datetime, recalls: int = 0, lapses: int = 0) -> None:
             self.level = level
             self.due_at = due_at
             self.recalls = recalls
+            self.lapses = lapses
 
     def annotated(rows: dict) -> dict:
         line = {"id": "x", "moves": [dict(step) for step in LINE["moves"]]}
@@ -213,7 +214,7 @@ def test_a_line_s_status_follows_the_memory_of_its_moves() -> None:
     assert status({("after-e4", "e7e5"): Row(4, later), ("after-nf3", "b8c6"): Row(5, later)}) == "mastered"
 
     # Learned is not practised: taught with the hint showing, never played from
-    # memory. The line is practised once every move has been recalled once.
+    # memory. The line is practised once every move has been asked that way.
     taught = annotated({("after-e4", "e7e5"): Row(1, later), ("after-nf3", "b8c6"): Row(1, later)})
     assert taught["status"] == "learning" and taught["practised"] is False
     assert taught["recalled_moves"] == 0
@@ -222,6 +223,47 @@ def test_a_line_s_status_follows_the_memory_of_its_moves() -> None:
     assert [step.get("recalled") for step in half["moves"] if step["side"] == "you"] == [True, False]
     done = annotated({("after-e4", "e7e5"): Row(1, later, 1), ("after-nf3", "b8c6"): Row(2, later, 3)})
     assert done["practised"] is True and done["recalled_moves"] == 2
+    # A move missed in the practice pass was still asked from memory. The
+    # ladder brings it back as a review; the line is not offered again at once.
+    missed = annotated({
+        ("after-e4", "e7e5"): Row(1, later, 1), ("after-nf3", "b8c6"): Row(1, later, 0, 1),
+    })
+    assert missed["practised"] is True and missed["recalled_moves"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_line_practised_with_a_miss_is_practised_and_its_miss_comes_back_as_a_review() -> None:
+    engine, factory = await _session()
+
+    async def line_at(when: datetime) -> dict:
+        async with factory() as session:
+            progress = await training.load_move_progress(session, "tester")
+        line = {"id": "x", "moves": [dict(step) for step in LINE["moves"]]}
+        return annotate_repertoire({"lines": [line]}, progress, now=when)["lines"][0]
+
+    async with factory() as session:
+        await record_line_review(
+            session, username="tester", color="black", line=LINE, mode="learn",
+            played={"after-e4": "e7e5", "after-nf3": "b8c6"}, request_id="learn", now=NOW,
+        )
+        await session.commit()
+    assert (await line_at(NOW))["practised"] is False
+
+    async with factory() as session:
+        result = await record_line_review(
+            session, username="tester", color="black", line=LINE, mode="practice",
+            played={"after-e4": "e7e5", "after-nf3": "g8f6"}, request_id="p1",
+            now=NOW + timedelta(minutes=5),
+        )
+        await session.commit()
+    assert result["misses"] == 1
+    after = await line_at(NOW + timedelta(minutes=6))
+    # Practised, nothing due: neither the Today card nor the course asks for it again.
+    assert (after["practised"], after["status"], after["due_moves"]) == (True, "learning", 0)
+    # Four hours on, the missed move (and only that one) is a review.
+    later = await line_at(NOW + timedelta(hours=5))
+    assert (later["status"], later["due_moves"]) == ("due", 2)
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

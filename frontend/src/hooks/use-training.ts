@@ -4,7 +4,12 @@ import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-quer
 import { api } from '@/lib/api'
 import { browserTimeZone, readDailyGoal } from '@/lib/training/progress'
 import { newQuestRewards } from '@/lib/training/quests'
-import type { Repertoire, TrainingProfile, TrainingReward } from '@/lib/training/types'
+import type {
+  Repertoire,
+  ThreatsOverview,
+  TrainingProfile,
+  TrainingReward,
+} from '@/lib/training/types'
 import { useTrainingStore } from '@/store/training-store'
 
 export function profileQueryKey(username: string | null) {
@@ -19,6 +24,7 @@ export function profileQueryKey(username: string | null) {
 const TRAINING_QUERY_NAMES = new Set([
   'training-repertoire',
   'repertoire-check',
+  'threats-overview',
   'training-challenges',
   'improvement-plan',
   'week-scoresheet',
@@ -35,6 +41,21 @@ export function refreshTrainingQueries(queryClient: QueryClient, username: strin
   void queryClient.invalidateQueries({
     predicate: (query) =>
       TRAINING_QUERY_NAMES.has(String(query.queryKey[0])) && query.queryKey[1] === username,
+  })
+}
+
+/** What Blunder Check has to ask and what it cannot see yet; refreshed with every reward. */
+export function useThreatsOverview(username: string) {
+  return useQuery({
+    queryKey: ['threats-overview', username],
+    queryFn: async ({ signal }) =>
+      (
+        await api.get<ThreatsOverview>('/api/training/threats/overview', {
+          params: { username },
+          signal,
+        })
+      ).data,
+    staleTime: 5 * 60 * 1000,
   })
 }
 

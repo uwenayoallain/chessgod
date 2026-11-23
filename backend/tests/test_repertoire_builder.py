@@ -11,6 +11,7 @@ from app.models.game_position import GamePosition
 from app.models.position import Position
 from app.models.position_move import PositionMove
 from app.models.repertoire_mark import RepertoireMark
+from app.models.training import LineMoveProgress
 from app.services.repertoire_builder import build_repertoire
 from app.utils.fen import normalize_fen
 
@@ -31,6 +32,7 @@ class Library:
         self.games = 0
         self.evals: list[AnalysisResult] = []
         self.marks: list[RepertoireMark] = []
+        self.taught: list[LineMoveProgress] = []
 
     def pid(self, fen: str) -> int:
         if fen not in self.ids:
@@ -77,6 +79,16 @@ class Library:
             best_move_san=board.san(move), pv_uci=move.uci(), multipv_rank=1,
         ))
 
+    def teach(self, sans: list[str], san: str, *, level: int = 1) -> None:
+        """The course has taught `san` in the position after `sans`."""
+        fen = fen_after(sans)
+        self.taught.append(LineMoveProgress(
+            username="tester", color="black", fen=fen,
+            move_uci=chess.Board(f"{fen} 0 1").parse_san(san).uci(), level=level,
+            reviews=1, recalls=0, lapses=0, due_at=datetime(2026, 1, 1, tzinfo=UTC),
+            last_reviewed_at=datetime(2025, 12, 31, tzinfo=UTC),
+        ))
+
     def master(self, sans: list[str], san: str, games: int) -> None:
         board = chess.Board(f"{fen_after(sans)} 0 1")
         move = board.parse_san(san)
@@ -98,6 +110,7 @@ class Library:
             session.add_all([row for row in self.rows if not isinstance(row, Game)])
             session.add_all(self.evals)
             session.add_all(self.marks)
+            session.add_all(self.taught)
             await session.commit()
             result = await build_repertoire(
                 session, username="tester", color=color, time_class="rapid_blitz", min_user_rating=1000,
@@ -224,3 +237,70 @@ async def test_a_move_the_engine_has_not_judged_is_kept_and_queued() -> None:
     step = next(step for step in _yours(result["lines"][0]) if step["fen"] == fen_after(SCOTCH[:7]))
     assert (step["san"], step["reason"]) == ("Nxd4", "unchecked")
     assert fen_after(SCOTCH[:8]) in result["needs_engine"]
+
+
+@pytest.mark.asyncio
+async def test_a_move_the_course_taught_is_not_swapped_for_another_sound_one() -> None:
+    # Masters prefer 4...Bc5, so an untaught player is given it. A player the
+    # course already taught 4...Nf6 keeps Nf6: it is sound, and swapping it
+    # turned a line they had practised into a new one to learn.
+    untaught = await scotch_library().build()
+    step = next(s for s in _yours(untaught["lines"][0]) if s["fen"] == fen_after(SCOTCH[:7]))
+    assert step["san"] == "Bc5"
+
+    library = scotch_library()
+    library.teach(SCOTCH[:7], "Nf6")
+    taught = await library.build()
+    step = next(s for s in _yours(taught["lines"][0]) if s["fen"] == fen_after(SCOTCH[:7]))
+    assert (step["san"], step["status"], step["reason"]) == ("Nf6", "change", "learned")
+
+
+@pytest.mark.asyncio
+async def test_a_taught_move_outlasts_a_sound_move_the_player_usually_plays() -> None:
+    # 4...Nxd4 is the usual move and sound enough to keep, which is what an
+    # untaught player gets. Once 4...Nf6 has been taught, it stays.
+    library = scotch_library()
+    library.evals = [row for row in library.evals if row.position_id != library.pid(fen_after(SCOTCH[:8]))]
+    library.score(SCOTCH[:8], 70)
+    library.teach(SCOTCH[:7], "Nf6")
+    result = await library.build()
+    step = next(s for s in _yours(result["lines"][0]) if s["fen"] == fen_after(SCOTCH[:7]))
+    assert (step["san"], step["status"]) == ("Nf6", "change")
+
+
+@pytest.mark.asyncio
+async def test_a_taught_move_the_engine_now_refutes_is_replaced() -> None:
+    library = scotch_library()
+    library.evals = [row for row in library.evals if row.position_id != library.pid(fen_after(SCOTCH[:7]))]
+    library.lines(SCOTCH[:7], ("Nf6", 20), ("Bc5", 30), ("Qh4", 60), ("d6", 130))
+    library.teach(SCOTCH[:7], "d6")
+    result = await library.build()
+    step = next(s for s in _yours(result["lines"][0]) if s["fen"] == fen_after(SCOTCH[:7]))
+    assert step["san"] == "Bc5"
+
+
+@pytest.mark.asyncio
+async def test_a_move_only_introduced_is_not_pinned() -> None:
+    # Level 0 is a move shown and got wrong in learn mode: nothing was taught.
+    library = scotch_library()
+    library.teach(SCOTCH[:7], "Nf6", level=0)
+    result = await library.build()
+    step = next(s for s in _yours(result["lines"][0]) if s["fen"] == fen_after(SCOTCH[:7]))
+    assert step["san"] == "Bc5"
+
+
+@pytest.mark.asyncio
+async def test_a_tie_in_games_is_broken_the_same_way_on_every_build() -> None:
+    # Two moves played equally often: which is "usual" must not depend on the
+    # order rows come back in, or the line changes between builds.
+    def tied(first: str, second: str) -> Library:
+        library = Library()
+        library.game(["e4", first], times=5)
+        library.game(["e4", second], times=5)
+        library.lines(["e4"], ("e5", 30), ("c5", 35))
+        return library
+
+    one = await tied("e5", "c5").build()
+    other = await tied("c5", "e5").build()
+    pick = lambda result: {line["moves"][1]["san"] for line in result["lines"]}  # noqa: E731
+    assert pick(one) == pick(other) and len(pick(one)) == 1

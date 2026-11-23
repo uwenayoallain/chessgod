@@ -15,6 +15,7 @@ import { scoreToWhitePerspective } from '@/lib/stockfish/eval'
 import {
   buildChapters,
   dueLines,
+  dueMoveCount,
   lineStakes,
   lineStatusLabel,
   lineTitle,
@@ -292,9 +293,14 @@ export function OpeningCourse({
   const [chosenColor, setColorState] = useState<'white' | 'black'>(readColor)
   const session = useTrainingStore((state) => state.session)
   const courseColor = useTrainingStore((state) => state.courseColor)
+  const courseRequest = useTrainingStore((state) => state.courseRequest)
   useEffect(() => {
-    if (courseColor) setColorState(courseColor)
-  }, [courseColor])
+    // Every request applies, even for the colour asked last time: the player
+    // may have switched tabs since, and "Open the course" from a Black stakes
+    // line must land on Black.
+    if (courseColor) setColor(courseColor)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseColor, courseRequest])
   // A session started elsewhere (the Today card) brings its own colour.
   const color = session?.color ?? chosenColor
   const repertoire = useRepertoire(username, color)
@@ -372,8 +378,9 @@ export function OpeningCourse({
           onBegin={onBegin}
           onFinished={(result) => {
             setFinished({ key, result })
-            // The line is no longer new, nothing in it is due, and a clean
-            // practice pass has played it from memory: say so on every card
+            // The line is no longer new, nothing in it is due, and a scored
+            // practice pass has asked it from memory (a miss comes back as a
+            // review, the line is not offered again): say so on every card
             // that reads the repertoire before the server confirms.
             queryClient.setQueryData<Repertoire>(
               repertoireQueryKey(username, session.color),
@@ -384,10 +391,17 @@ export function OpeningCourse({
                     item.id === line.id
                       ? {
                           ...item,
-                          status: item.status === 'new' ? 'learning' : item.status,
+                          status:
+                            item.status === 'new' || item.status === 'due'
+                              ? 'learning'
+                              : item.status,
                           due_moves: 0,
+                          // The review queue reads each move's own flag.
+                          moves: item.moves.map((step) =>
+                            step.side === 'you' ? { ...step, due: false } : step,
+                          ),
                           practised:
-                            item.practised || (session.mode === 'practice' && result?.misses === 0),
+                            item.practised || (session.mode === 'practice' && result != null),
                         }
                       : item,
                   ),
@@ -508,8 +522,7 @@ export function OpeningCourse({
               type="button"
               variant="primary"
             >
-              <Dumbbell size={14} /> Review{' '}
-              {due.reduce((n, line) => n + line.due_moves, 0).toLocaleString()} due
+              <Dumbbell size={14} /> Review {dueMoveCount(due).toLocaleString()} due
             </Button>
           ) : null}
           {next ? (

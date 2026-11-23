@@ -254,10 +254,46 @@ async def check_recent_games(
             key = (fen, answer.uci)
             misses[key] = max(misses.get(key, played_at), played_at)
     requeued = await requeue(session, username, list(misses), before=misses, now=now)
-    deviations.sort(key=lambda item: item["played_at"], reverse=True)
+    # A departure is settled once its repertoire move has been reviewed since
+    # the game: listing it again would ask for work already done, and the card
+    # read the same three games for as long as they stayed in the window.
+    reviewed_at = await last_reviewed(session, username, list(misses))
+    open_deviations = []
+    handled = 0
+    for item in deviations:
+        reviewed = reviewed_at.get((item["fen"], item["expected_uci"]))
+        if reviewed is not None and reviewed > datetime.fromisoformat(item["played_at"]):
+            handled += 1
+        else:
+            open_deviations.append(item)
+    open_deviations.sort(key=lambda item: item["played_at"], reverse=True)
     return {
         "games_checked": checked,
         "games_followed": followed,
-        "deviations": deviations[:12],
+        "deviations": open_deviations[:12],
+        "handled": handled,
         "requeued": requeued,
+    }
+
+
+async def last_reviewed(
+    session: AsyncSession, username: str, keys: list[tuple[str, str]],
+) -> dict[tuple[str, str], datetime]:
+    """When each (position, move) was last reviewed, for the moves that have been."""
+    if not keys:
+        return {}
+    rows = (
+        await session.execute(
+            select(LineMoveProgress.fen, LineMoveProgress.move_uci, LineMoveProgress.last_reviewed_at).where(
+                LineMoveProgress.username == username,
+                LineMoveProgress.fen.in_([fen for fen, _ in keys]),
+                LineMoveProgress.last_reviewed_at.is_not(None),
+            )
+        )
+    ).all()
+    wanted = set(keys)
+    return {
+        (fen, uci): (reviewed if reviewed.tzinfo else reviewed.replace(tzinfo=UTC))
+        for fen, uci, reviewed in rows
+        if (fen, uci) in wanted
     }

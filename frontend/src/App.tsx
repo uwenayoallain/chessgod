@@ -1,5 +1,7 @@
 import { lazy, Suspense, useMemo } from 'react'
 
+import { PageBoundary } from '@/components/ui/page-boundary'
+
 import { Header } from '@/components/layout/header'
 import { ThemeProvider } from '@/components/layout/theme-provider'
 import Dashboard from '@/pages/dashboard'
@@ -21,9 +23,11 @@ export default function App() {
         <Header />
         <main className="content">
           {isAdminRoute ? (
-            <Suspense fallback={null}>
-              <AdminObservabilityPage />
-            </Suspense>
+            <PageBoundary>
+              <Suspense fallback={null}>
+                <AdminObservabilityPage />
+              </Suspense>
+            </PageBoundary>
           ) : (
             <Dashboard />
           )}

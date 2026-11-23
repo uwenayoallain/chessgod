@@ -32,6 +32,8 @@ export type Promotion = { from: string; to: string; level: number; preview?: boo
 type TrainingState = {
   /** Set to open the course on a colour from elsewhere on the page. */
   courseColor: 'white' | 'black' | null
+  /** Counts showCourse calls, so asking for the same colour twice still applies. */
+  courseRequest: number
   showCourse: (color: 'white' | 'black') => void
   session: TrainingSession | null
   startSession: (session: Omit<TrainingSession, 'index'>) => void
@@ -54,7 +56,8 @@ let nextId = 1
 
 export const useTrainingStore = create<TrainingState>((set, get) => ({
   courseColor: null,
-  showCourse: (color) => set({ courseColor: color }),
+  courseRequest: 0,
+  showCourse: (color) => set({ courseColor: color, courseRequest: get().courseRequest + 1 }),
   session: null,
   startSession: (session) => set({ session: { ...session, index: 0 } }),
   advanceSession: () => {

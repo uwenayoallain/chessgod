@@ -10,7 +10,7 @@ export type YourStep = StepBase & {
   side: 'you'
   /** keep: you already play it · change: play this instead · new: never reached it */
   status: 'keep' | 'change' | 'new'
-  reason: 'usual' | 'marked' | 'masters' | 'engine' | 'unchecked'
+  reason: 'usual' | 'marked' | 'learned' | 'masters' | 'engine' | 'unchecked'
   /** Chosen from a MultiPV search, rather than the engine's single best move. */
   checked: boolean
   eval_cp: number | null
@@ -61,7 +61,7 @@ export type RepertoireLine = {
   due_moves: number
   /** Moves played from memory at least once. */
   recalled_moves: number
-  /** Every move taught and every one played from memory at least once. */
+  /** Every move taught and every one asked from memory at least once, right or wrong. */
   practised: boolean
   status: LineStatus
 }
@@ -190,8 +190,19 @@ export type RepertoireDeviation = {
 export type RepertoireCheck = {
   games_checked: number
   games_followed: number
+  /** Departures whose repertoire move has not been reviewed since the game. */
   deviations: RepertoireDeviation[]
+  /** Departures already reviewed since the game: settled, not listed. */
+  handled: number
   requeued: number
+}
+
+/** What Blunder Check has to ask, how much has been asked, and what it cannot see yet. */
+export type ThreatsOverview = {
+  threats: { pool: number; games: number; asked: number }
+  punish: { pool: number; games: number; asked: number }
+  /** Rapid/blitz games from the last 30 days with under 60% of their positions evaluated. */
+  recent_unanalysed: number
 }
 
 export type ThreatQuestion = {

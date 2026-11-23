@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -317,13 +317,74 @@ async def threat_set(
         ],
         datetime.now(UTC),
     )
+    served = await _served_recently(session, username, "threat_set")
+    picked = threats.pick_set(pool, exclude=resting, due=due, served=served, seed=seed)
+    await _record_set(session, username, "threat_set", picked)
     # The punishment stays on the server until the move is played: the page
     # only learns it from the answer it is scored with.
     questions = [
         {key: value for key, value in item.items() if key not in ("reply_uci", "reply_san")}
-        for item in threats.pick_set(pool, exclude=resting, due=due, seed=seed)
+        for item in picked
     ]
     return {"questions": questions, "pool": len(pool), "due": len(due)}
+
+
+async def _served_recently(session: AsyncSession, username: str, kind: str) -> set[int]:
+    """Positions shown in a set lately: they wait their turn rather than coming straight back."""
+    now = datetime.now(UTC)
+    rows = (
+        await session.execute(
+            select(TrainingEvent.detail, TrainingEvent.created_at).where(
+                TrainingEvent.username == username,
+                TrainingEvent.kind == kind,
+                TrainingEvent.created_at >= now - threats.SERVED_REST,
+            )
+        )
+    ).all()
+    return threats.served_recently(
+        [(detail.get("position_ids", []), created_at) for detail, created_at in rows if detail], now,
+    )
+
+
+async def _record_set(session: AsyncSession, username: str, kind: str, picked: list[dict]) -> None:
+    """Remember the set shown (no XP), so an unanswered position is not asked again tomorrow."""
+    if not picked:
+        return
+    await training.award(
+        session, username, kind, detail={"position_ids": [item["position_id"] for item in picked]},
+    )
+    await session.commit()
+
+
+@router.get("/threats/overview")
+async def threats_overview(
+    username: str = Query(..., min_length=1, max_length=64),
+    session: AsyncSession = Depends(get_db),
+) -> dict:
+    """What Blunder Check has to ask, how much of it has been asked, and what it cannot see yet."""
+    threat_pool = await _threat_pool(session, username)
+    punish_pool = await _punish_pool(session, username)
+    rows = (
+        await session.execute(
+            select(TrainingEvent.kind, TrainingEvent.detail).where(
+                TrainingEvent.username == username,
+                TrainingEvent.kind.in_(("threat_spotted", "threat_missed", "punish_found", "punish_missed")),
+            )
+        )
+    ).all()
+    asked = {"threats": set(), "punish": set()}
+    for kind, detail in rows:
+        if detail and "position_id" in detail:
+            asked["threats" if kind.startswith("threat") else "punish"].add(int(detail["position_id"]))
+
+    def games(pool: list[dict]) -> int:
+        return len({item["game_url"] for item in pool})
+
+    return {
+        "threats": {"pool": len(threat_pool), "games": games(threat_pool), "asked": len(asked["threats"])},
+        "punish": {"pool": len(punish_pool), "games": games(punish_pool), "asked": len(asked["punish"])},
+        "recent_unanalysed": await threats.recent_unanalysed_games(session, username=username),
+    }
 
 
 class ThreatAnswerIn(BaseModel):
@@ -537,10 +598,13 @@ async def punish_set(
         ],
         datetime.now(UTC),
     )
+    served = await _served_recently(session, username, "punish_set")
+    picked = threats.pick_set(pool, exclude=resting, due=due, served=served, seed=seed)
+    await _record_set(session, username, "punish_set", picked)
     # The answer stays on the server until the move is played.
     questions = [
         {key: value for key, value in item.items() if key not in ("answer_uci", "answer_san")}
-        for item in threats.pick_set(pool, exclude=resting, due=due, seed=seed)
+        for item in picked
     ]
     return {"questions": questions, "pool": len(pool), "due": len(due)}
 

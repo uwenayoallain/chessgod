@@ -1,4 +1,4 @@
-import type { RepertoireCheck, RepertoireDeviation } from './types'
+import type { RepertoireCheck, RepertoireDeviation, ThreatsOverview } from './types'
 
 /** "2:05", "0:09": the Rush clock. */
 export function formatRushTime(ms: number): string {
@@ -30,11 +30,37 @@ export function describeDeviation(item: RepertoireDeviation, now = new Date()): 
   return `${when} you played ${played} and ${result}. Your repertoire move is ${item.expected_san}.`
 }
 
+/** Where a Blunder Check set comes from, and what it cannot draw on yet. */
+export function describeThreatsOverview(
+  overview: ThreatsOverview,
+  mode: 'threats' | 'punish',
+): { source: string; missing: string | null } {
+  const part = overview[mode]
+  const noun = mode === 'threats' ? 'of your mistakes' : 'of their mistakes you gave back'
+  const source = part.pool
+    ? `${part.pool.toLocaleString()} ${noun} from ${part.games.toLocaleString()} games, ${part.asked.toLocaleString()} asked so far.`
+    : 'No positions yet.'
+  const n = overview.recent_unanalysed
+  const missing = n
+    ? `${n.toLocaleString()} ${n === 1 ? 'game' : 'games'} from the last month ${n === 1 ? 'is' : 'are'} not analysed yet, so ${n === 1 ? 'its' : 'their'} mistakes are not in here. Reviewing a game adds it at once; the background analysis adds the rest while the laptop is idle.`
+    : null
+  return { source, missing }
+}
+
 /** How faithful the latest games were to the repertoire. */
 export function describeCheck(check: RepertoireCheck): string | null {
   if (!check.games_checked) return null
   const share = Math.round((check.games_followed / check.games_checked) * 100)
   return `In your repertoire for ${check.games_followed.toLocaleString()} of your last ${check.games_checked.toLocaleString()} games (${share}%).`
+}
+
+/** What became of the departures already reviewed, so a short list reads as progress. */
+export function describeHandled(check: RepertoireCheck): string | null {
+  if (!check.handled) return null
+  const games = check.handled === 1 ? 'game' : 'games'
+  return check.deviations.length
+    ? `You have already reviewed the moves from ${check.handled.toLocaleString()} other ${games}.`
+    : `You have reviewed the moves from all ${check.handled.toLocaleString()} ${games} that left it. Nothing to go back to.`
 }
 
 /** The lines to review after a check, most recent deviation first, each once. */

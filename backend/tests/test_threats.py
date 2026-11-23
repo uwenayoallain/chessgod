@@ -9,7 +9,9 @@ from app.models.base import Base
 from app.models.game import Game
 from app.models.game_position import GamePosition
 from app.models.position import Position
-from app.services.threats import build_pool, build_punish_pool, is_recapture, kind_of, pick_set, schedule
+from app.services.threats import (
+    build_pool, build_punish_pool, is_recapture, kind_of, pick_set, schedule, served_recently,
+)
 from app.utils.fen import normalize_fen
 
 
@@ -112,6 +114,27 @@ def test_kinds_and_sets() -> None:
     assert all(item["position_id"] % 2 == 1 for item in picked)
     # Everything answered recently: ask again rather than ask nothing.
     assert len(pick_set(pool, exclude=set(range(30)), size=10, seed=1)) == 10
+
+
+def test_a_set_walks_the_games_and_a_shown_position_waits_its_turn() -> None:
+    # Three positions from the newest game, then one from each of five older games.
+    pool = [{"position_id": n, "game_url": "g0"} for n in range(3)] + [
+        {"position_id": 10 + n, "game_url": f"g{n + 1}"} for n in range(5)
+    ]
+    picked = [item["position_id"] for item in pick_set(pool, exclude=set(), size=6)]
+    # One per game per pass, newest game first: the second position of g0 only after every game had one.
+    assert picked == [0, 10, 11, 12, 13, 14]
+    # Shown but not answered: those wait, and the set moves on through the pool.
+    served = set(picked)
+    again = [item["position_id"] for item in pick_set(pool, exclude=set(), served=served, size=6)]
+    assert again == [1, 2]
+    # Everything shown lately: ask again rather than ask nothing.
+    assert len(pick_set(pool, exclude=set(), served={item["position_id"] for item in pool}, size=6)) == 6
+    now = datetime(2026, 9, 30, 12, tzinfo=UTC)
+    shown = served_recently(
+        [([1, 2], now - timedelta(days=2)), ([3], now - timedelta(days=20))], now,
+    )
+    assert shown == {1, 2}
 
 
 def test_misses_come_back_first_and_finds_rest_longer_each_time() -> None:

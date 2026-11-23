@@ -11907,3 +11907,17 @@ button.sparring__game:disabled {
     animation: none;
   }
 }
+
+/* One review button per colour that left the repertoire, side by side. */
+.repertoire-check__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* Where a Blunder Check set comes from: its own line under the intro. */
+.blunder-check__source {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 12px;
+}
