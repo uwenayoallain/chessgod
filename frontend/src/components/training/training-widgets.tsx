@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useReducer, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { BookOpen, Dumbbell, Microscope, RefreshCw, Volume2, VolumeX, X } from 'lucide-react'
@@ -76,16 +76,67 @@ import type {
 } from '@/lib/training/types'
 import { useTrainingStore, type Celebration, type CelebrationVisual } from '@/store/training-store'
 
+const MINUTE_MS = 60_000
+
+/**
+ * Minutes until a live streak ends, kept current, or null when it is not at
+ * risk. The count was only as fresh as the last unrelated render, so it froze
+ * at whatever it read when the card was drawn and the warning never appeared
+ * for a tab left open past 18:00.
+ *
+ * One timer, fired on the minute so the count changes when the clock does and
+ * the evening is caught as it starts. It redraws only when there is a count to
+ * show (or one to take down), so a tab open all day costs a comparison a
+ * minute and no render. Coming back to the tab checks at once: a laptop that
+ * slept through the boundary wakes with a timer that has not counted the nap.
+ */
+export function useStreakRisk(profile: TrainingProfile | null | undefined): number | null {
+  const [, redraw] = useReducer((count: number) => count + 1, 0)
+  useEffect(() => {
+    // A dead streak or a met goal cannot become a risk without a new profile.
+    if (!profile || profile.streak <= 0 || profile.goal_met_today) return
+    let shown = streakAtRisk(profile)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const check = () => {
+      const next = streakAtRisk(profile)
+      if (next != null || shown != null) redraw()
+      shown = next
+    }
+    const arm = () => {
+      // A little past the boundary, so a timer that fires early still reads the new minute.
+      const untilNextMinute = MINUTE_MS - (Date.now() % MINUTE_MS) + 20
+      timer = setTimeout(() => {
+        check()
+        arm()
+      }, untilNextMinute)
+    }
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      clearTimeout(timer)
+      check()
+      arm()
+    }
+    arm()
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearTimeout(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [profile])
+  return profile ? streakAtRisk(profile) : null
+}
+
 /** Streak, level and today's goal, always in view: the reason to come back. */
 export function TrainingChip({ username }: { username: string }) {
   const profile = useTrainingProfile(username).data
   const bump = useTrainingStore((state) => state.bump)
+  const risk = useStreakRisk(profile)
   if (!profile) return null
   return (
     <button
       // Alternates so each landing restarts the bump animation.
       data-bump={bump ? bump % 2 : undefined}
-      data-risk={streakAtRisk(profile) != null || undefined}
+      data-risk={risk != null || undefined}
       className="training-chip"
       onClick={openToday}
       type="button"
@@ -164,7 +215,7 @@ function GoalRing({ profile }: { profile: TrainingProfile }) {
 /**
  * This week against last week as a race on two ranks: your white pawn
  * advances with this week's XP, last week's black pawn stands where you were
- * at this point then, and the last square is last week's whole total — reach
+ * at this point then, and the last square is last week's whole total: reach
  * it and the pawn promotes.
  */
 function RivalRace({ profile }: { profile: TrainingProfile }) {
@@ -541,7 +592,7 @@ const LONG_DAY = new Intl.DateTimeFormat(undefined, {
 
 /**
  * What to do today, first in Review: the goal, the streak on the line, and
- * the few things that earn it — reviews due, the next fix to learn, drills.
+ * the few things that earn it: reviews due, the next fix to learn, drills.
  */
 export function TodayCard({
   username,
@@ -566,6 +617,7 @@ export function TodayCard({
   const habits = useHabits(username)
 
   const profile = profileQuery.data
+  const risk = useStreakRisk(profile)
   if (!profile) return <PanelSkeleton label="Loading today's training" rows={3} rowHeight={48} />
 
   const blackLines = black.data?.lines ?? []
@@ -593,10 +645,9 @@ export function TodayCard({
     void queryClient.invalidateQueries({ queryKey: profileQueryKey(username) })
   }
 
-  const risk = streakAtRisk(profile)
   const sitting = habits.data ? describeSitting(habits.data) : null
   // The session renders inside the Opening course, which is its own page now,
-  // so starting one must also take the player there — without the reveal the
+  // so starting one must also take the player there: without the reveal the
   // button writes store state and nothing visible happens.
   const dueMoves = dueMoveCount(due)
   // A Black fix still to learn is worth more than any review: the Black
@@ -808,7 +859,7 @@ function currentRun(profile: TrainingProfile): number {
 
 /**
  * The week as a rank of the board, and the streak as a pawn marching up it:
- * a pawn on each day the goal was met, and a full rank of seven promotes it —
+ * a pawn on each day the goal was met, and a full rank of seven promotes it:
  * the newest square shows a queen. Chess's own rule, doing the streak's job.
  */
 function WeekRank({ profile }: { profile: TrainingProfile }) {

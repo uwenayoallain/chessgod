@@ -35,8 +35,8 @@ function moveNumber(ply: number) {
 }
 
 /**
- * Names what each costly move did — a hung piece, an allowed fork, a missed
- * mate — with the classifier the drills use, so a review says why a move was
+ * Names what each costly move did (a hung piece, an allowed fork, a missed
+ * mate) with the classifier the drills use, so a review says why a move was
  * bad and not only how much it cost. Asked once per set of judged moves.
  */
 function useMoveExplanations(moves: ReplayMoveAnnotation[], fenHistory: string[]) {
@@ -75,8 +75,8 @@ const REVIEWED_GAME_MIN_MOVES = 20
 
 /**
  * A finished review is training: it earns XP once per game, however often it
- * is reopened. The game is named by its id — an imported game's or a saved
- * engine game's — never by the moves on the board: keyed on a hash of the
+ * is reopened. The game is named by its id (an imported game's or a saved
+ * engine game's), never by the moves on the board: keyed on a hash of the
  * line, every move played off a reviewed game was a fresh, already-analysed
  * "game" worth 15 XP (39 of them in two minutes). A line that is nobody's
  * game earns nothing, and the server checks the id is the player's.
@@ -268,14 +268,14 @@ function ReviewSummary({
         <div className="review-summary__side" data-you>
           <span className="review-summary__name">You</span>
           <strong className="review-summary__accuracy">
-            {mineAccuracy == null ? '—' : mineAccuracy.toFixed(1)}
+            {mineAccuracy == null ? '-' : mineAccuracy.toFixed(1)}
           </strong>
           <span className="muted">accuracy</span>
         </div>
         <div className="review-summary__side">
           <span className="review-summary__name">{opponentTitle}</span>
           <strong className="review-summary__accuracy">
-            {theirAccuracy == null ? '—' : theirAccuracy.toFixed(1)}
+            {theirAccuracy == null ? '-' : theirAccuracy.toFixed(1)}
           </strong>
           <span className="muted">accuracy</span>
         </div>

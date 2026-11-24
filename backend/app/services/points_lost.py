@@ -28,6 +28,7 @@ from sqlalchemy import Integer, Text, bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine_contract import MAX_PAIR_DEPTH_GAP, MIN_TRUSTED_DEPTH
+from app.models.identity import Username
 from app.models.position import Position
 from app.schemas.improvement import (
     LossKindOut,
@@ -65,8 +66,8 @@ _KIND_LABELS = {
 }
 
 _USER_GAMES = """
-user_games AS (
-    SELECT g.id, g.user_color, g.opening_name
+user_games AS MATERIALIZED (
+    SELECT g.id, g.user_color, g.opening_name, g.user_result
     FROM games g
     WHERE g.username = :username
       AND (:color = 'both' OR g.user_color = :color)
@@ -77,10 +78,42 @@ user_games AS (
       )
 )"""
 
+# Read the requested games in ply order and keep each game local to its index
+# range on PostgreSQL. SQLite has no lateral joins.
+_GAME_PLIES_POSTGRES = """
+    SELECT ug.id AS game_id, ug.user_color, ug.opening_name, plies.*
+    FROM user_games ug
+    CROSS JOIN LATERAL (
+        SELECT gp.ply, gp.position_id AS child_id, gp.move_uci, gp.move_san,
+               LAG(gp.ply) OVER game_order AS parent_ply,
+               LAG(gp.position_id) OVER game_order AS parent_id,
+               LAG(CASE WHEN gp.ply < :opening_plies THEN gp.move_uci END) OVER game_order
+                   AS previous_move_uci
+        FROM game_positions gp
+        WHERE gp.game_id = ug.id
+        WINDOW game_order AS (ORDER BY gp.ply)
+    ) plies
+"""
+
+_GAME_PLIES_SQLITE = """
+    SELECT gp.game_id, gp.ply, gp.position_id AS child_id, ug.user_color, ug.opening_name,
+           gp.move_uci, gp.move_san,
+           LAG(gp.ply) OVER game_order AS parent_ply,
+           LAG(gp.position_id) OVER game_order AS parent_id,
+           LAG(CASE WHEN gp.ply < :opening_plies THEN gp.move_uci END) OVER game_order
+               AS previous_move_uci
+    FROM user_games ug
+    JOIN game_positions gp ON gp.game_id = ug.id
+    WINDOW game_order AS (PARTITION BY gp.game_id ORDER BY gp.ply)
+"""
+
+# Pick an evaluation pair only once per pair of positions. Materializing the
+# child match gives PostgreSQL two simple joins instead of a many-way join over
+# the engine and terminal rows, whose combined cardinality is hard to estimate.
 _DECISIONS_SQL = """
 WITH
 """ + _USER_GAMES + """,
-position_evals AS (
+position_evals AS MATERIALIZED (
     SELECT ar.position_id,
            CASE
                WHEN ar.eval_cp > 1500 THEN 1500
@@ -101,86 +134,90 @@ position_evals AS (
     SELECT position_id, white_result * 2000, NULL, NULL, 1, NULL
     FROM position_outcomes
 ),
-evaluated_gp AS MATERIALIZED (
-    SELECT gp.game_id, gp.ply, gp.position_id, gp.move_uci, gp.move_san,
-           ug.user_color, ug.opening_name,
-           pe.eval_cp, pe.best_move_uci, pe.best_move_san, pe.terminal_priority, pe.eval_depth
-    FROM game_positions gp
-    JOIN user_games ug ON ug.id = gp.game_id
-    JOIN position_evals pe ON pe.position_id = gp.position_id
+game_plies AS (__GAME_PLIES__),
+scoped_moves AS MATERIALIZED (
+    SELECT game_id, ply, child_id, user_color,
+           CASE WHEN ply <= :opening_plies THEN opening_name END AS opening_name,
+           CASE WHEN parent_ply = ply - 1 THEN parent_id END AS parent_id,
+           CASE WHEN ply <= :opening_plies THEN move_uci END AS move_uci,
+           CASE WHEN ply <= :opening_plies THEN move_san END AS move_san,
+           previous_move_uci
+    FROM game_plies
+    WHERE move_uci IS NOT NULL
+      AND CASE user_color WHEN 'white' THEN ply % 2 = 1
+                          WHEN 'black' THEN ply % 2 = 0 ELSE FALSE END
+),
+position_pairs AS (
+    SELECT DISTINCT parent_id, child_id FROM scoped_moves WHERE parent_id IS NOT NULL
+),
+scored_children AS MATERIALIZED (
+    SELECT pair.parent_id, pair.child_id, child.eval_cp, child.best_move_san,
+           child.terminal_priority, child.eval_depth
+    FROM position_pairs pair
+    JOIN position_evals child ON child.position_id = pair.child_id
 ),
 ranked AS (
-    SELECT child.ply, child.user_color, child.opening_name,
-           child.move_uci, child.move_san,
-           parent.position_id AS parent_id,
-           parent.move_uci AS previous_move_uci,
-           parent.eval_cp AS before_cp,
-           child.eval_cp AS after_cp,
-           parent.best_move_uci, parent.best_move_san,
-           child.best_move_san AS reply_san,
+    SELECT child.parent_id, child.child_id,
+           parent.eval_cp AS before_cp, child.eval_cp AS after_cp,
+           parent.best_move_uci, parent.best_move_san, child.best_move_san AS reply_san,
            ROW_NUMBER() OVER (
-               PARTITION BY child.game_id, child.ply
+               PARTITION BY child.parent_id, child.child_id
                ORDER BY parent.terminal_priority + child.terminal_priority DESC,
                         CASE WHEN parent.eval_depth IS NULL OR child.eval_depth IS NULL THEN 0
                              ELSE ABS(parent.eval_depth - child.eval_depth) END ASC,
                         COALESCE(parent.eval_depth, 0) + COALESCE(child.eval_depth, 0) DESC
            ) AS eval_rank
-    FROM evaluated_gp child
-    JOIN evaluated_gp parent
-      ON parent.game_id = child.game_id
-     AND parent.ply = child.ply - 1
-    WHERE child.move_uci IS NOT NULL
-      AND (
-          parent.eval_depth IS NULL
-          OR child.eval_depth IS NULL
-          OR ABS(parent.eval_depth - child.eval_depth) <= :max_pair_depth_gap
-      )
-      AND (
-          (child.user_color = 'white' AND child.ply % 2 = 1)
-          OR (child.user_color = 'black' AND child.ply % 2 = 0)
-      )
+    FROM scored_children child
+    JOIN position_evals parent ON parent.position_id = child.parent_id
+    WHERE parent.eval_depth IS NULL
+       OR child.eval_depth IS NULL
+       OR ABS(parent.eval_depth - child.eval_depth) <= :max_pair_depth_gap
+),
+scored_pairs AS MATERIALIZED (
+    SELECT ranked.*, (
+        SELECT lower(__BOARD_PLACEMENT__)
+        FROM positions p
+        WHERE p.id = ranked.parent_id
+    ) AS pieces
+    FROM ranked
+    WHERE ranked.eval_rank = 1
+),
+totals AS (
+    SELECT COUNT(*) AS total,
+           SUM(CASE WHEN ply <= :opening_plies THEN 1 ELSE 0 END) AS opening
+    FROM scoped_moves
 )
-SELECT r.ply, r.user_color, r.before_cp, r.after_cp, r.reply_san, r.best_move_san,
-       CASE WHEN r.ply <= :opening_plies THEN r.parent_id END AS parent_id,
-       CASE WHEN r.ply <= :opening_plies THEN r.move_uci END AS move_uci,
-       CASE WHEN r.ply <= :opening_plies THEN r.move_san END AS move_san,
-       CASE WHEN r.ply <= :opening_plies THEN r.best_move_uci END AS best_move_uci,
-       CASE WHEN r.ply <= :opening_plies THEN r.previous_move_uci END AS previous_move_uci,
-       CASE WHEN r.ply <= :opening_plies THEN r.opening_name END AS opening_name,
-       CASE WHEN r.ply <= :opening_plies THEN NULL ELSE
+SELECT d.ply, d.user_color, r.before_cp, r.after_cp, r.reply_san, r.best_move_san,
+       CASE WHEN d.ply <= :opening_plies THEN d.parent_id END AS parent_id,
+       d.move_uci, d.move_san,
+       CASE WHEN d.ply <= :opening_plies THEN r.best_move_uci END AS best_move_uci,
+       d.previous_move_uci,
+       d.opening_name,
+       CASE WHEN d.ply > :opening_plies THEN
            3 * (length(pieces) - length(replace(pieces, 'n', '')))
          + 3 * (length(pieces) - length(replace(pieces, 'b', '')))
          + 5 * (length(pieces) - length(replace(pieces, 'r', '')))
          + 9 * (length(pieces) - length(replace(pieces, 'q', '')))
-       END AS material
-FROM (
-    SELECT ranked.*, lower(__BOARD_PLACEMENT__) AS pieces
-    FROM ranked
-    JOIN positions p ON p.id = ranked.parent_id
-    WHERE ranked.eval_rank = 1
-) r
+       END AS material,
+       totals.total, totals.opening
+FROM totals
+LEFT JOIN (
+    scoped_moves d
+    JOIN scored_pairs r ON r.parent_id = d.parent_id AND r.child_id = d.child_id
+) ON TRUE
+ORDER BY d.game_id, d.ply
 """
-
-_TOTALS_SQL = """
-WITH
-""" + _USER_GAMES + """
-SELECT COUNT(*) AS total,
-       SUM(CASE WHEN gp.ply <= :opening_plies THEN 1 ELSE 0 END) AS opening
-FROM game_positions gp
-JOIN user_games ug ON ug.id = gp.game_id
-WHERE gp.move_uci IS NOT NULL
-  AND (
-      (ug.user_color = 'white' AND gp.ply % 2 = 1)
-      OR (ug.user_color = 'black' AND gp.ply % 2 = 0)
-  )
-"""
-
 
 _AFTER_OPENING_SQL = """
 WITH
 """ + _USER_GAMES + """,
+opening_games AS MATERIALIZED (
+    SELECT ug.user_color, ug.user_result, gp.position_id
+    FROM user_games ug
+    JOIN game_positions gp ON gp.game_id = ug.id AND gp.ply = :opening_plies
+),
 evals AS (
-    SELECT ar.position_id, ar.depth,
+    SELECT ar.position_id,
            CASE
                WHEN ar.eval_cp > 1500 THEN 1500
                WHEN ar.eval_cp < -1500 THEN -1500
@@ -189,20 +226,17 @@ evals AS (
                ELSE -2000
            END AS eval_cp,
            ROW_NUMBER() OVER (PARTITION BY ar.position_id ORDER BY ar.depth DESC) AS rank
-    FROM analysis_results ar
-    JOIN game_positions gp ON gp.position_id = ar.position_id AND gp.ply = :opening_plies
-    JOIN user_games ug ON ug.id = gp.game_id
+    FROM (SELECT DISTINCT position_id FROM opening_games) positions
+    JOIN analysis_results ar ON ar.position_id = positions.position_id
     WHERE ar.multipv_rank = 1
       AND ar.engine = 'stockfish-19'
       AND ar.engine_version = '19'
       AND ar.depth >= :min_depth
       AND (ar.eval_cp IS NOT NULL OR ar.eval_mate IS NOT NULL)
 )
-SELECT ug.user_color, g.user_result, e.eval_cp
-FROM user_games ug
-JOIN games g ON g.id = ug.id
-JOIN game_positions gp ON gp.game_id = ug.id AND gp.ply = :opening_plies
-JOIN evals e ON e.position_id = gp.position_id AND e.rank = 1
+SELECT og.user_color, og.user_result, e.eval_cp
+FROM opening_games og
+JOIN evals e ON e.position_id = og.position_id AND e.rank = 1
 """
 
 # A pawn down after move 10 is an opening that went wrong.
@@ -320,7 +354,8 @@ async def build_points_lost(
     placement = (
         "split_part(p.fen, ' ', 1)" if postgres else "substr(p.fen, 1, instr(p.fen, ' ') - 1)"
     )
-    sql = _DECISIONS_SQL.replace("__BOARD_PLACEMENT__", placement)
+    game_plies = _GAME_PLIES_POSTGRES if postgres else _GAME_PLIES_SQLITE
+    sql = _DECISIONS_SQL.replace("__BOARD_PLACEMENT__", placement).replace("__GAME_PLIES__", game_plies)
     params = {
         "username": username,
         "color": color,
@@ -333,20 +368,15 @@ async def build_points_lost(
     rows = (
         await session.execute(
             text(sql).bindparams(
+                bindparam("username", type_=Username),
                 bindparam("time_class", type_=Text()),
                 bindparam("max_pair_depth_gap", type_=Integer()),
             ),
             params,
         )
-    ).mappings().all()
-    totals = (
-        await session.execute(
-            text(_TOTALS_SQL).bindparams(bindparam("time_class", type_=Text())),
-            {key: params[key] for key in ("username", "color", "time_class", "min_user_rating", "opening_plies")},
-        )
-    ).mappings().one()
-    total_decisions = int(totals["total"] or 0)
-    total_opening = int(totals["opening"] or 0)
+    ).all()
+    total_decisions = int(rows[0].total or 0)
+    total_opening = int(rows[0].opening or 0)
 
     count: Counter[str] = Counter()
     lost: defaultdict[str, float] = defaultdict(float)
@@ -355,15 +385,20 @@ async def build_points_lost(
     big_moves = 0
     big_lost = 0.0
     all_lost = 0.0
-    fixes: dict[tuple[int, str], _Fix] = {}
+    fixes: defaultdict[tuple[int, str], _Fix] = defaultdict(_Fix)
 
-    for row in rows:
-        sign = 1 if row["user_color"] == "white" else -1
-        before = sign * int(row["before_cp"])
-        after = sign * int(row["after_cp"])
+    for (
+        ply, user_color, before_cp, after_cp, reply_san, best_move_san, parent_id,
+        move_uci, move_san, best_move_uci, previous_move_uci, opening_name, material, _, _,
+    ) in rows:
+        if ply is None:
+            continue
+        sign = 1 if user_color == "white" else -1
+        before = sign * int(before_cp)
+        after = sign * int(after_cp)
         chance = max(0.0, expected_score(before) - expected_score(after))
         loss_cp = max(0, before - after)
-        phase = _phase(int(row["ply"]), row["material"])
+        phase = _phase(int(ply), material)
         count[phase] += 1
         lost[phase] += chance
         all_lost += chance
@@ -371,19 +406,19 @@ async def build_points_lost(
             big_moves += 1
             big_lost += chance
         if phase == "opening":
-            if row["parent_id"] is not None and row["move_uci"]:
-                fix = fixes.setdefault((int(row["parent_id"]), row["move_uci"]), _Fix())
+            if parent_id is not None and move_uci:
+                fix = fixes[int(parent_id), move_uci]
                 fix.occurrences += 1
                 fix.loss_cp += loss_cp
                 fix.lost += chance
-                fix.played_san = row["move_san"] or row["move_uci"]
-                if row["best_move_uci"]:
-                    fix.best[(row["best_move_uci"], row["best_move_san"])] += 1
-                fix.previous[row["previous_move_uci"]] += 1
-                if row["opening_name"]:
-                    fix.openings[row["opening_name"]] += 1
+                fix.played_san = move_san or move_uci
+                if best_move_uci:
+                    fix.best[best_move_uci, best_move_san] += 1
+                fix.previous[previous_move_uci] += 1
+                if opening_name:
+                    fix.openings[opening_name] += 1
         else:
-            kind = loss_kind(loss_cp, row["reply_san"], row["best_move_san"])
+            kind = loss_kind(loss_cp, reply_san, best_move_san)
             kind_count[kind] += 1
             kind_lost[kind] += chance
 
@@ -473,7 +508,10 @@ async def build_points_lost(
 
     after_opening = (
         await session.execute(
-            text(_AFTER_OPENING_SQL).bindparams(bindparam("time_class", type_=Text())),
+            text(_AFTER_OPENING_SQL).bindparams(
+                bindparam("username", type_=Username),
+                bindparam("time_class", type_=Text()),
+            ),
             {key: params[key] for key in (
                 "username", "color", "time_class", "min_user_rating", "opening_plies", "min_depth",
             )},

@@ -18,7 +18,13 @@ import {
   type AnalysisMode,
 } from '@/lib/stockfish/analysis-policy'
 import { StockfishEngine } from '@/lib/stockfish/engine'
-import { reviewPoolSize, runReviewPool, type ReviewJob } from '@/lib/stockfish/review-pool'
+import {
+  createWarmPool,
+  reviewPoolSize,
+  runReviewPool,
+  type BorrowedEngine,
+  type ReviewJob,
+} from '@/lib/stockfish/review-pool'
 import {
   getLegalMoveCount,
   getTerminalOutcome,
@@ -183,6 +189,11 @@ let positionTimeoutId: number | null = null
 let botSearchCount = 0
 // The game review running on its own pool of engines, if any.
 let reviewAbort: AbortController | null = null
+// The last review started, settling once its pool has handed every engine
+// back. A review that replaces it waits for that, so it starts on the same
+// engines (warm, and the main engine with them) instead of building new ones
+// beside workers that are still on their way out.
+let reviewRun: Promise<void> | null = null
 // Each pool engine keeps a small table: it searches one position at a time.
 const REVIEW_HASH_MB = 32
 // What one review position may search before it stops short of its depth. A
@@ -191,6 +202,101 @@ const REVIEW_HASH_MB = 32
 // held an engine for a minute stops here instead, and the pool keeps what it
 // reached when that is deep enough to grade from.
 const REVIEW_MOVETIME_MS = 4_000
+/**
+ * How long the review's own engines are kept after a review. Another game
+ * opened straight after, or the same one asked again, then starts on workers
+ * that already hold the network instead of compiling the wasm and copying
+ * ~98MB of network into each new one. Short, because each holds ~450MB.
+ */
+export const REVIEW_WARM_MS = 50_000
+// Pool engines whose worker reported an error: never kept warm.
+const failedReviewEngines = new WeakSet<StockfishEngine>()
+
+function createReviewEngine() {
+  const created: StockfishEngine = new StockfishEngine({
+    onInfo: () => {},
+    onBestMove: () => {},
+    onReady: () => {},
+    onStatus: () => {},
+    onError: (message) => {
+      failedReviewEngines.add(created)
+      emitEngineEvent('engine_error', { error_message: message })
+    },
+  })
+  return created
+}
+
+const reviewEngines = createWarmPool({ create: createReviewEngine, idleMs: REVIEW_WARM_MS })
+
+/**
+ * The main engine while a game review searches on it. A review runs on a pool
+ * of single-threaded engines, and the main engine used to sit idle beside it
+ * holding ~0.5-1GB (its wasm, the network and the board's hash) while the pool
+ * built new workers of its own. Lent to the pool instead, it does the work of
+ * as many pool engines as it has threads, so the review costs one or two fewer
+ * workers. It is never destroyed by the pool, only handed back.
+ *
+ * Nothing is reconfigured for the loan: the worker applies Threads and Hash
+ * only when it starts, and changing them later would need a command the worker
+ * does not have. So it keeps its two threads and its board hash, and counts as
+ * two of the pool's single-threaded engines (see `runReviewPool`): the cores
+ * see the same number of searches as before, and there is nothing to restore
+ * when it comes back.
+ */
+type MainLease = {
+  engine: StockfishEngine
+  revoke: AbortController
+  returned: Promise<void>
+  failed: boolean
+}
+let mainLease: MainLease | null = null
+
+/** Lend the main engine to a review, when it is ready and nothing else needs it. */
+function lendMainEngine(): BorrowedEngine | null {
+  const lent = engine
+  if (!lent || mainLease) return null
+  const state = useEngineStore.getState()
+  if (!state.enabled || !state.isReady) return null
+  // A board search, the opponent's move, or a game in progress (which needs
+  // the engine between moves) keep it.
+  if (activeFen !== null || botSearchCount > 0) return null
+  if (useSparStore.getState().status === 'playing') return null
+  let settle = () => {}
+  const returned = new Promise<void>((resolve) => {
+    settle = resolve
+  })
+  const lease: MainLease = { engine: lent, revoke: new AbortController(), returned, failed: false }
+  mainLease = lease
+  return {
+    engine: lent,
+    threads: getThreadCount(),
+    revoke: lease.revoke.signal,
+    release: (healthy) => {
+      if (mainLease === lease) mainLease = null
+      settle()
+      // A search it had to abandon, or an error from its worker: build a new
+      // one for the board rather than trust this one again.
+      if ((!healthy || lease.failed) && engine === lent) discardMainEngine()
+    },
+  }
+}
+
+/**
+ * Take the main engine back from a review that borrowed it. The review stops
+ * its search on it, puts that position back for its other engines, and fills
+ * the threads it held with engines of its own; this resolves once it is free.
+ */
+async function reclaimMainEngine() {
+  const lease = mainLease
+  if (!lease) return
+  lease.revoke.abort()
+  await lease.returned
+}
+
+/** Drop the review's warm engines, and any it still holds when it settles. */
+function dropReviewEngines() {
+  reviewEngines.reset()
+}
 // Positions of the running review, by the depth each was asked for, so a
 // second request for the same game reuses the review instead of restarting it.
 let reviewDepthByFen = new Map<string, number>()
@@ -277,6 +383,7 @@ function engineBusy() {
     queuedAnalyses.length > 0 ||
     botSearchCount > 0 ||
     reviewAbort !== null ||
+    mainLease !== null ||
     analyzeTimer != null ||
     // Between the opponent's moves nothing is searching, but the game needs it.
     useSparStore.getState().status === 'playing'
@@ -303,13 +410,23 @@ function touchEngine() {
   }
 }
 
-/** Tear the main worker down. Cached lines stay; only the worker goes. */
+/**
+ * Tear the main worker down, and the review's warm engines with it. Cached
+ * lines stay; only the workers go.
+ */
 function releaseEngine() {
   if (idleTimer != null) {
     window.clearTimeout(idleTimer)
     idleTimer = null
   }
+  dropReviewEngines()
+  discardMainEngine()
+}
+
+/** Destroy the main worker only; the next search builds a new one. */
+function discardMainEngine() {
   if (!engine) return
+  if (mainLease?.engine === engine) mainLease = null
   engine.destroy()
   engine = null
   useEngineStore.setState({ isReady: false, isLoadingNnue: false, hasAttempted: false })
@@ -405,12 +522,22 @@ function takePriorityReviewJob(): ReviewJob | null {
 }
 
 async function runGameReview(jobs: AnalysisJob[]) {
+  const previous = reviewRun
   abortGameReview()
   const controller = new AbortController()
   reviewAbort = controller
   reviewDepthByFen = new Map(jobs.map((job) => [job.fen, job.depth]))
   priorityServed = new Set()
+  let settle = () => {}
+  const run = new Promise<void>((resolve) => {
+    settle = resolve
+  })
+  reviewRun = run
   try {
+    // The review this one replaces hands its engines back first (an aborted
+    // search settles at once), so they are reused rather than built again.
+    if (previous) await previous
+    if (controller.signal.aborted) return
     await runReviewPool({
       jobs: jobs.map((job) => {
         const movetimeMs = reviewMovetime(job.depth)
@@ -419,14 +546,12 @@ async function runGameReview(jobs: AnalysisJob[]) {
       size: reviewPoolSize(),
       hash: REVIEW_HASH_MB,
       signal: controller.signal,
-      create: () =>
-        new StockfishEngine({
-          onInfo: () => {},
-          onBestMove: () => {},
-          onReady: () => {},
-          onStatus: () => {},
-          onError: (message) => emitEngineEvent('engine_error', { error_message: message }),
-        }),
+      borrow: lendMainEngine(),
+      create: () => reviewEngines.acquire(),
+      retire: (poolEngine, healthy) => {
+        const reviewEngine = poolEngine as StockfishEngine
+        reviewEngines.release(reviewEngine, healthy && !failedReviewEngines.has(reviewEngine))
+      },
       priority: takePriorityReviewJob,
       onResult: (job, lines) => recordReviewResult(job.fen, lines, !priorityServed.has(job.fen)),
     })
@@ -438,7 +563,10 @@ async function runGameReview(jobs: AnalysisJob[]) {
       error_message: error instanceof Error ? error.message : String(error),
     })
   } finally {
-    touchEngine()
+    settle()
+    if (reviewRun === run) reviewRun = null
+    // Switched off mid-review: no worker is left to count idle time for.
+    if (engine) touchEngine()
     if (reviewAbort === controller) {
       reviewAbort = null
       reviewDepthByFen = new Map()
@@ -578,8 +706,8 @@ function startPositionTimeout() {
     const timedOutItem = activeQueueItem
     // A deep look at the board position that runs out of time is not a
     // failure: keep what it reached. It used to report an error and discard
-    // everything — six times in one session, each after 90 seconds and at
-    // depth 26 — so returning to the position started the search from zero.
+    // everything (six times in one session, each after 90 seconds and at
+    // depth 26), so returning to the position started the search from zero.
     if (timedOutItem?.source === 'interactive' && storableLines(timedOutFen, activeLines).length) {
       engine?.stop()
       if (activeDepth < timedOutItem.depth) rememberInteractiveCap(timedOutFen, activeDepth)
@@ -673,7 +801,7 @@ function getHashSize(highPerformance = false): number {
 
 /**
  * The lines fit to store: every move of each PV legal from `fen`. Live info
- * lines are checked on their first move only — replaying every PV with
+ * lines are checked on their first move only: replaying every PV with
  * chess.js on every info line cost ~27ms per position stepped to (measured),
  * and the display already stops a PV at its first move that will not play.
  * Nothing reaches the cache, or the server, without the full check here.
@@ -971,6 +1099,8 @@ async function processQueue(interrupt = false) {
 
   const generation = activeGeneration
   touchEngine()
+  // A review that was just stopped may still be handing the engine back.
+  if (mainLease) await reclaimMainEngine()
   await state.init()
   if (activeGeneration !== generation || activeFen !== nextItem.fen) return
 
@@ -989,6 +1119,7 @@ function ensureEngine() {
   engine = new StockfishEngine({
     onBestMove: (bestMove) => completeActiveAnalysis(bestMove),
     onError: (error) => {
+      if (mainLease && mainLease.engine === engine) mainLease.failed = true
       clearPositionTimeout()
       emitEngineEvent('engine_error', { error_message: error })
       const errorFen = activeFen
@@ -1129,8 +1260,7 @@ export const useEngineStore = create<EngineState>((set, get) => ({
     // live; otherwise the next init() picks up the new value for free.
     if (engine) {
       get().stop()
-      engine.destroy()
-      engine = null
+      discardMainEngine()
       if (get().enabled) {
         await get().init()
         void get().analyzePosition(useAppStore.getState().currentFen, {
@@ -1332,6 +1462,9 @@ export const useEngineStore = create<EngineState>((set, get) => ({
     botSearchCount += 1
     set({ activeMode: null, isAnalyzing: false })
     try {
+      // The opponent's search needs the main engine; a review that borrowed
+      // it hands it back and carries on with engines of its own.
+      await reclaimMainEngine()
       await get().init()
       return await ensureEngine().play(fen, {
         depth,
@@ -1362,6 +1495,8 @@ export const useEngineStore = create<EngineState>((set, get) => ({
     for (const fen of retryMap.keys()) {
       if (!reviewDepthByFen.has(fen)) retryMap.delete(fen)
     }
+    // Idle review engines only: a running review keeps the ones it is using.
+    reviewEngines.dropIdle()
     // A running game review owns the replay progress; leave it to report.
     if (
       reviewAbort === null &&
@@ -1381,6 +1516,9 @@ export const useEngineStore = create<EngineState>((set, get) => ({
   stop: () => {
     clearAnalyzeTimer()
     abortGameReview()
+    // Stopped by hand (or to hand the engine to the opponent): no warm
+    // workers wait for a next review that is not coming.
+    dropReviewEngines()
     clearPositionTimeout()
     engine?.stop()
     if (pendingRafId !== null) {
@@ -1544,3 +1682,12 @@ export const useEngineStore = create<EngineState>((set, get) => ({
     }, ANALYZE_DEBOUNCE_MS)
   },
 }))
+
+// A game against the engine needs the main engine between moves and the
+// machine to itself: the review's idle engines go now, and a review still
+// running gives the main engine back before the opponent's first move asks.
+useSparStore.subscribe((state, previous) => {
+  if (state.status !== 'playing' || previous.status === 'playing') return
+  reviewEngines.dropIdle()
+  void reclaimMainEngine()
+})

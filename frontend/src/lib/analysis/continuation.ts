@@ -62,7 +62,7 @@ export function pvToMoves(rootFen: string, pv: string[]): ContinuationMove[] {
  * What the engine says happens next, from the side that has to move.
  *
  * A finished drill tells the reader which move was right and why it was right,
- * and then stops — leaving the question the position actually raises ("and then
+ * and then stops, leaving the question the position actually raises ("and then
  * what?") unanswered. This is the engine's own line from the drill position, so
  * the answer comes from a search rather than from the card's stored text.
  */
@@ -93,12 +93,12 @@ export function buildContinuation({
   }
 }
 
-/** "+1.4", "−0.3", "M3" — the evaluation as the drill's side reads it. */
+/** "+1.4", "−0.3", "M3": the evaluation as the drill's side reads it. */
 export function formatContinuationScore(continuation: Continuation): string {
   if (continuation.mateIn != null) {
     return `${continuation.mateIn > 0 ? 'M' : '−M'}${Math.abs(continuation.mateIn)}`
   }
-  if (continuation.scoreCp == null) return '—'
+  if (continuation.scoreCp == null) return '-'
   const pawns = continuation.scoreCp / 100
   const sign = pawns > 0 ? '+' : pawns < 0 ? '−' : ''
   return `${sign}${Math.abs(pawns).toFixed(1)}`

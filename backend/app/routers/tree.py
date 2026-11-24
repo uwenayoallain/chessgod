@@ -4,7 +4,7 @@ import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -93,60 +93,53 @@ async def get_position_tree(
     # to a position (a repetition, a transposition inside one game) has a
     # game_positions row per visit, and counting rows read it as that many
     # games.
-    visits_position = (
-        select(GamePosition.id)
-        .where(GamePosition.game_id == Game.id, GamePosition.position_id == position.id)
-        .exists()
-    )
-    stats_row = await session.execute(
-        select(
-            func.count(),
-            func.sum(case((Game.result == "1-0", 1), else_=0)),
-            func.sum(case((Game.result == "1/2-1/2", 1), else_=0)),
-            func.sum(case((Game.result == "0-1", 1), else_=0)),
-        )
-        .select_from(Game)
-        .where(visits_position, *game_join_filters)
-    )
-    total_games, white_wins, draws, black_wins = stats_row.one()
-
-    if not total_games:
-        return TreeNodeOut(fen=position.fen, total_games=0, white_wins=0, draws=0, black_wins=0, moves=[])
-
-    # A move is an edge of the game it was played in: the row at this position
-    # and the row one ply later in the same game. Matching every game_positions
-    # row that reached the child by this move at the one ply stored on
-    # position_moves missed the same move played from here at any other ply,
-    # and counted games that reached the child from somewhere else.
-    parent_gp = aliased(GamePosition)
-    child_gp = aliased(GamePosition)
     opponent_rating = case(
         (Game.user_color == "white", Game.black_rating),
         else_=Game.white_rating,
     )
+    # The next ply must be from the same visit. Keep visits without a next
+    # move so a game that ended here still contributes to the position totals.
+    child_gp = aliased(GamePosition)
+    visits = (
+        select(
+            GamePosition.game_id, Game.result, opponent_rating.label("opponent_rating"),
+            child_gp.move_uci, child_gp.move_san, child_gp.position_id.label("to_position_id"),
+        )
+        .join(Game, Game.id == GamePosition.game_id)
+        .outerjoin(
+            child_gp,
+            and_(
+                child_gp.game_id == GamePosition.game_id,
+                child_gp.ply == GamePosition.ply + 1,
+                child_gp.move_uci.is_not(None),
+            ),
+        )
+        .where(GamePosition.position_id == position.id, *game_join_filters)
+        .cte("filtered_visits")
+    )
+    games = select(visits.c.game_id, visits.c.result).distinct().subquery()
+    stats = (
+        select(
+            func.count().label("total_games"),
+            func.sum(case((games.c.result == "1-0", 1), else_=0)).label("total_white_wins"),
+            func.sum(case((games.c.result == "1/2-1/2", 1), else_=0)).label("total_draws"),
+            func.sum(case((games.c.result == "0-1", 1), else_=0)).label("total_black_wins"),
+        )
+        .subquery()
+    )
+
     # One row per game and move, so a game that plays the move twice from here
-    # is one game. Filtered here, before anything is counted.
+    # is one game.
     played = (
         select(
-            parent_gp.game_id.label("game_id"),
-            child_gp.move_uci.label("move_uci"),
-            func.min(child_gp.position_id).label("to_position_id"),
-            func.min(child_gp.move_san).label("move_san"),
-            func.min(Game.result).label("result"),
-            func.min(opponent_rating).label("opponent_rating"),
+            visits.c.move_uci,
+            func.min(visits.c.to_position_id).label("to_position_id"),
+            func.min(visits.c.move_san).label("move_san"),
+            func.min(visits.c.result).label("result"),
+            func.min(visits.c.opponent_rating).label("opponent_rating"),
         )
-        .select_from(parent_gp)
-        .join(
-            child_gp,
-            and_(child_gp.game_id == parent_gp.game_id, child_gp.ply == parent_gp.ply + 1),
-        )
-        .join(Game, Game.id == parent_gp.game_id)
-        .where(
-            parent_gp.position_id == position.id,
-            child_gp.move_uci.is_not(None),
-            *game_join_filters,
-        )
-        .group_by(parent_gp.game_id, child_gp.move_uci)
+        .where(visits.c.move_uci.is_not(None))
+        .group_by(visits.c.game_id, visits.c.move_uci)
         .subquery()
     )
     edges = (
@@ -168,8 +161,13 @@ async def get_position_tree(
     # count on position_moves, the sixty moves kept were everyone's most
     # played, and a move this colour or time control plays often could fall
     # outside them.
-    move_rows = await session.execute(
-        select(edges, edge_san.label("san"), Position.fen, PositionMove)
+    top_moves = (
+        select(
+            edges.c.move_uci, edges.c.game_count, edges.c.white_wins, edges.c.draws,
+            edges.c.black_wins, edges.c.avg_opponent_rating, edge_san.label("san"), Position.fen,
+            PositionMove.master_game_count, PositionMove.master_white_wins,
+            PositionMove.master_draws, PositionMove.master_black_wins,
+        )
         .join(Position, Position.id == edges.c.to_position_id)
         .outerjoin(
             PositionMove,
@@ -180,14 +178,18 @@ async def get_position_tree(
         )
         .order_by(edges.c.game_count.desc(), edge_san.asc())
         .limit(60)
+        .subquery()
     )
+    rows = (await session.execute(select(stats, top_moves).outerjoin(top_moves, true()))).all()
+    totals = rows[0]
+    if not totals.total_games:
+        return TreeNodeOut(fen=position.fen, total_games=0, white_wins=0, draws=0, black_wins=0, moves=[])
 
     book_ucis, book_sans = await asyncio.to_thread(common_book_move_keys, position.fen)
     moves = []
-    for row in move_rows.all():
-        # Master counts live on position_moves; a move played here that has no
-        # row there yet is still a move played here.
-        master = row.PositionMove
+    for row in rows:
+        if row.move_uci is None:
+            continue
         avg_rating = row.avg_opponent_rating
         moves.append(
             MoveOut(
@@ -200,13 +202,13 @@ async def get_position_tree(
                 # Over the filtered games, like every other number on the move.
                 avg_opponent_rating=None if avg_rating is None else round(float(avg_rating), 1),
                 resulting_fen=row.fen,
-                is_book_move=bool(master is not None and master.master_game_count)
+                is_book_move=bool(row.master_game_count)
                 or row.move_uci in book_ucis
                 or row.san in book_sans,
-                master_game_count=None if master is None else master.master_game_count,
-                master_white_wins=None if master is None else master.master_white_wins,
-                master_draws=None if master is None else master.master_draws,
-                master_black_wins=None if master is None else master.master_black_wins,
+                master_game_count=row.master_game_count,
+                master_white_wins=row.master_white_wins,
+                master_draws=row.master_draws,
+                master_black_wins=row.master_black_wins,
             )
         )
 
@@ -214,10 +216,10 @@ async def get_position_tree(
 
     return TreeNodeOut(
         fen=position.fen,
-        total_games=total_games,
-        white_wins=white_wins or 0,
-        draws=draws or 0,
-        black_wins=black_wins or 0,
+        total_games=totals.total_games,
+        white_wins=totals.total_white_wins or 0,
+        draws=totals.total_draws or 0,
+        black_wins=totals.total_black_wins or 0,
         moves=moves,
     )
 

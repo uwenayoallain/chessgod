@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   alternativeItems,
+  createMainQueueRecheck,
   enrichTrainerPositions,
   fetchTrainerFens,
   trainerFensUrl,
@@ -195,4 +196,48 @@ test('rests between positions, and after a skipped one too', async () => {
     sleep: async (ms) => { unrested.push(ms) }, upload: async () => {},
   })
   assert.deepEqual(unrested, [])
+})
+
+test('an empty main queue is not asked again while trainer alternatives drain', () => {
+  // 1,658 asks in 18 hours, each ~24s of Postgres, to learn nothing had changed.
+  let clock = 0
+  const recheck = createMainQueueRecheck({ recheckMs: 180_000, now: () => clock })
+  assert.equal(recheck.shouldPoll(), true, 'the first round always asks')
+
+  // Asked, empty, and enrichment found positions behind it.
+  recheck.markEmpty()
+  for (const at of [1_000, 60_000, 179_999]) {
+    clock = at
+    assert.equal(recheck.shouldPoll(), false, `asked again ${at}ms after an empty answer`)
+  }
+  clock = 180_000
+  assert.equal(recheck.shouldPoll(), true, 'asked again once the interval passed')
+
+  // That poll was empty too, with enrichment still busy: a fresh interval from it.
+  recheck.markEmpty()
+  clock = 200_000
+  assert.equal(recheck.shouldPoll(), false)
+
+  // Enrichment ran dry: the main queue is asked at once, whatever the clock says.
+  recheck.clear()
+  assert.equal(recheck.shouldPoll(), true)
+})
+
+test('a main queue with work is asked every round', () => {
+  let clock = 0
+  const recheck = createMainQueueRecheck({ recheckMs: 180_000, now: () => clock })
+  recheck.markEmpty()
+  clock = 5_000
+  // The batch after the interval had work: back to asking each round.
+  recheck.clear()
+  for (const at of [6_000, 7_000, 8_000]) {
+    clock = at
+    assert.equal(recheck.shouldPoll(), true)
+  }
+})
+
+test('a zero interval asks every round, as the crawler did before', () => {
+  const recheck = createMainQueueRecheck({ recheckMs: 0, now: () => 42 })
+  recheck.markEmpty()
+  assert.equal(recheck.shouldPoll(), true)
 })

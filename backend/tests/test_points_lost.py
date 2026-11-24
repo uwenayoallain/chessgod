@@ -8,6 +8,7 @@ from app.models.base import Base
 from app.models.game import Game
 from app.models.game_position import GamePosition
 from app.models.position import Position
+from app.models.position_outcome import PositionOutcome
 from app.schemas.improvement import PhaseLossOut
 from app.services import points_lost
 from app.services.points_lost import (
@@ -40,6 +41,7 @@ class Library:
         self.evals: dict[int, tuple[int, str, str, int]] = {}
         self.games: list[Game] = []
         self.game_positions: list[GamePosition] = []
+        self.outcomes: list[PositionOutcome] = []
 
     def position(self, fen: str, cp: int, best_uci: str, best_san: str, depth: int = 22) -> int:
         position_id = self.positions.setdefault(fen, len(self.positions) + 1)
@@ -74,7 +76,7 @@ class Library:
                 move_uci=move_uci, move_san=move_san,
             ))
 
-    async def measure(self, **kwargs):
+    async def measure(self, username: str = "tester", **kwargs):
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
@@ -83,6 +85,7 @@ class Library:
             session.add_all(self.games)
             await session.flush()
             session.add_all(self.game_positions)
+            session.add_all(self.outcomes)
             session.add_all(
                 AnalysisResult(
                     position_id=position_id, depth=depth, eval_cp=cp,
@@ -92,7 +95,7 @@ class Library:
             )
             await session.commit()
             result = await build_points_lost(
-                session, username="tester", color="both", time_class="rapid_blitz",
+                session, username=username, color="both", time_class="rapid_blitz",
                 min_user_rating=1000, **kwargs,
             )
         await engine.dispose()
@@ -171,6 +174,29 @@ async def test_searches_too_far_apart_are_not_measured() -> None:
     result = await library.measure()
     assert result.opening_fixes == []
     assert result.analyzed_decisions == 6 * 1
+
+
+@pytest.mark.asyncio
+async def test_reused_pairs_grade_each_visit_and_require_the_preceding_ply() -> None:
+    library = Library()
+    library.position(MIDDLE, 0, "d2d4", "d4")
+    stopped = library.position(MIDDLE_AFTER, 100, "c6d4", "Nxd4", depth=32)
+    library.outcomes.append(PositionOutcome(position_id=stopped, white_result=-1, reason="checkmate"))
+    parent = (20, MIDDLE, "b8c6", "Nc6")
+    for ply in (21, 21, 23):
+        library.game([parent, (ply, MIDDLE_AFTER, "d1e2", "Qe2")])
+
+    result = await library.measure(username="TeStEr")
+
+    # The terminal result wins over the search with an incompatible depth.
+    # The game with a missing ply contributes to the totals but cannot be graded.
+    assert result.total_decisions == 3
+    assert result.analyzed_decisions == 2
+    assert result.phases[1].analyzed_decisions == 2
+    assert result.phases[1].average_loss == pytest.approx(0.4994)
+    [opening] = result.out_of_opening
+    assert opening.games == 3
+    assert opening.average_cp == 0
 
 
 def test_loss_kinds_follow_the_drill_classifier_order() -> None:

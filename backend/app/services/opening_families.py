@@ -11,12 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.external_sync_state import ExternalSyncState
 from app.models.game import Game
-from app.services.swr import stale_while_revalidate
-from app.services.game_scope import time_class_condition
 from app.models.game_position import GamePosition
 from app.models.opening_family import OpeningFamily
 from app.models.position import Position
-from app.services.master_openings import iter_opening_rows, opening_data_dir, extract_san_moves
+from app.services.game_scope import time_class_condition
+from app.services.master_openings import extract_san_moves, iter_opening_rows, opening_data_dir
+from app.services.swr import stale_while_revalidate
 from app.utils.fen import normalize_fen
 
 
@@ -70,7 +70,7 @@ async def seed_opening_families(
 
     # Same idea as the opening-book skip marker: the TSVs only change on
     # deploys, and a full pass replays thousands of PGNs and runs hundreds of
-    # queries — not something to repeat every maintenance cycle.
+    # queries - not something to repeat every maintenance cycle.
     fingerprint = f"names:{len(rows_by_name)}"
     if await _families_already_seeded(session, fingerprint):
         return 0
@@ -155,24 +155,48 @@ async def load_family_tree(
     return list(result.scalars().all())
 
 
-# Root-fen stats join Game x GamePosition x Position over popular openings
-# (~1s cold) and the same family sets are re-requested constantly while
-# browsing the tree, so cache per (user, filters, fen-set) for a minute.
-_FAMILY_STATS_TTL_SECONDS = 600.0  # imports clear it; see the warmup note in main.py
+_FAMILY_STATS_TTL_SECONDS = 600.0  # imports clear this cache
 
 
-def _fill_family_stats(
-    families: list[OpeningFamily],
-    stats_by_fen: dict[str, tuple[int, int]],
-    out: dict[int, dict[str, float | int]],
-) -> dict[int, dict[str, float | int]]:
-    for family in families:
-        count, wins = stats_by_fen.get(family.root_fen, (0, 0))
-        out[family.id] = {
-            "game_count": int(count),
-            "win_rate": round(wins / count, 4) if count else 0.0,
-        }
-    return out
+async def _family_counts(
+    session: AsyncSession,
+    root_fens: list[str],
+    username: str,
+    color: str,
+    time_class: str | None,
+) -> dict[str, list[int]]:
+    filters = [Game.username == username]
+    if color != "both":
+        filters.append(Game.user_color == color)
+    time_filter = time_class_condition(Game.time_class, time_class)
+    if time_filter is not None:
+        filters.append(time_filter)
+
+    # Scope games first so shared opening positions do not trigger a separate
+    # lookup in games for every visit by every player.
+    user_games = (
+        select(Game.id, Game.user_result)
+        .where(*filters)
+        .cte("user_games")
+        .prefix_with("MATERIALIZED")
+    )
+    rows = await session.execute(
+        select(
+            Position.fen,
+            func.count(func.distinct(user_games.c.id)),
+            func.sum(case((user_games.c.user_result == "win", 1), else_=0)),
+        )
+        .select_from(Position)
+        .join(GamePosition, GamePosition.position_id == Position.id)
+        .join(user_games, user_games.c.id == GamePosition.game_id)
+        .where(Position.fen.in_(root_fens))
+        .group_by(Position.fen)
+    )
+    return {fen: [int(count), int(wins or 0)] for fen, count, wins in rows}
+
+
+def _family_stats(count: int = 0, wins: int = 0) -> dict[str, float | int]:
+    return {"game_count": count, "win_rate": round(wins / count, 4) if count else 0.0}
 
 
 async def family_user_stats_bulk(
@@ -182,39 +206,17 @@ async def family_user_stats_bulk(
     color: str = "both",
     time_class: str | None = None,
 ) -> dict[int, dict[str, float | int]]:
-    empty: dict[int, dict[str, float | int]] = {
-        f.id: {"game_count": 0, "win_rate": 0.0} for f in families
-    }
     if not username or not families:
-        return empty
+        return {family.id: _family_stats() for family in families}
 
-    root_fens = list({f.root_fen for f in families})
-    fens_digest = hashlib.md5("|".join(sorted(root_fens)).encode()).hexdigest()
+    root_fens = sorted({family.root_fen for family in families})
+    fens_digest = hashlib.md5("|".join(root_fens).encode()).hexdigest()
     suffix = f"{color}:{time_class}:{fens_digest}"
 
     async def compute(db: AsyncSession) -> dict[str, list[int]]:
-        filters = [Game.username == username, Position.fen.in_(root_fens)]
-        if color != "both":
-            filters.append(Game.user_color == color)
-        time_filter = time_class_condition(Game.time_class, time_class)
-        if time_filter is not None:
-            filters.append(time_filter)
-        result = await db.execute(
-            select(
-                Position.fen,
-                func.count(func.distinct(Game.id)),
-                func.sum(case((Game.user_result == "win", 1), else_=0)),
-            )
-            .select_from(Game)
-            .join(GamePosition, GamePosition.game_id == Game.id)
-            .join(Position, Position.id == GamePosition.position_id)
-            .where(*filters)
-            .group_by(Position.fen)
-        )
-        return {row[0]: [row[1] or 0, row[2] or 0] for row in result.all()}
+        return await _family_counts(db, root_fens, username, color, time_class)
 
-    # The last-known copy sits under the same `famstats:{username}:` prefix,
-    # so an import (which deletes that prefix) never serves pre-import counts.
+    # Imports invalidate both the fresh and last-known entries by prefix.
     cached = await stale_while_revalidate(
         session,
         fresh_base=f"famstats:{username}:{suffix}",
@@ -222,9 +224,10 @@ async def family_user_stats_bulk(
         compute=compute,
         fresh_ttl=_FAMILY_STATS_TTL_SECONDS,
     )
-    return _fill_family_stats(
-        families, {fen: (int(c), int(w)) for fen, (c, w) in cached.items()}, empty
-    )
+    return {
+        family.id: _family_stats(*cached.get(family.root_fen, (0, 0)))
+        for family in families
+    }
 
 
 async def family_child_counts(
@@ -249,33 +252,11 @@ async def family_user_stats(
     time_class: str | None = None,
 ) -> dict[str, float | int]:
     if not username:
-        return {"game_count": 0, "win_rate": 0.0}
+        return _family_stats()
 
     family = await session.get(OpeningFamily, family_id)
     if family is None:
-        return {"game_count": 0, "win_rate": 0.0}
+        return _family_stats()
 
-    filters = [Game.username == username, Position.fen == family.root_fen]
-    if color != "both":
-        filters.append(Game.user_color == color)
-    time_filter = time_class_condition(Game.time_class, time_class)
-    if time_filter is not None:
-        filters.append(time_filter)
-
-    result = await session.execute(
-        select(
-            func.count(func.distinct(Game.id)),
-            func.sum(case((Game.user_result == "win", 1), else_=0)),
-        )
-        .select_from(Game)
-        .join(GamePosition, GamePosition.game_id == Game.id)
-        .join(Position, Position.id == GamePosition.position_id)
-        .where(*filters)
-    )
-    game_count, wins = result.one()
-    game_count = game_count or 0
-    wins = wins or 0
-    return {
-        "game_count": game_count,
-        "win_rate": round(wins / game_count, 4) if game_count else 0.0,
-    }
+    counts = await _family_counts(session, [family.root_fen], username, color, time_class)
+    return _family_stats(*counts.get(family.root_fen, (0, 0)))

@@ -6,9 +6,22 @@ import { MoveRow } from '@/components/tree/move-row'
 import { StatsBar } from '@/components/tree/stats-bar'
 import { useFamilyDetail } from '@/hooks/use-family-detail'
 import type { FamilySummary } from '@/hooks/use-families'
+import { parsePgnToReplay } from '@/lib/chess-utils'
 import { useAppStore } from '@/store/app-store'
 import { MistakeReview } from './mistake-review'
 import { VariationTree } from './variation-tree'
+
+/**
+ * The move that reaches an opening, read from its own PGN, so the board can
+ * highlight it. A PGN that will not parse just loses the highlight.
+ */
+function arrivingMove(pgn: string): string | null {
+  try {
+    return parsePgnToReplay(pgn).at(-1)?.uci ?? null
+  } catch {
+    return null
+  }
+}
 
 export function FamilyDetail({
   color,
@@ -83,7 +96,7 @@ export function FamilyDetail({
         <CardBody className="column">
           <button
             className="move-row move-row--button"
-            onClick={() => loadPosition(family.root_fen)}
+            onClick={() => loadPosition(family.root_fen, arrivingMove(family.pgn))}
             type="button"
           >
             <div className="workspace-list__title">

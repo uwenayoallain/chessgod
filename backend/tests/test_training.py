@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import chess
 import pytest
@@ -45,6 +46,44 @@ async def _session():
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+@pytest.mark.asyncio
+async def test_both_repertoires_resolve_the_floor_once_and_reuse_cached_colors(monkeypatch) -> None:
+    engine, factory = await _session()
+    floor = AsyncMock(return_value=800)
+    build = AsyncMock(side_effect=lambda db, **scope: {"color": scope["color"]})
+    monkeypatch.setattr(routes, "player_rating_floor", floor)
+    monkeypatch.setattr(routes, "build_repertoire", build)
+
+    async with factory() as session:
+        first = await routes._both_repertoires(session, "tester")
+        floor.assert_awaited_once_with(session, "tester")
+        assert first == [{"color": "black"}, {"color": "white"}]
+        assert await routes._both_repertoires(session, "tester") == first
+
+    assert build.await_count == 2
+    assert {call.kwargs["min_user_rating"] for call in build.await_args_list} == {800}
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_challenges_with_no_unclaimed_reward_skip_the_profile(monkeypatch) -> None:
+    engine, factory = await _session()
+    board = {
+        "items": [{"done": True, "claimed": True}, {"done": False, "claimed": False}],
+    }
+    read_profile = AsyncMock()
+    monkeypatch.setattr(routes, "_both_repertoires", AsyncMock(return_value=[]))
+    monkeypatch.setattr(routes.challenges, "challenge_board", AsyncMock(return_value=board))
+    monkeypatch.setattr(routes.training, "profile", read_profile)
+
+    async with factory() as session:
+        result = await routes.check_challenges(routes.ChallengeCheckIn(username="tester"), session)
+
+    assert result == {**board, "xp_gained": 0, "paid": []}
+    read_profile.assert_not_awaited()
+    await engine.dispose()
 
 
 def test_levels_climb_on_a_widening_ladder() -> None:

@@ -101,6 +101,16 @@ _POOL_TTL_SECONDS = 3600.0
 _POOL_REFILL_FACTOR = 4
 # How long a pool that came back short of work is kept before walking again.
 _POOL_SHORT_REST_SECONDS = 900.0
+# How long a scope found with nothing left to queue answers at once.
+#
+# Once every storable position is analysed, each request still ran both
+# fallbacks to the end: 1,658 crawler requests in 18 hours averaged 24.2s
+# (p95 36.5s, max 49.9s) with Postgres at 82-100% CPU, while the answer was
+# empty every time. The marker lives under the pool's prefix, so an import
+# drops it with the pool, and an upload can only resolve more work, never add
+# it. The TTL covers the rare work that appears any other way (an evaluation
+# removed, a position studied past the review band).
+_EMPTY_QUEUE_REST_SECONDS = 300.0
 # How long a pool stays readable at all. Past _POOL_TTL_SECONDS it is still
 # served, because each request re-checks its pairs' depths, and one walk
 # replaces it behind the request instead of in front of it.
@@ -1353,6 +1363,41 @@ async def unanalyzed_fens(
         ]
 
     pool_base = scope.pool_base()
+    # Captured before anything is read, so an import landing mid-request
+    # cannot be hidden by the marker this request may store.
+    empty_key = await cache.versioned_key(f"{pool_base}:empty")
+
+    def respond(
+        fens: list[str],
+        depth_targets: dict[str, int],
+        selected_pair_counts: dict[str, int],
+    ) -> dict[str, object]:
+        return {
+            "fens": fens,
+            # Per-FEN search depth. A decision is graded by differencing its two
+            # positions, so each is searched to the depth its partner already
+            # carries rather than to one global default.
+            "fen_depths": {fen: depth_targets.get(fen, min_depth) for fen in fens},
+            "candidate_count": candidate_count,
+            "analyzed_count": analyzed_count,
+            "missing_count": max(0, candidate_count - analyzed_count),
+            "limit": limit,
+            "min_depth": min_depth,
+            # What a crawl should search to. A client that picks its own number
+            # fills the library at a depth this endpoint's coverage query does not
+            # count, and the work is silently redone.
+            "review_depth": GAME_REVIEW_DEPTH,
+            "min_user_rating": min_user_rating,
+            "selection_strategy": "phase_balanced_recent_decision_pairs_then_recurrence",
+            "selected_decision_pairs_by_phase": selected_pair_counts,
+        }
+
+    # The scope is known to be empty: the exclusions are part of the key, so
+    # a crawler whose set-aside positions changed asks again in full.
+    known_empty = await cache.get_json(empty_key)
+    if known_empty is not None:
+        return respond([], {}, dict(known_empty.get("selected_decision_pairs_by_phase") or {}))
+
     pool_key = await cache.versioned_key(pool_base)
     # Under the pool's prefix, so an import drops it with the pool.
     rebuilt_key = await cache.versioned_key(f"{pool_base}:rebuilt")
@@ -1469,13 +1514,16 @@ async def unanalyzed_fens(
         [_not_member_of(Position.fen, excluded_fens, dialect=dialect)] if excluded_fens else []
     )
 
-    async def fill_from(query, order_by) -> None:
+    async def fill_from(query, order_by) -> bool:
         """Read a fallback in growing windows until the batch is full or it runs out.
 
         One fixed window was not enough: the newest unanalysed positions of
         this library are Chess960 games, which the evaluations endpoint cannot
         store, so a crawler asking for 5 read 20 of them and was told the queue
         was empty for a whole night while real work waited behind them.
+
+        Returns True when the source was read to its end, so a caller knows
+        nothing past what it already saw is left.
         """
         window = max(limit, limit * 4)
         offset = 0
@@ -1489,14 +1537,22 @@ async def unanalyzed_fens(
                 fens.append(fen)
                 already_selected.add(fen)
                 if len(fens) >= limit:
-                    return
+                    return False
             if len(rows) < window:
-                return
+                return True
             offset += window
             window *= 2
+        return False
 
-    if len(fens) < limit:
-        await fill_from(
+    # The coverage counts are the same predicate as `already_analyzed` over
+    # the same games, so a scope they show fully resolved has no unanalysed
+    # position for either fallback to find, and proving that by reading cost
+    # ~1.1s a request on a finished library. A stale count can only err the
+    # safe way: uploads do not refresh it, so it undercounts what is resolved,
+    # and imports, which add positions, drop it.
+    recent_exhausted = analyzed_count >= candidate_count
+    if len(fens) < limit and not recent_exhausted:
+        recent_exhausted = await fill_from(
             select(Position.fen)
             .select_from(Game)
             .join(GamePosition, GamePosition.game_id == Game.id)
@@ -1505,47 +1561,39 @@ async def unanalyzed_fens(
             (Game.played_at.desc(), Game.id.desc(), GamePosition.ply.asc()),
         )
 
-    if len(fens) < limit:
+    # The recurrence fallback reads a subset of the same positions in another
+    # order, so once the recent one has been read to its end it cannot find
+    # anything new. Skipped then: with every storable position analysed it
+    # was the 38s of every request, a walk of all 2.62M positions (2.1M of
+    # them another player's) to confirm what the first read had just shown.
+    if len(fens) < limit and not recent_exhausted:
         # Once the recent frontier is covered, recurrent positions keep older
-        # history moving forward efficiently via positions.total_games.
-        played_by_user = (
-            select(GamePosition.id)
-            .join(Game, Game.id == GamePosition.game_id)
-            .where(GamePosition.position_id == Position.id, *filters)
-            .exists()
-        )
+        # history moving forward efficiently via positions.total_games. Driven
+        # from the player's own games, never from the global positions table.
         await fill_from(
-            select(Position.fen).where(
-                Position.total_games >= 1,
-                played_by_user,
-                ~already_analyzed,
-                *not_excluded,
-            ),
+            select(Position.fen)
+            .select_from(Game)
+            .join(GamePosition, GamePosition.game_id == Game.id)
+            .join(Position, Position.id == GamePosition.position_id)
+            .where(*filters, Position.total_games >= 1, ~already_analyzed, *not_excluded)
+            .group_by(Position.id, Position.fen, Position.total_games),
             (Position.total_games.desc(), Position.id.asc()),
         )
     # Started last, once this request has read everything it needs, so the
     # walk does not compete with the answer it is following.
     if refresh_built_at is not None:
         _pool_flight(session, scope, pool_key, rebuilt_key, observed_built_at=refresh_built_at)
-    return {
-        "fens": fens,
-        # Per-FEN search depth. A decision is graded by differencing its two
-        # positions, so each is searched to the depth its partner already
-        # carries rather than to one global default.
-        "fen_depths": {fen: depth_targets.get(fen, min_depth) for fen in fens},
-        "candidate_count": candidate_count,
-        "analyzed_count": analyzed_count,
-        "missing_count": max(0, candidate_count - analyzed_count),
-        "limit": limit,
-        "min_depth": min_depth,
-        # What a crawl should search to. A client that picks its own number
-        # fills the library at a depth this endpoint's coverage query does not
-        # count, and the work is silently redone.
-        "review_depth": GAME_REVIEW_DEPTH,
-        "min_user_rating": min_user_rating,
-        "selection_strategy": "phase_balanced_recent_decision_pairs_then_recurrence",
-        "selected_decision_pairs_by_phase": selected_pair_counts,
-    }
+    elif not fens:
+        # Nothing storable is left anywhere in this scope. The next requests
+        # answer from the marker until an import drops it or it expires; a
+        # pool refresh in flight is left to finish first, since it may find
+        # work the stale pool did not hold.
+        await cache.set_json(
+            empty_key,
+            {"selected_decision_pairs_by_phase": selected_pair_counts},
+            ttl_seconds=_EMPTY_QUEUE_REST_SECONDS,
+        )
+    return respond(fens, depth_targets, selected_pair_counts)
 
 
 def _has_a_second_line(fen: str) -> bool:

@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.game import Game
@@ -45,7 +46,7 @@ def expected_moves(repertoires: list[dict]) -> dict[str, Expected]:
     Unchecked steps are left out: a move the engine never vetted (no MultiPV
     search of its position yet) is only "the move you happened to play", and
     the check and the weekly challenge must not preach it over the move the
-    player chose on the day — the game move may well be the better one. The
+    player chose on the day. The game move may well be the better one. The
     repertoire simply runs out where the evidence does, and the step returns
     once `make repertoire-engine` (or the course's "Check now") has searched it.
     """
@@ -128,22 +129,33 @@ async def requeue(session: AsyncSession, username: str, keys: list[tuple[str, st
     `before`, when given, holds the moment each miss happened: a move reviewed
     since is left alone, because the review already dealt with it.
     """
+    return _requeue_progress(await _move_progress(session, username, keys), before=before, now=now)
+
+
+async def _move_progress(
+    session: AsyncSession, username: str, keys: list[tuple[str, str]],
+) -> Sequence[LineMoveProgress]:
     if not keys:
-        return 0
-    now = now or datetime.now(UTC)
-    rows = (
-        await session.execute(
+        return []
+    return (
+        await session.scalars(
             select(LineMoveProgress).where(
                 LineMoveProgress.username == username,
-                LineMoveProgress.fen.in_([fen for fen, _ in keys]),
+                tuple_(LineMoveProgress.fen, LineMoveProgress.move_uci).in_(keys),
             )
         )
-    ).scalars().all()
-    wanted = set(keys)
+    ).all()
+
+
+def _requeue_progress(
+    rows: Sequence[LineMoveProgress], *, before: dict[tuple[str, str], datetime] | None,
+    now: datetime | None,
+) -> int:
+    now = now or datetime.now(UTC)
     changed = 0
     for row in rows:
         key = (row.fen, row.move_uci)
-        if key not in wanted or (row.level or 0) < 1:
+        if (row.level or 0) < 1:
             continue
         reviewed = row.last_reviewed_at
         if reviewed is not None and reviewed.tzinfo is None:
@@ -210,8 +222,12 @@ async def check_recent_games(
     deviations: list[dict] = []
     checked = followed = 0
     misses: dict[tuple[str, str], datetime] = {}
+    book_colors = {move.color for move in expected.values()}
+    recent = []
     for repertoire in repertoires:
         color = repertoire["color"]
+        if color not in book_colors:
+            continue
         games = (
             await session.execute(
                 select(Game.id, Game.chesscom_game_url, Game.played_at, Game.user_result, Game.opening_name)
@@ -224,7 +240,9 @@ async def check_recent_games(
                 .limit(per_color)
             )
         ).all()
-        by_game = await opening_plies(session, [game.id for game in games])
+        recent.append((color, games))
+    by_game = await opening_plies(session, [game.id for _, games in recent for game in games])
+    for color, games in recent:
         for game in games:
             plies = by_game.get(game.id, {})
             met, departure = first_departure(plies, expected, color)
@@ -253,11 +271,19 @@ async def check_recent_games(
             })
             key = (fen, answer.uci)
             misses[key] = max(misses.get(key, played_at), played_at)
-    requeued = await requeue(session, username, list(misses), before=misses, now=now)
+    progress = await _move_progress(session, username, list(misses))
+    requeued = _requeue_progress(progress, before=misses, now=now)
     # A departure is settled once its repertoire move has been reviewed since
     # the game: listing it again would ask for work already done, and the card
     # read the same three games for as long as they stayed in the window.
-    reviewed_at = await last_reviewed(session, username, list(misses))
+    reviewed_at = {
+        (row.fen, row.move_uci): (
+            row.last_reviewed_at if row.last_reviewed_at.tzinfo
+            else row.last_reviewed_at.replace(tzinfo=UTC)
+        )
+        for row in progress
+        if row.last_reviewed_at is not None
+    }
     open_deviations = []
     handled = 0
     for item in deviations:
@@ -273,27 +299,4 @@ async def check_recent_games(
         "deviations": open_deviations[:12],
         "handled": handled,
         "requeued": requeued,
-    }
-
-
-async def last_reviewed(
-    session: AsyncSession, username: str, keys: list[tuple[str, str]],
-) -> dict[tuple[str, str], datetime]:
-    """When each (position, move) was last reviewed, for the moves that have been."""
-    if not keys:
-        return {}
-    rows = (
-        await session.execute(
-            select(LineMoveProgress.fen, LineMoveProgress.move_uci, LineMoveProgress.last_reviewed_at).where(
-                LineMoveProgress.username == username,
-                LineMoveProgress.fen.in_([fen for fen, _ in keys]),
-                LineMoveProgress.last_reviewed_at.is_not(None),
-            )
-        )
-    ).all()
-    wanted = set(keys)
-    return {
-        (fen, uci): (reviewed if reviewed.tzinfo else reviewed.replace(tzinfo=UTC))
-        for fen, uci, reviewed in rows
-        if (fen, uci) in wanted
     }

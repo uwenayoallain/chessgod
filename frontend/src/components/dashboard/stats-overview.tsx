@@ -17,13 +17,13 @@ export function StatsOverview({ stats }: { stats: GameStats }) {
       </div>
       <div className="stat-card">
         <div className="stat-card__label">Wins</div>
-        <div className="stat-card__value" style={{ color: 'var(--success)' }}>
+        <div className="stat-card__value" style={{ color: 'var(--accent-text)' }}>
           {totalWins.toLocaleString()}
         </div>
       </div>
       <div className="stat-card">
         <div className="stat-card__label">Losses</div>
-        <div className="stat-card__value" style={{ color: 'var(--danger)' }}>
+        <div className="stat-card__value" style={{ color: 'var(--danger-text)' }}>
           {totalLosses.toLocaleString()}
         </div>
       </div>

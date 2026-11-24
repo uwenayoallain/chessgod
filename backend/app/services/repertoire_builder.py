@@ -4,8 +4,8 @@ The player does not have time to learn openings, so this is not a book. It
 starts from the positions they actually reach, follows what their opponents
 actually play against them, and at each of their own moves makes one choice:
 
-* **keep** the move they already play, when the engine says it is sound —
-  nothing to learn is the cheapest repertoire there is;
+* **keep** the move they already play, when the engine says it is sound,
+  so there is nothing new to learn;
 * otherwise **change** it for the sound move masters play most, because a
   well-trodden move leads to positions that make sense;
 * and mark the opponent replies that are mistakes (**traps**), so the line
@@ -30,6 +30,7 @@ import hashlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import cache
 
 import chess
 from sqlalchemy import and_, select
@@ -144,8 +145,8 @@ class _Loader:
         self.time_class = time_class
         self.min_user_rating = min_user_rating
         self.nodes: dict[str, _NodeData] = {}
-        self.fen_by_id: dict[int, str] = {}
-        self.id_by_fen: dict[str, int] = {}
+        self.edges: dict[int, dict[str, _Edge]] = defaultdict(dict)
+        self.rank_one_scores: dict[int, dict[int, int]] = {}
         self.marks: dict[str, str] = {}
         # The move the player has been taught at each position (see `_choose`).
         self.learned: dict[str, str] = {}
@@ -173,26 +174,17 @@ class _Loader:
                 .where(*filters, child.ply >= 1, child.ply <= MAX_PLY, child.move_uci.is_not(None))
             )
         ).all()
-        edges: dict[int, dict[str, _Edge]] = defaultdict(dict)
         names: dict[int, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
         for from_id, to_id, uci, san, result, played_at, opening_name in rows:
-            edge = edges[from_id].get(uci)
+            edge = self.edges[from_id].get(uci)
             if edge is None:
-                edge = edges[from_id][uci] = _Edge(uci=uci, san=san or uci, child_id=to_id)
+                edge = self.edges[from_id][uci] = _Edge(uci=uci, san=san or uci, child_id=to_id)
             edge.games += 1
             edge.points += _score(result)
             if played_at is not None and (edge.last_played is None or played_at > edge.last_played):
                 edge.last_played = played_at
             if opening_name:
                 names[to_id][opening_name] += 1
-        ids = set(edges) | {edge.child_id for moves in edges.values() for edge in moves.values()}
-        await self._load_fens(ids)
-        for from_id, moves in edges.items():
-            fen = self.fen_by_id.get(from_id)
-            if fen is None:
-                continue
-            node = self.nodes.setdefault(fen, _NodeData(position_id=from_id, fen=fen))
-            node.edges = moves
         self.opening_names = {
             position_id: max(counts, key=counts.get) for position_id, counts in names.items()
         }
@@ -223,28 +215,21 @@ class _Loader:
         ).all()
         self.learned = {fen: uci for fen, uci in taught}
 
-    async def _load_fens(self, ids: set[int]) -> None:
-        missing = [position_id for position_id in ids if position_id not in self.fen_by_id]
+    async def load_nodes(self, fens: set[str]) -> None:
+        # Only the walk's frontier needs a FEN lookup. The rest of the game's
+        # opening tree is used by position ID, including child evaluations.
+        missing = list(fens - self.nodes.keys())
         for start in range(0, len(missing), 1000):
             chunk = missing[start:start + 1000]
-            for position_id, fen in (
-                await self.session.execute(select(Position.id, Position.fen).where(Position.id.in_(chunk)))
-            ).all():
-                self.fen_by_id[position_id] = fen
-                self.id_by_fen[fen] = position_id
-
-    async def load_nodes(self, fens: set[str]) -> None:
-        new_fens = fens - self.nodes.keys()
-        missing = list(new_fens - self.id_by_fen.keys())
-        for start in range(0, len(missing), 1000):
             rows = await self.session.execute(
-                select(Position.id, Position.fen).where(Position.fen.in_(missing[start:start + 1000]))
+                select(Position.id, Position.fen).where(Position.fen.in_(chunk))
             )
             for position_id, fen in rows:
-                self.fen_by_id[position_id] = fen
-                self.id_by_fen[fen] = position_id
-        for fen in new_fens:
-            self.nodes[fen] = _NodeData(position_id=self.id_by_fen.get(fen), fen=fen)
+                self.nodes[fen] = _NodeData(position_id=position_id, fen=fen,
+                                            edges=self.edges.get(position_id, {}))
+            for fen in chunk:
+                if fen not in self.nodes:
+                    self.nodes[fen] = _NodeData(position_id=None, fen=fen)
 
     async def enrich(self, nodes: list[_NodeData], players: list[_NodeData]) -> None:
         """Master moves for every node; engine lines for the player's."""
@@ -261,7 +246,6 @@ class _Loader:
             )
         ).all():
             by_id[from_id].master[uci] = (int(games), to_id)
-        await self._load_fens({to_id for node in nodes for _, to_id in node.master.values()})
         player_ids = {node.position_id for node in players if node.position_id is not None}
         if not player_ids:
             return
@@ -280,12 +264,17 @@ class _Loader:
             )
         ).all()
         grouped: dict[int, dict[int, list[_Line]]] = defaultdict(lambda: defaultdict(list))
+        rank_one: dict[int, dict[int, int]] = {position_id: {} for position_id in player_ids}
         for position_id, rank, depth, eval_cp, eval_mate, uci, pv in rows:
             if eval_cp is None and eval_mate is None:
                 continue
+            score = _fold(eval_cp, eval_mate)
+            if rank == 1:
+                rank_one[position_id][depth] = score
             grouped[position_id][depth].append(
-                _Line(rank=rank, depth=depth, eval_cp=_fold(eval_cp, eval_mate), uci=uci, pv_uci=pv)
+                _Line(rank=rank, depth=depth, eval_cp=score, uci=uci, pv_uci=pv)
             )
+        self.rank_one_scores.update(rank_one)
         for position_id, by_depth in grouped.items():
             node = by_id[position_id]
             multi = [depth for depth, lines in by_depth.items() if len(lines) > 1]
@@ -295,28 +284,28 @@ class _Loader:
 
     async def child_evals(self, ids: set[int]) -> dict[int, dict[int, int]]:
         """Rank-one scores by position and depth, from White's view."""
-        if not ids:
-            return {}
-        rows = (
-            await self.session.execute(
-                select(
-                    AnalysisResult.position_id, AnalysisResult.depth,
-                    AnalysisResult.eval_cp, AnalysisResult.eval_mate,
-                ).where(
-                    AnalysisResult.position_id.in_(list(ids)),
-                    AnalysisResult.engine == ENGINE_NAME,
-                    AnalysisResult.engine_version == ENGINE_VERSION,
-                    AnalysisResult.multipv_rank == 1,
-                    AnalysisResult.depth >= MIN_TRUSTED_DEPTH,
+        missing = ids - self.rank_one_scores.keys()
+        if missing:
+            rows = (
+                await self.session.execute(
+                    select(
+                        AnalysisResult.position_id, AnalysisResult.depth,
+                        AnalysisResult.eval_cp, AnalysisResult.eval_mate,
+                    ).where(
+                        AnalysisResult.position_id.in_(missing),
+                        AnalysisResult.engine == ENGINE_NAME,
+                        AnalysisResult.engine_version == ENGINE_VERSION,
+                        AnalysisResult.multipv_rank == 1,
+                        AnalysisResult.depth >= MIN_TRUSTED_DEPTH,
+                    )
                 )
-            )
-        ).all()
-        by_position: dict[int, dict[int, int]] = defaultdict(dict)
-        for position_id, depth, eval_cp, eval_mate in rows:
-            if eval_cp is None and eval_mate is None:
-                continue
-            by_position[position_id][depth] = _fold(eval_cp, eval_mate)
-        return by_position
+            ).all()
+            for position_id in missing:
+                self.rank_one_scores[position_id] = {}
+            for position_id, depth, eval_cp, eval_mate in rows:
+                if eval_cp is not None or eval_mate is not None:
+                    self.rank_one_scores[position_id][depth] = _fold(eval_cp, eval_mate)
+        return {position_id: self.rank_one_scores[position_id] for position_id in ids}
 
 
 def _san(fen: str, uci: str) -> str:
@@ -491,6 +480,7 @@ async def build_repertoire(
     frontier: list[tuple[str, list[dict]]] = [(START_FEN, [])]
     finished: list[list[dict]] = []
     needs_engine: set[str] = set()
+    after = cache(_after)
     while frontier:
         fens = {fen for fen, _ in frontier}
         await loader.load_nodes(fens)
@@ -525,6 +515,7 @@ async def build_repertoire(
                 if choice is None:
                     finished.append(path)
                     continue
+                after_fen = after(fen, choice["uci"])
                 if choice["reason"] == "unchecked" and node.multipv:
                     # The move was not among the lines: judging it takes a search of
                     # the position it leads to.
@@ -532,9 +523,9 @@ async def build_repertoire(
                     if edge is not None and _comparable_eval(
                         child_eval.get(edge.child_id, {}), node.lines[0].depth
                     ) is None:
-                        needs_engine.add(_after(fen, choice["uci"]))
+                        needs_engine.add(after_fen)
                 step = {"ply": ply + 1, "fen": fen, "side": "you", **choice}
-                next_frontier.append((_after(fen, choice["uci"]), [*path, step]))
+                next_frontier.append((after_fen, [*path, step]))
                 continue
 
             # The opponent's move: what they actually play against this player.
@@ -562,14 +553,14 @@ async def build_repertoire(
             before_scores = child_eval.get(node.position_id, {})
             before_depth = max(before_scores, default=None)
             for edge in replies:
-                after = (
+                after_score = (
                     _comparable_eval(child_eval.get(edge.child_id, {}), before_depth)
                     if before_depth is not None else None
                 )
                 # The opponent's loss, from their side.
                 trap_cp = (
-                    mover_sign * (after - before_scores[before_depth])
-                    if before_depth is not None and after is not None else None
+                    mover_sign * (after_score - before_scores[before_depth])
+                    if before_depth is not None and after_score is not None else None
                 )
                 step = {
                     "ply": ply + 1,
@@ -582,7 +573,7 @@ async def build_repertoire(
                     "share": round(edge.games / total, 3) if total else None,
                     "trap_cp": trap_cp if trap_cp is not None and trap_cp >= TRAP_CP else None,
                 }
-                next_frontier.append((_after(fen, edge.uci), [*path, step]))
+                next_frontier.append((after(fen, edge.uci), [*path, step]))
         frontier = next_frontier
 
     lines = []
@@ -596,7 +587,7 @@ async def build_repertoire(
         # along the route played most. (Seven routes into one Giuoco Pianissimo
         # position otherwise made seven lessons of the same "keep" moves.)
         signature = (
-            _after(path[-1]["fen"], path[-1]["uci"]),
+            after(path[-1]["fen"], path[-1]["uci"]),
             frozenset((step["fen"], step["uci"]) for step in yours if step["status"] == "change"),
             frozenset((step["fen"], step["uci"]) for step in path if step.get("trap_cp")),
         )
@@ -608,7 +599,7 @@ async def build_repertoire(
         first_games = next((step["games"] for step in path if step["side"] == "you"), 0)
         name_id = None
         for step in path:
-            node = loader.nodes.get(_after(step["fen"], step["uci"]))
+            node = loader.nodes.get(after(step["fen"], step["uci"]))
             if node and node.position_id in loader.opening_names:
                 name_id = node.position_id
         games = last_known["games"] if last_known else first_games

@@ -20,6 +20,7 @@ from app.models.analysis import AnalysisResult
 from app.models.drill_progress import DrillAttempt, DrillProgress
 from app.models.game import Game
 from app.models.game_position import GamePosition
+from app.models.identity import Username
 from app.models.position import Position
 from app.models.sparring import SparringGame, SparringMistake
 from app.schemas.improvement import (
@@ -47,17 +48,20 @@ from app.services.game_scope import (
     time_class_condition,
     user_rating_condition,
 )
-from app.services.mistakes import classify_engine_drop
+from app.services.mistakes import (
+    ADJACENT_POSITIONS_POSTGRES,
+    ADJACENT_POSITIONS_SQLITE,
+    classify_engine_drop,
+)
 from app.services.tactics import Motif, detect_motifs, parse_pv
+from app.services.training import accepted_trainer_move_san
 
 
 DEFAULT_TIME_CLASS = RAPID_BLITZ
-# Bump when the cached candidate payload gains fields, so a warm cache from an
-# older build is never replayed into the newer plan builder.
-_CANDIDATE_CACHE_VERSION = 16
+# Bump when the cached candidate payload changes shape or meaning.
+_CANDIDATE_CACHE_VERSION = 17
 _CANDIDATE_CACHE_SECONDS = 120.0
 _CANDIDATE_SCAN_LIMIT = 1_000
-_ACCEPTANCE_BAND_CP = 30
 # A failure mode seen in this many different positions is a way of thinking, not
 # an accident. Below it, a repeat in the same position is still worth drilling,
 # but a single occurrence is a one-off and must not steer the weekly focus.
@@ -85,8 +89,8 @@ async def invalidate_improvement_caches(username: str, *, include_queue_counts: 
     `include_queue_counts=False` keeps the analysis queue's coverage counts
     (`coverage:v3`). They only label progress and expire in a minute anyway,
     and rebuilding them scans every decision the player has (~270ms); dropping
-    them on every evaluation upload — the crawler uploads about every forty
-    seconds — made each crawler batch pay that scan. A new import still drops
+    them on every evaluation upload - the crawler uploads about every forty
+    seconds - made each crawler batch pay that scan. A new import still drops
     them, because it changes what there is to count.
     """
 
@@ -142,7 +146,7 @@ async def invalidate_improvement_caches_for_positions(
 
 # The crawler uploads about every forty seconds, and each upload dropped every
 # evidence cache the player has. The warmup then rebuilt them on nearly every
-# pass (13.7s a pass, measured, while somebody used the app) — Postgres work
+# pass (13.7s a pass, measured, while somebody used the app) - Postgres work
 # that competes with the person it is warming for. Uploads now invalidate at
 # most once per interval per player; one arriving inside it schedules a single
 # trailing invalidation, so the newest evidence still lands within the interval.
@@ -446,14 +450,14 @@ def structure_signature(fen: str) -> tuple[int, ...] | None:
     return tuple(counts)
 
 
-def _is_transfer_of(card: DrillCardOut, anchor: DrillCardOut, signatures: dict[int, Any]) -> bool:
+def _is_transfer_of(card: DrillCardOut, anchor: DrillCardOut) -> bool:
     """A transfer drill is the same failure mode in a near-identical shape, elsewhere."""
 
     if card.position_id == anchor.position_id or card.source_game_id == anchor.source_game_id:
         return False
     if card.pattern_key != anchor.pattern_key or card.phase != anchor.phase:
         return False
-    base, other = signatures.get(anchor.position_id), signatures.get(card.position_id)
+    base, other = structure_signature(anchor.fen), structure_signature(card.fen)
     if base is None or other is None:
         return False
     return sum(abs(left - right) for left, right in zip(base, other, strict=True)) <= 1
@@ -465,6 +469,7 @@ def compose_session(
     weak_pattern_keys: set[str],
     limit: int,
     budget_seconds: int = _SESSION_SECONDS,
+    best_lines: dict[int, str] | None = None,
 ) -> list[DrillCardOut]:
     """Fill one fixed-length set by rotating through the four reasons to train.
 
@@ -476,7 +481,6 @@ def compose_session(
     the player's own games: nothing unrelated is ever mixed in.
     """
 
-    signatures = {card.position_id: structure_signature(card.fen) for card in ranked_cards}
     # Transfer runs straight after the first pick so the same idea is practised twice
     # in a row, in two different shapes, before the set moves on.
     sources = ("review", "transfer", "recent", "weak")
@@ -490,7 +494,7 @@ def compose_session(
             return [card for card in ranked_cards if card.pattern_key in weak_pattern_keys]
         if anchor is None:
             return []
-        return [card for card in ranked_cards if _is_transfer_of(card, anchor, signatures)]
+        return [card for card in ranked_cards if _is_transfer_of(card, anchor)]
 
     pools: dict[str, list[DrillCardOut]] = {
         source: pool(source, None) for source in ("review", "recent", "weak")
@@ -526,6 +530,8 @@ def compose_session(
                 card, fallback = take(ranked_cards, fallback)
             if card is None:
                 continue
+            if best_lines is not None and (pv := best_lines.get(card.position_id)):
+                card.follow_up = build_follow_up(card.fen, pv)
             cost = _drill_seconds(card)
             if selected and spent + cost > budget_seconds:
                 return selected
@@ -604,8 +610,8 @@ def _format_mover_eval(cp: int) -> str:
     """An evaluation from the mover's side, as a player reads one.
 
     "Lost 80.4 pawns" was how a king move from a won ending to a draw read. The
-    before and after say more than their difference does — whether the position
-    was won, level or lost, and what it became — and a mistake that left the
+    before and after say more than their difference does - whether the position
+    was won, level or lost, and what it became - and a mistake that left the
     mover still winning is shown as exactly that rather than hidden.
     """
 
@@ -617,7 +623,7 @@ def _format_mover_eval(cp: int) -> str:
 
 
 # Every uploaded evaluation invalidates the player's plan, and the crawler uploads
-# about every forty seconds, so the plan was rebuilt cold on nearly every read —
+# about every forty seconds, so the plan was rebuilt cold on nearly every read -
 # 5.7s measured, half of it re-classifying ~1,500 decisions that had not changed
 # (detect_motifs alone computed ~25k SAN strings). The inputs are plain scalars
 # and Pattern is frozen all the way down, so an unchanged decision can reuse its
@@ -880,10 +886,10 @@ def next_review(
     return next_streak, next_interval, next_ease, now + timedelta(days=next_interval)
 
 
-_CANDIDATES_SQL = text("""
+_CANDIDATES_QUERY = """
 WITH
 user_games AS (
-    SELECT g.id, g.user_color, g.played_at, g.time_class, g.time_control, g.chesscom_game_url
+    SELECT g.id, g.user_color, g.played_at
     FROM games g
     WHERE g.username = :username
       AND (:color = 'both' OR g.user_color = :color)
@@ -896,17 +902,11 @@ user_games AS (
           OR g.time_class = :time_class
       )
 ),
--- Every trusted evaluation of a position, one row per searched depth. A
--- mistake is the *difference* between two positions, so the two sides have to
--- be searched to comparable depths; keeping each depth lets a decision pick a
--- depth both sides share instead of differencing a depth-30 parent against a
--- depth-22 child and charging the search artifact to the player.
-position_evals AS (
-    SELECT ar.position_id,
+-- Keep principal variations out of the depth-pair sort and fetch them only
+-- for the limited candidate window.
+position_evals AS MATERIALIZED (
+    SELECT ar.id, ar.position_id, ar.depth, ar.best_move_uci, ar.eval_mate,
            CASE
-               -- Capped at DECISIVE_CP (engine_contract.py): past it a score
-               -- says only "decisive", and uncapped it ranks endgame
-               -- tablebase scores as 80-pawn blunders.
                WHEN ar.eval_cp > 1500 THEN 1500
                WHEN ar.eval_cp < -1500 THEN -1500
                WHEN ar.eval_cp IS NOT NULL THEN ar.eval_cp
@@ -914,8 +914,7 @@ position_evals AS (
                    THEN 2000 - (CASE WHEN ar.eval_mate > 20 THEN 20 ELSE ar.eval_mate END) * 10
                ELSE -2000 + (CASE WHEN ar.eval_mate < -20 THEN 20 ELSE -ar.eval_mate END) * 10
            END AS eval_cp,
-           ar.eval_mate, ar.best_move_uci, ar.best_move_san, ar.pv_uci,
-           NULL AS terminal_result, 0 AS terminal_priority, ar.depth AS eval_depth
+           NULL AS terminal_result
     FROM analysis_results ar
     WHERE ar.multipv_rank = 1
       AND ar.engine = 'stockfish-19'
@@ -923,118 +922,129 @@ position_evals AS (
       AND ar.depth >= :min_depth
       AND (ar.eval_cp IS NOT NULL OR ar.eval_mate IS NOT NULL)
     UNION ALL
-    -- A finished game is exact rather than searched, so it has no depth to
-    -- match and pairs with any evaluation.
-    SELECT position_id, white_result * 2000, NULL, NULL, NULL, NULL,
-           white_result, 1, NULL
+    SELECT NULL, position_id, NULL, NULL, NULL, white_result * 2000, white_result
     FROM position_outcomes
 ),
-evaluated_gp AS MATERIALIZED (
+adjacent_positions AS (
+    SELECT * FROM (
+        __ADJACENT_GAME_POSITIONS__
+    ) historical
+    WHERE :review_due_at IS NULL
+    UNION ALL
+    -- Reviews start at due positions, so they can skip the discovery scan.
     SELECT gp.game_id, gp.ply, gp.position_id, gp.move_uci, gp.move_san,
-           gp.clock_seconds_after, gp.think_seconds,
-           ug.user_color, ug.played_at, ug.time_class, ug.time_control, ug.chesscom_game_url,
-           pe.eval_cp, pe.eval_mate, pe.best_move_uci, pe.best_move_san, pe.pv_uci,
-           pe.terminal_result, pe.terminal_priority, pe.eval_depth
-    FROM game_positions gp
-    JOIN user_games ug ON ug.id = gp.game_id
-    JOIN position_evals pe ON pe.position_id = gp.position_id
+           prev.ply, prev.position_id, ug.user_color, ug.played_at
+    FROM (
+        SELECT DISTINCT position_id
+        FROM drill_progress
+        WHERE username = :username AND attempts > 0 AND due_at <= :review_due_at
+    ) due
+    JOIN game_positions prev ON prev.position_id = due.position_id
+    JOIN user_games ug ON ug.id = prev.game_id
+    JOIN game_positions gp ON gp.game_id = prev.game_id AND gp.ply = prev.ply + 1
+    WHERE :review_due_at IS NOT NULL
 ),
-pair_candidates AS (
-    SELECT
-        parent.position_id AS position_id,
-        child.move_uci AS user_move_uci,
-        child.move_san AS user_move_san,
-        parent.best_move_uci AS best_move_uci,
-        parent.best_move_san AS best_move_san,
-        child.best_move_uci AS opponent_reply_uci,
-        -- The opponent's move that produced the position, so a drill can show
-        -- what the player is answering instead of a bare board.
-        parent.move_uci AS previous_move_uci,
-        parent.pv_uci AS best_pv_uci,
-        child.pv_uci AS reply_pv_uci,
-        parent.eval_mate AS parent_eval_mate,
-        parent.eval_cp AS parent_eval_cp,
-        child.ply AS ply,
-        child.game_id AS source_game_id,
-        child.played_at AS source_played_at,
-        child.time_class AS time_class,
-        child.time_control AS time_control,
-        child.clock_seconds_after AS clock_seconds_after,
-        child.think_seconds AS think_seconds,
-        child.chesscom_game_url AS source_game_url,
-        parent.terminal_priority + child.terminal_priority AS terminal_priority,
-        CASE
-            WHEN parent.eval_depth IS NULL OR child.eval_depth IS NULL THEN 0
-            ELSE ABS(parent.eval_depth - child.eval_depth)
-        END AS depth_gap,
-        COALESCE(parent.eval_depth, 0) + COALESCE(child.eval_depth, 0) AS depth_total,
-        CASE
-            -- Once every move loses by force, shorter mate or a different
-            -- numeric score cannot represent a new loss of winning chances.
-            WHEN (parent.eval_mate < 0 AND child.user_color = 'white')
-              OR (parent.eval_mate > 0 AND child.user_color = 'black') THEN 0
-            WHEN (child.eval_mate > 0 AND child.user_color = 'white')
-              OR (child.eval_mate < 0 AND child.user_color = 'black') THEN 0
-            WHEN (child.terminal_result = 1 AND child.user_color = 'white')
-              OR (child.terminal_result = -1 AND child.user_color = 'black') THEN 0
-            WHEN child.user_color = 'white' THEN parent.eval_cp - child.eval_cp
-            ELSE child.eval_cp - parent.eval_cp
-        END AS cp_loss
-    FROM evaluated_gp child
-    JOIN evaluated_gp parent
-      ON parent.game_id = child.game_id
-     AND parent.ply = child.ply - 1
-    -- Only what the decision *is* belongs here. What it is worth — whether the
-    -- played move was the engine's choice, whether the loss clears the
-    -- threshold — is judged after the measurement has been chosen, so a
-    -- shallower pair cannot win the decision by looking more like a mistake.
-    WHERE child.move_uci IS NOT NULL
-      AND parent.position_id NOT IN :excluded_positions
-      -- Stockfish reports the depth it finished on, so a requested depth can
-      -- land a ply or two higher. Tolerate that much and no more.
-      AND (
-          parent.eval_depth IS NULL
-          OR child.eval_depth IS NULL
-          OR ABS(parent.eval_depth - child.eval_depth) <= :max_pair_depth_gap
-      )
-      AND (
-          (child.user_color = 'white' AND child.ply % 2 = 1)
-          OR (child.user_color = 'black' AND child.ply % 2 = 0)
-      )
-),
--- One measurement per decision: the closest-matched, deepest pair of searches
--- available for it.
 ranked_pairs AS (
-    SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY source_game_id, ply
-        ORDER BY terminal_priority DESC, depth_gap ASC, depth_total DESC
-    ) AS eval_rank
-    FROM pair_candidates
-),
-measured_decisions AS (
-    SELECT * FROM ranked_pairs
-    WHERE eval_rank = 1
-      AND best_move_uci IS NOT NULL
-      AND best_move_uci <> user_move_uci
+    SELECT d.game_id AS source_game_id, d.played_at AS source_played_at,
+           d.ply, d.parent_position_id AS position_id, d.move_uci AS user_move_uci,
+           parent.id AS parent_eval_id, child.id AS child_eval_id,
+           parent.best_move_uci <> d.move_uci AND (
+               :review_due_at IS NULL OR EXISTS (
+                   SELECT 1 FROM drill_progress dp
+                   WHERE dp.username = :username
+                     AND dp.position_id = d.parent_position_id
+                     AND dp.expected_move_uci = parent.best_move_uci
+                     AND dp.attempts > 0
+                     AND dp.due_at <= :review_due_at
+               )
+           ) AS should_grade,
+           CASE
+               WHEN (parent.eval_mate < 0 AND d.user_color = 'white')
+                 OR (parent.eval_mate > 0 AND d.user_color = 'black') THEN 0
+               WHEN (child.eval_mate > 0 AND d.user_color = 'white')
+                 OR (child.eval_mate < 0 AND d.user_color = 'black') THEN 0
+               WHEN (child.terminal_result = 1 AND d.user_color = 'white')
+                 OR (child.terminal_result = -1 AND d.user_color = 'black') THEN 0
+               WHEN d.user_color = 'white' THEN parent.eval_cp - child.eval_cp
+               ELSE child.eval_cp - parent.eval_cp
+           END AS cp_loss,
+           ROW_NUMBER() OVER (
+               PARTITION BY d.game_id, d.ply
+               ORDER BY (CASE WHEN parent.depth IS NULL THEN 1 ELSE 0 END
+                       + CASE WHEN child.depth IS NULL THEN 1 ELSE 0 END) DESC,
+                        COALESCE(ABS(parent.depth - child.depth), 0),
+                        COALESCE(parent.depth, 0) + COALESCE(child.depth, 0) DESC
+           ) AS eval_rank
+    FROM adjacent_positions d
+    JOIN position_evals parent ON parent.position_id = d.parent_position_id
+    JOIN position_evals child ON child.position_id = d.position_id
+    WHERE d.parent_ply = d.ply - 1
+      AND d.move_uci IS NOT NULL
+      AND d.parent_position_id NOT IN :excluded_positions
+      AND (parent.depth IS NULL OR child.depth IS NULL
+           OR ABS(parent.depth - child.depth) <= :max_pair_depth_gap)
       AND (
-          :review_due_at IS NULL OR EXISTS (
-              SELECT 1 FROM drill_progress dp
-              WHERE dp.username = :username
-                AND dp.position_id = ranked_pairs.position_id
-                AND dp.expected_move_uci = ranked_pairs.best_move_uci
-                AND dp.attempts > 0
-                AND dp.due_at <= :review_due_at
-          )
+          (d.user_color = 'white' AND d.ply % 2 = 1)
+          OR (d.user_color = 'black' AND d.ply % 2 = 0)
       )
 ),
 mistake_rows AS (
-    SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY position_id, user_move_uci
-        ORDER BY source_played_at DESC, source_game_id DESC
-    ) AS recent_rank
-    FROM measured_decisions
+    SELECT source_game_id, source_played_at, ply, position_id, user_move_uci,
+           parent_eval_id, child_eval_id, cp_loss,
+           ROW_NUMBER() OVER (
+               PARTITION BY position_id, user_move_uci
+               -- Repeated visits in the same game use its first occurrence.
+               ORDER BY source_played_at DESC, source_game_id DESC, ply ASC
+           ) AS recent_rank
+    FROM ranked_pairs
+    WHERE eval_rank = 1 AND should_grade
 ),
-grouped_candidates AS (
+qualified_mistakes AS MATERIALIZED (
+    SELECT * FROM mistake_rows WHERE cp_loss >= :threshold_cp
+),
+ranked_groups AS (
+    SELECT position_id, user_move_uci, MAX(cp_loss) AS eval_drop_cp,
+           COUNT(*) AS occurrences,
+           ROW_NUMBER() OVER (
+               PARTITION BY position_id
+               ORDER BY MAX(cp_loss) DESC, COUNT(*) DESC, user_move_uci
+           ) AS position_rank
+    FROM qualified_mistakes
+    GROUP BY position_id, user_move_uci
+),
+selected_groups AS (
+    SELECT position_id, user_move_uci
+    FROM ranked_groups
+    WHERE position_rank = 1
+    ORDER BY eval_drop_cp DESC, occurrences DESC, position_id
+    LIMIT :scan_limit OFFSET :scan_offset
+),
+mistake_details AS (
+    SELECT m.*, gp.move_san AS user_move_san, prev.move_uci AS previous_move_uci,
+           gp.clock_seconds_after, gp.think_seconds, g.time_class, g.time_control,
+           g.chesscom_game_url AS source_game_url,
+           parent.best_move_uci, parent.best_move_san,
+           parent.eval_mate AS parent_eval_mate,
+           CASE
+               WHEN parent.eval_cp > 1500 THEN 1500
+               WHEN parent.eval_cp < -1500 THEN -1500
+               WHEN parent.eval_cp IS NOT NULL THEN parent.eval_cp
+               WHEN parent.eval_mate > 0
+                   THEN 2000 - (CASE WHEN parent.eval_mate > 20 THEN 20 ELSE parent.eval_mate END) * 10
+               ELSE -2000 + (CASE WHEN parent.eval_mate < -20 THEN 20 ELSE -parent.eval_mate END) * 10
+           END AS parent_eval_cp,
+           child.best_move_uci AS opponent_reply_uci,
+           parent.pv_uci AS best_pv_uci, child.pv_uci AS reply_pv_uci
+    FROM selected_groups sg
+    JOIN qualified_mistakes m
+      ON m.position_id = sg.position_id AND m.user_move_uci = sg.user_move_uci
+    JOIN game_positions gp ON gp.game_id = m.source_game_id AND gp.ply = m.ply
+    LEFT JOIN game_positions prev
+      ON m.recent_rank = 1 AND prev.game_id = gp.game_id AND prev.ply = gp.ply - 1
+    LEFT JOIN games g ON m.recent_rank = 1 AND g.id = m.source_game_id
+    JOIN analysis_results parent ON parent.id = m.parent_eval_id
+    LEFT JOIN analysis_results child ON child.id = m.child_eval_id
+)
 SELECT
     position_id,
     user_move_uci,
@@ -1057,30 +1067,29 @@ SELECT
     MAX(CASE WHEN recent_rank = 1 THEN think_seconds END) AS think_seconds,
     MAX(CASE WHEN recent_rank = 1 THEN source_game_url END) AS source_game_url,
     MAX(CASE WHEN recent_rank = 1 THEN previous_move_uci END) AS previous_move_uci
-FROM mistake_rows
-WHERE cp_loss >= :threshold_cp
+FROM mistake_details
 GROUP BY position_id, user_move_uci
-),
-unique_candidates AS (
-    SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY position_id
-        ORDER BY eval_drop_cp DESC, occurrences DESC, user_move_uci
-    ) AS position_rank
-    FROM grouped_candidates
-)
-SELECT * FROM unique_candidates WHERE position_rank = 1
 ORDER BY eval_drop_cp DESC, occurrences DESC, position_id
-LIMIT :scan_limit
-OFFSET :scan_offset
-""").bindparams(
-    bindparam("time_class", type_=Text()),
-    bindparam("played_before", type_=DateTime(timezone=True)),
-    bindparam("played_from", type_=DateTime(timezone=True)),
-    bindparam("review_due_at", type_=DateTime(timezone=True)),
-    bindparam("excluded_positions", expanding=True, type_=Integer()),
-    bindparam("max_pair_depth_gap", type_=Integer()),
-    bindparam("scan_offset", type_=Integer()),
-)
+"""
+
+
+def _candidate_statement(adjacent_positions: str):
+    return text(
+        _CANDIDATES_QUERY.replace("__ADJACENT_GAME_POSITIONS__", adjacent_positions)
+    ).bindparams(
+        bindparam("username", type_=Username),
+        bindparam("time_class", type_=Text()),
+        bindparam("played_before", type_=DateTime(timezone=True)),
+        bindparam("played_from", type_=DateTime(timezone=True)),
+        bindparam("review_due_at", type_=DateTime(timezone=True)),
+        bindparam("excluded_positions", expanding=True, type_=Integer()),
+        bindparam("max_pair_depth_gap", type_=Integer()),
+        bindparam("scan_offset", type_=Integer()),
+    )
+
+
+_CANDIDATES_SQL = _candidate_statement(ADJACENT_POSITIONS_SQLITE)
+_CANDIDATES_POSTGRES_SQL = _candidate_statement(ADJACENT_POSITIONS_POSTGRES)
 
 
 _TREND_ROWS_SQL = text("""
@@ -1110,6 +1119,9 @@ recent_gp AS MATERIALIZED (
     FROM ranked_games rg
     JOIN game_positions gp ON gp.game_id = rg.id
 ),
+recent_position_ids AS MATERIALIZED (
+    SELECT DISTINCT position_id FROM recent_gp
+),
 position_evals AS (
     SELECT ar.position_id,
            CASE
@@ -1126,15 +1138,17 @@ position_evals AS (
            ar.eval_mate, ar.best_move_uci, ar.best_move_san, ar.pv_uci,
            NULL AS terminal_result, ar.depth AS eval_depth
     FROM analysis_results ar
+    JOIN recent_position_ids rp ON rp.position_id = ar.position_id
     WHERE ar.multipv_rank = 1
       AND ar.engine = 'stockfish-19'
       AND ar.engine_version = '19'
       AND ar.depth >= :min_depth
       AND (ar.eval_cp IS NOT NULL OR ar.eval_mate IS NOT NULL)
     UNION ALL
-    SELECT position_id, white_result * 2000, NULL, NULL, NULL, NULL,
-           white_result, NULL
-    FROM position_outcomes
+    SELECT po.position_id, po.white_result * 2000, NULL, NULL, NULL, NULL,
+           po.white_result, NULL
+    FROM position_outcomes po
+    JOIN recent_position_ids rp ON rp.position_id = po.position_id
 ),
 evaluated_gp AS MATERIALIZED (
     SELECT gp.game_id, gp.ply, gp.position_id, gp.move_uci, gp.move_san,
@@ -1149,8 +1163,8 @@ evaluated_gp AS MATERIALIZED (
 -- Each decision keeps every pair of searches that could measure it, then one
 -- is chosen: a measured pair over an unmeasured one, the closest-matched
 -- depths over a wider gap, and the deepest of those. A pair searched to depths
--- further apart than the engine's own reporting slack measures nothing — the
--- gap alone can exceed the blunder threshold — so it reports as unanalyzed
+-- further apart than the engine's own reporting slack measures nothing - the
+-- gap alone can exceed the blunder threshold - so it reports as unanalyzed
 -- rather than as a loss the player never gave away.
 pair_candidates AS (
     SELECT
@@ -1239,6 +1253,7 @@ FROM ranked_pairs
 WHERE eval_rank = 1
 ORDER BY game_rank, ply
 """).bindparams(
+    bindparam("username", type_=Username),
     bindparam("time_class", type_=Text()),
     bindparam("max_pair_depth_gap", type_=Integer()),
 )
@@ -1336,7 +1351,6 @@ def _analyse_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
         reply_pv_uci=item.get("reply_pv_uci"),
         best_eval_mate=item.get("parent_eval_mate"),
     )
-    follow_up = build_follow_up(fen, item.get("best_pv_uci"))
     return {
         "key": pattern.key,
         "label": pattern.label,
@@ -1347,7 +1361,6 @@ def _analyse_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
             {"key": m.key, "label": m.label, "detail": m.detail, "side": m.side}
             for m in pattern.motifs
         ],
-        "follow_up": follow_up.model_dump(mode="json") if follow_up else None,
     }
 
 
@@ -1413,14 +1426,10 @@ async def _load_candidates(
     if cached is not None:
         return list(cached)
 
-    is_postgresql = (
-        session.bind is not None and session.bind.dialect.name == "postgresql"
-    )
-    if is_postgresql:
-        await session.execute(text("SET LOCAL enable_nestloop = off"))
+    is_postgresql = session.bind is not None and session.bind.dialect.name == "postgresql"
     rows = (
         await session.execute(
-            _CANDIDATES_SQL,
+            _CANDIDATES_POSTGRES_SQL if is_postgresql else _CANDIDATES_SQL,
             {
                 "username": username,
                 "color": color,
@@ -1438,8 +1447,6 @@ async def _load_candidates(
             },
         )
     ).mappings().all()
-    if is_postgresql:
-        await session.execute(text("SET LOCAL enable_nestloop = on"))
     if review_token is not None:
         # Do not publish a result under an earlier progress state if an answer
         # was recorded while SQL ran. Attempt counters prevent state-key reuse.
@@ -1485,7 +1492,7 @@ async def _load_candidates(
     return serializable
 
 
-_COVERAGE_SQL = text("""
+_COVERAGE_QUERY = """
 WITH
 user_games AS (
     SELECT g.id, g.user_color
@@ -1500,16 +1507,18 @@ user_games AS (
       )
 ),
 decisions AS MATERIALIZED (
-    SELECT gp.game_id, gp.ply, gp.position_id
-    FROM game_positions gp
-    JOIN user_games ug ON ug.id = gp.game_id
+    SELECT gp.id AS decision_id, gp.ply, gp.position_id,
+           (SELECT prev.position_id FROM game_positions prev
+            WHERE prev.game_id = gp.game_id AND prev.ply = gp.ply - 1) AS parent_position_id
+    FROM user_games ug
+    JOIN game_positions gp ON gp.game_id = ug.id
     WHERE gp.move_uci IS NOT NULL
       AND (
           (ug.user_color = 'white' AND gp.ply % 2 = 1)
           OR (ug.user_color = 'black' AND gp.ply % 2 = 0)
       )
 ),
-evaluated AS (
+evaluated AS MATERIALIZED (
     SELECT ar.position_id, ar.depth
     FROM analysis_results ar
     WHERE ar.multipv_rank = 1
@@ -1520,42 +1529,70 @@ evaluated AS (
     UNION ALL
     SELECT position_id, NULL FROM position_outcomes
 ),
--- A decision counts as analyzed when it can actually be graded: both of its
--- positions searched to a depth they share. One side left deeper than the other
--- measures the gap between two searches, not the move.
-analyzed_boards AS MATERIALIZED (
-    SELECT DISTINCT d.game_id, d.ply, lower(__BOARD_PLACEMENT__) AS pieces
+-- Deduplicate depth matches before counting. Only later plies need material
+-- from the parent FEN, so collapse their repeated positions as well.
+analyzed AS (
+    SELECT DISTINCT d.decision_id, d.ply, d.parent_position_id
     FROM decisions d
-    JOIN game_positions parent
-      ON parent.game_id = d.game_id AND parent.ply = d.ply - 1
     JOIN evaluated moved ON moved.position_id = d.position_id
-    JOIN evaluated before
-      ON before.position_id = parent.position_id
-     AND (
-         moved.depth IS NULL
-         OR before.depth IS NULL
-         OR ABS(moved.depth - before.depth) <= :max_pair_depth_gap
-     )
-    JOIN positions p ON p.id = parent.position_id
+    JOIN evaluated before ON before.position_id = d.parent_position_id
+     AND (moved.depth IS NULL OR before.depth IS NULL
+          OR ABS(moved.depth - before.depth) <= :max_pair_depth_gap)
 ),
-analyzed_decisions AS (
-    SELECT CASE
-        WHEN ply <= 20 THEN 'opening'
-        WHEN 3 * (length(pieces) - length(replace(pieces, 'n', '')))
-           + 3 * (length(pieces) - length(replace(pieces, 'b', '')))
-           + 5 * (length(pieces) - length(replace(pieces, 'r', '')))
-           + 9 * (length(pieces) - length(replace(pieces, 'q', ''))) <= 13
+board_counts AS (
+    SELECT CASE WHEN ply > 20 THEN parent_position_id END AS position_id,
+           COUNT(*) AS decisions
+    FROM analyzed
+    GROUP BY CASE WHEN ply > 20 THEN parent_position_id END
+),
+board_material AS (
+    SELECT bc.position_id, bc.decisions, __BOARD_PLACEMENT__ AS pieces
+    FROM board_counts bc
+    LEFT JOIN positions p ON p.id = bc.position_id
+    WHERE bc.position_id IS NULL OR p.id IS NOT NULL
+),
+analyzed_phases AS MATERIALIZED (
+    SELECT decisions, CASE
+        WHEN position_id IS NULL THEN 'opening'
+        WHEN __MATERIAL__ <= 13
             THEN 'endgame'
         ELSE 'middlegame'
-    END AS phase FROM analyzed_boards
+    END AS phase FROM board_material
 )
 SELECT
     (SELECT COUNT(*) FROM decisions) AS total_decisions,
-    (SELECT COUNT(*) FROM analyzed_decisions) AS analyzed_decisions,
-    (SELECT COUNT(*) FROM analyzed_decisions WHERE phase = 'opening') AS analyzed_opening,
-    (SELECT COUNT(*) FROM analyzed_decisions WHERE phase = 'middlegame') AS analyzed_middlegame,
-    (SELECT COUNT(*) FROM analyzed_decisions WHERE phase = 'endgame') AS analyzed_endgame
-""").bindparams(bindparam("time_class", type_=Text()))
+    SUM(decisions) AS analyzed_decisions,
+    SUM(decisions) FILTER (WHERE phase = 'opening') AS analyzed_opening,
+    SUM(decisions) FILTER (WHERE phase = 'middlegame') AS analyzed_middlegame,
+    SUM(decisions) FILTER (WHERE phase = 'endgame') AS analyzed_endgame
+FROM analyzed_phases
+"""
+
+
+def _coverage_statement(placement: str, material: str):
+    return text(
+        _COVERAGE_QUERY.replace("__BOARD_PLACEMENT__", placement)
+        .replace("__MATERIAL__", material)
+    ).bindparams(
+        bindparam("username", type_=Username),
+        bindparam("time_class", type_=Text()),
+        bindparam("max_pair_depth_gap", type_=Integer()),
+    )
+
+
+_COVERAGE_SQLITE_SQL = _coverage_statement(
+    "lower(substr(p.fen, 1, instr(p.fen, ' ') - 1))",
+    """3 * (length(pieces) - length(replace(pieces, 'n', '')))
+       + 3 * (length(pieces) - length(replace(pieces, 'b', '')))
+       + 5 * (length(pieces) - length(replace(pieces, 'r', '')))
+       + 9 * (length(pieces) - length(replace(pieces, 'q', '')))""",
+)
+_COVERAGE_POSTGRES_SQL = _coverage_statement(
+    "split_part(p.fen, ' ', 1)",
+    """3 * (octet_length(pieces) - octet_length(translate(pieces, 'nNbB', '')))
+       + 5 * (octet_length(pieces) - octet_length(translate(pieces, 'rR', '')))
+       + 9 * (octet_length(pieces) - octet_length(translate(pieces, 'qQ', '')))""",
+)
 
 
 async def _coverage(
@@ -1587,13 +1624,8 @@ async def _coverage(
             [PhaseCoverageOut.model_validate(item) for item in cached["phases"]],
         )
 
-    placement = "split_part(p.fen, ' ', 1)" if session.bind is not None and session.bind.dialect.name == "postgresql" else "substr(p.fen, 1, instr(p.fen, ' ') - 1)"
-    coverage_sql = text(
-        _COVERAGE_SQL.text.replace("__BOARD_PLACEMENT__", placement)
-    ).bindparams(
-        bindparam("time_class", type_=Text()),
-        bindparam("max_pair_depth_gap", type_=Integer()),
-    )
+    is_postgresql = session.bind is not None and session.bind.dialect.name == "postgresql"
+    coverage_sql = _COVERAGE_POSTGRES_SQL if is_postgresql else _COVERAGE_SQLITE_SQL
     row = (
         await session.execute(
             coverage_sql,
@@ -2026,7 +2058,7 @@ def _ranking_confidence(*, positions: int, recurrence: str,
 def _stop_advice(
     analyzed_decisions: int, analyzed_by_phase: list[PhaseCoverageOut], *, total_decisions: int
 ) -> str:
-    """Say what not to do — including not trusting a ranking built on thin evidence."""
+    """Say what not to do - including not trusting a ranking built on thin evidence."""
 
     if analyzed_decisions < _MIN_ANALYSED_DECISIONS:
         return (
@@ -2303,11 +2335,6 @@ async def build_improvement_plan(
                     phase=analysis["phase"],
                     explanation=analysis["explanation"],
                     cue=analysis["cue"],
-                    follow_up=(
-                        DrillFollowUpOut.model_validate(analysis["follow_up"])
-                        if analysis["follow_up"]
-                        else None
-                    ),
                     motifs=[MotifOut.model_validate(motif) for motif in analysis["motifs"]],
                     source_game_id=item["source_game_id"],
                     source_game_url=item["source_game_url"],
@@ -2413,8 +2440,14 @@ async def build_improvement_plan(
         if pattern_key
         else due_cards
     )
+    # Replaying a line is needed only when a card is considered for this set.
+    best_lines = {
+        item["position_id"]: pv
+        for item, _, _ in classified
+        if (pv := item.get("best_pv_uci"))
+    }
     selected_cards = compose_session(
-        eligible_cards, weak_pattern_keys=weak_pattern_keys, limit=limit
+        eligible_cards, weak_pattern_keys=weak_pattern_keys, limit=limit, best_lines=best_lines,
     )
     session_seconds = sum(_drill_seconds(card) for card in selected_cards)
 
@@ -2548,7 +2581,7 @@ async def record_drill_attempt(
             AnalysisResult.engine == ENGINE_NAME,
             AnalysisResult.engine_version == ENGINE_VERSION,
             AnalysisResult.multipv_rank == 1,
-            AnalysisResult.depth >= 18,
+            AnalysisResult.depth >= MIN_TRUSTED_DEPTH,
         )
         .order_by(AnalysisResult.depth.desc(), AnalysisResult.id.desc())
         .limit(1)
@@ -2577,29 +2610,18 @@ async def record_drill_attempt(
         raise ValueError("The submitted move is not legal in this position")
 
     now = datetime.now(UTC)
-    acceptable_moves = {payload.expected_move_uci}
-    if expected.eval_cp is not None:
-        alternate_rows = await session.execute(
-            select(AnalysisResult.best_move_uci, AnalysisResult.eval_cp).where(
-                AnalysisResult.position_id == payload.position_id,
-                AnalysisResult.engine == expected.engine,
-                AnalysisResult.engine_version == ENGINE_VERSION,
-                AnalysisResult.depth == expected.depth,
-                AnalysisResult.best_move_uci.is_not(None),
-                AnalysisResult.eval_cp.is_not(None),
-            )
-        )
-        acceptable_moves.update(
-            move_uci
-            for move_uci, eval_cp in alternate_rows.all()
-            if move_uci is not None
-            and eval_cp is not None
-            and abs(eval_cp - expected.eval_cp) <= _ACCEPTANCE_BAND_CP
-            and _legal_move(board, move_uci) is not None
-        )
-    correct = payload.played_move_uci in acceptable_moves or _delivers_checkmate(
+    correct = payload.played_move_uci == payload.expected_move_uci or _delivers_checkmate(
         board, payload.played_move_uci
     )
+    if not correct:
+        correct = await accepted_trainer_move_san(
+            session,
+            position_id=position.id,
+            fen=board.fen(),
+            expected_uci=payload.expected_move_uci,
+            expected_san=expected.best_move_san,
+            played_uci=payload.played_move_uci,
+        ) is not None
     intent_matched, intent_feedback = compare_intent(payload.intent_key, payload.pattern_key)
     follow_up_correct: bool | None = None
     if follow_up is not None and payload.played_move_uci == expected.best_move_uci:

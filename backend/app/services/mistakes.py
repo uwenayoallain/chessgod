@@ -7,10 +7,11 @@ from sqlalchemy import Integer, Text, bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine_contract import MAX_PAIR_DEPTH_GAP
+from app.models.identity import Username
 from app.models.opening_family import OpeningFamily
-from app.services.swr import stale_while_revalidate
 from app.models.position import Position
 from app.schemas.theory import MistakeOut, TheoryMove
+from app.services.swr import stale_while_revalidate
 
 _T = TypeVar("_T")
 QUERY_BATCH_SIZE = 1000
@@ -33,28 +34,38 @@ def _chunked(items: Sequence[_T], size: int = QUERY_BATCH_SIZE) -> Iterator[list
         yield list(items[start:start + size])
 
 
-# Single CTE query that replaces the old Python-loop scan.
-# Structure:
-#   user_games    — games matching username / color / optional family root
-#   best_evals    — deepest rank-1 eval per position (covering index hit on PG)
-#   evaluated_gp  — MATERIALIZED: game-position rows restricted to evaluated
-#                   positions, with the eval columns denormalized in. Only a
-#                   couple hundred thousand rows survive out of millions of
-#                   game_positions, so game_positions is scanned exactly once
-#                   and the parent/child self-join runs on the small set.
-#                   (The old shape self-joined the full table: two multi-second
-#                   scans, ~9s total at 3M rows.)
-#   master_top3   — top-3 master moves per parent position (index hit on PG)
-# Main body groups by (parent_position_id, move_uci); parent FENs are resolved
-# afterwards with an indexed lookup instead of hash-joining all of positions.
-#
-# Compatible with both PostgreSQL (production) and SQLite (tests):
-# ROW_NUMBER() is available in SQLite ≥ 3.25, MATERIALIZED in ≥ 3.35, and the
-# % operator works the same.
-_MISTAKES_SQL = text("""
+# PostgreSQL can read each game's plies in index order without sorting the
+# entire library. SQLite computes the same pairs with a partitioned window.
+ADJACENT_POSITIONS_POSTGRES = """
+    SELECT gp.*, ug.user_color, ug.played_at
+    FROM user_games ug
+    JOIN LATERAL (
+        SELECT gp.game_id, gp.ply, gp.position_id, gp.move_uci, gp.move_san,
+               LAG(gp.ply) OVER game_order AS parent_ply,
+               LAG(gp.position_id) OVER game_order AS parent_position_id
+        FROM game_positions gp
+        WHERE gp.game_id = ug.id
+        WINDOW game_order AS (ORDER BY gp.ply)
+    ) gp ON TRUE
+"""
+
+ADJACENT_POSITIONS_SQLITE = """
+    SELECT gp.game_id, gp.ply, gp.position_id, gp.move_uci, gp.move_san,
+           LAG(gp.ply) OVER game_order AS parent_ply,
+           LAG(gp.position_id) OVER game_order AS parent_position_id,
+           ug.user_color, ug.played_at
+    FROM user_games ug
+    JOIN game_positions gp ON gp.game_id = ug.id
+    WINDOW game_order AS (PARTITION BY gp.game_id ORDER BY gp.ply)
+"""
+
+
+# Pair adjacent positions before joining engine depths. This keeps a popular
+# position's evaluation rows from being copied to every appearance in a game.
+_MISTAKES_QUERY = """
 WITH
 user_games AS (
-    SELECT g.id, g.user_color
+    SELECT g.id, g.user_color, g.played_at
     FROM games g
     WHERE g.username = :username
       AND (:color = 'both' OR g.user_color = :color)
@@ -68,10 +79,47 @@ user_games AS (
           WHERE gp_fam.game_id = g.id AND gp_fam.position_id = :family_pos_id
       ))
 ),
+adjacent_positions AS (
+__ADJACENT_GAME_POSITIONS__
+),
+master_top3 AS (
+    SELECT from_position_id, move_uci
+    FROM (
+        SELECT pm.from_position_id, pm.move_uci,
+               ROW_NUMBER() OVER (
+                   PARTITION BY pm.from_position_id
+                   ORDER BY pm.master_game_count DESC, pm.game_count DESC
+               ) AS rn
+        FROM position_moves pm
+        WHERE pm.master_game_count IS NOT NULL
+    ) _mt
+    WHERE rn <= 3
+),
+off_book_decisions AS MATERIALIZED (
+    SELECT d.game_id, d.ply, d.position_id, d.parent_position_id, d.move_uci, d.move_san, d.user_color
+    FROM adjacent_positions d
+    JOIN (SELECT DISTINCT from_position_id FROM master_top3) has_master
+      ON has_master.from_position_id = d.parent_position_id
+    LEFT JOIN master_top3 mt
+      ON mt.from_position_id = d.parent_position_id AND mt.move_uci = d.move_uci
+    WHERE mt.move_uci IS NULL
+      AND d.ply > 0
+      AND d.parent_ply = d.ply - 1
+      AND d.move_uci IS NOT NULL
+      AND (
+          (d.user_color = 'white' AND d.ply % 2 = 1)
+          OR (d.user_color = 'black' AND d.ply % 2 = 0)
+      )
+),
+decision_positions AS MATERIALIZED (
+    SELECT position_id FROM off_book_decisions
+    UNION
+    SELECT parent_position_id FROM off_book_decisions
+),
 -- One row per searched depth. An evaluation loss is the difference between two
 -- positions, so both sides have to be compared at a depth they were both
 -- searched to; see MAX_PAIR_DEPTH_GAP in engine_contract.py.
-position_evals AS (
+position_evals AS MATERIALIZED (
     SELECT ar.position_id,
            CASE
                -- Capped at DECISIVE_CP (engine_contract.py): past it a score
@@ -87,89 +135,37 @@ position_evals AS (
            ar.eval_mate, ar.best_move_uci, ar.best_move_san, NULL AS terminal_result,
            0 AS terminal_priority, ar.depth AS eval_depth
     FROM analysis_results ar
+    JOIN decision_positions dp ON dp.position_id = ar.position_id
     WHERE ar.multipv_rank = 1
       AND ar.engine = 'stockfish-19'
       AND ar.engine_version = '19'
       AND ar.depth >= :min_depth
       AND (ar.eval_cp IS NOT NULL OR ar.eval_mate IS NOT NULL)
     UNION ALL
-    SELECT position_id, white_result * 2000, NULL, NULL, NULL, white_result,
+    SELECT po.position_id, po.white_result * 2000, NULL, NULL, NULL, po.white_result,
            1, NULL
-    FROM position_outcomes
+    FROM position_outcomes po
+    JOIN decision_positions dp ON dp.position_id = po.position_id
 ),
-evaluated_gp AS MATERIALIZED (
-    SELECT gp.game_id, gp.ply, gp.position_id, gp.move_uci, gp.move_san,
-           ug.user_color, pe.eval_cp, pe.eval_mate, pe.best_move_uci, pe.best_move_san,
-           pe.terminal_result, pe.terminal_priority, pe.eval_depth
-    FROM game_positions gp
-    JOIN position_evals pe ON pe.position_id = gp.position_id
-    JOIN user_games ug ON ug.id = gp.game_id
-),
-master_top3 AS (
-    SELECT from_position_id, move_uci
-    FROM (
-        SELECT pm.from_position_id, pm.move_uci,
-               ROW_NUMBER() OVER (
-                   PARTITION BY pm.from_position_id
-                   ORDER BY pm.master_game_count DESC, pm.game_count DESC
-               ) AS rn
-        FROM position_moves pm
-        WHERE pm.master_game_count IS NOT NULL
-    ) _mt
-    WHERE rn <= 3
-),
--- Every parent/child pair searched to comparable depths: one candidate
--- measurement of the decision per depth the two positions share.
 pair_candidates AS (
-    SELECT
-        par_gp.position_id                                  AS parent_position_id,
-        child_gp.game_id                                    AS game_id,
-        child_gp.ply                                        AS ply,
-        COALESCE(child_gp.move_san, child_gp.move_uci)      AS move_san,
-        child_gp.move_uci                                   AS move_uci,
-        child_gp.user_color                                 AS user_color,
-        par_gp.best_move_uci                                AS best_move_uci,
-        par_gp.best_move_san                                AS best_move_san,
-        par_gp.eval_mate                                    AS parent_eval_mate,
-        child_gp.eval_mate                                  AS child_eval_mate,
-        child_gp.terminal_result                            AS child_terminal_result,
-        CASE
-            WHEN child_gp.user_color = 'white' THEN par_gp.eval_cp - child_gp.eval_cp
-            ELSE child_gp.eval_cp - par_gp.eval_cp
-        END                                                 AS cp_loss,
-        ROW_NUMBER() OVER (
-            PARTITION BY child_gp.game_id, child_gp.ply
-            ORDER BY par_gp.terminal_priority + child_gp.terminal_priority DESC,
-                     CASE
-                         WHEN par_gp.eval_depth IS NULL OR child_gp.eval_depth IS NULL THEN 0
-                         ELSE ABS(par_gp.eval_depth - child_gp.eval_depth)
-                     END ASC,
-                     COALESCE(par_gp.eval_depth, 0) + COALESCE(child_gp.eval_depth, 0) DESC
-        )                                                   AS eval_rank
-    FROM evaluated_gp child_gp
-    JOIN evaluated_gp par_gp
-        ON par_gp.game_id = child_gp.game_id
-       AND par_gp.ply    = child_gp.ply - 1
-    JOIN (SELECT DISTINCT from_position_id FROM master_top3) has_master
-        ON has_master.from_position_id = par_gp.position_id
-    LEFT JOIN master_top3 mt
-        ON mt.from_position_id = par_gp.position_id
-       AND mt.move_uci        = child_gp.move_uci
-    WHERE mt.move_uci IS NULL
-      AND child_gp.ply > 0
-      AND child_gp.move_uci IS NOT NULL
-      -- Comparing a depth-30 parent with a depth-22 child charges the extra
-      -- eight plies of search to the player. Stockfish reports the depth it
-      -- finished on, so a ply or two of slack is the search, not the player.
-      AND (
-          par_gp.eval_depth IS NULL
-          OR child_gp.eval_depth IS NULL
-          OR ABS(par_gp.eval_depth - child_gp.eval_depth) <= :max_pair_depth_gap
-      )
-      AND (
-          (child_gp.user_color = 'white' AND child_gp.ply % 2 = 1) OR
-          (child_gp.user_color = 'black' AND child_gp.ply % 2 = 0)
-      )
+    SELECT d.parent_position_id, d.ply,
+           COALESCE(d.move_san, d.move_uci) AS move_san, d.move_uci, d.user_color,
+           parent.best_move_uci, parent.best_move_san,
+           parent.eval_mate AS parent_eval_mate, child.eval_mate AS child_eval_mate,
+           child.terminal_result AS child_terminal_result,
+           CASE WHEN d.user_color = 'white' THEN parent.eval_cp - child.eval_cp
+                ELSE child.eval_cp - parent.eval_cp END AS cp_loss,
+           ROW_NUMBER() OVER (
+               PARTITION BY d.game_id, d.ply
+               ORDER BY parent.terminal_priority + child.terminal_priority DESC,
+                        COALESCE(ABS(parent.eval_depth - child.eval_depth), 0),
+                        COALESCE(parent.eval_depth, 0) + COALESCE(child.eval_depth, 0) DESC
+           ) AS eval_rank
+    FROM off_book_decisions d
+    JOIN position_evals parent ON parent.position_id = d.parent_position_id
+    JOIN position_evals child ON child.position_id = d.position_id
+    WHERE parent.eval_depth IS NULL OR child.eval_depth IS NULL
+       OR ABS(parent.eval_depth - child.eval_depth) <= :max_pair_depth_gap
 ),
 -- What the decision is worth, judged only after which searches measure it has
 -- been settled.
@@ -208,13 +204,24 @@ FROM measured_decisions
 GROUP BY parent_position_id, move_uci
 HAVING COUNT(*) >= :min_occurrences
 ORDER BY max_loss DESC, occurrences DESC
-""").bindparams(
-    # asyncpg requires an explicit type for nullable integer parameters; without
-    # it, PostgreSQL raises AmbiguousParameterError when family_pos_id is NULL.
-    bindparam("family_pos_id", type_=Integer()),
-    bindparam("time_class", type_=Text()),
-    bindparam("max_pair_depth_gap", type_=Integer()),
-)
+"""
+
+
+def _mistakes_statement(adjacent_positions: str):
+    return text(
+        _MISTAKES_QUERY.replace("__ADJACENT_GAME_POSITIONS__", adjacent_positions)
+    ).bindparams(
+        # asyncpg requires an explicit type for nullable integer parameters; without
+        # it, PostgreSQL raises AmbiguousParameterError when family_pos_id is NULL.
+        bindparam("username", type_=Username),
+        bindparam("family_pos_id", type_=Integer()),
+        bindparam("time_class", type_=Text()),
+        bindparam("max_pair_depth_gap", type_=Integer()),
+    )
+
+
+_MISTAKES_SQL = _mistakes_statement(ADJACENT_POSITIONS_SQLITE)
+_MISTAKES_POSTGRES_SQL = _mistakes_statement(ADJACENT_POSITIONS_POSTGRES)
 
 
 async def find_mistakes(
@@ -239,18 +246,9 @@ async def find_mistakes(
         if family_root_position_id is None:
             return []
 
-    # PostgreSQL badly under-estimates the row count of the window-function CTEs
-    # (position_evals / master_top3 collapse to ~1 row in the planner's eyes), so it
-    # picks a nested-loop plan that fans out every game occurrence of popular
-    # early positions and runs for minutes. Forcing hash/merge joins for just
-    # this transaction turns the same query into a ~0.5s run. SET LOCAL is
-    # transaction-scoped, so it never leaks to other pooled connections, and we
-    # skip it on SQLite (tests), which has no such planner GUC.
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        await session.execute(text("SET LOCAL enable_nestloop = off"))
-
+    is_postgresql = session.bind is not None and session.bind.dialect.name == "postgresql"
     rows = await session.execute(
-        _MISTAKES_SQL,
+        _MISTAKES_POSTGRES_SQL if is_postgresql else _MISTAKES_SQL,
         {
             "username": username,
             "color": color,
@@ -266,8 +264,7 @@ async def find_mistakes(
     if not results:
         return []
 
-    # Resolve parent FENs via the primary key instead of joining the whole
-    # positions table (millions of rows) inside the hash-join-only query above.
+    # Resolve FENs only for mistakes that survived aggregation.
     fen_by_position_id: dict[int, str] = {}
     parent_ids = list({int(row["parent_position_id"]) for row in results})
     for batch in _chunked(parent_ids):
@@ -319,10 +316,6 @@ async def find_mistakes(
     return mistakes
 
 
-# find_mistakes previously scanned all of a user's games/positions/evals in
-# Python (~20s cold) before the SQL rewrite. The TTL cache remains: the cold
-# path is now ~2s but the frontend staleTime is 2 min, so the shared cache
-# (Redis, in-process fallback) eliminates redundant requests in that window.
 _MISTAKES_TTL_SECONDS = 600.0  # evidence uploads bump its generation
 
 

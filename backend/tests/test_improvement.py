@@ -253,6 +253,57 @@ async def test_drill_accepts_alternative_checkmates_not_stalemates_or_checks(
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "best_depths, alternative_depth, alternative_mate, correct",
+    [
+        ([24], 24, -3, True),
+        ([24], 22, -3, True),
+        ([24], 21, -3, False),
+        ([24], 24, 3, False),
+        ([24], 24, None, False),
+        ([23, 24], 23, -3, True),
+    ],
+)
+async def test_drill_grades_stored_mate_alternatives_at_comparable_depth(
+    best_depths: list[int], alternative_depth: int, alternative_mate: int | None, correct: bool,
+) -> None:
+    board = chess.Board("6k1/4Q3/6K1/8/8/8/8/8 w - - 0 1").mirror()
+    best = chess.Move.from_uci("e2f2")
+    alternative = chess.Move.from_uci("e2d2")
+    assert best in board.legal_moves and alternative in board.legal_moves
+    after = board.copy()
+    after.push(alternative)
+    assert not after.is_checkmate()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            session.add(Position(id=1, fen=board.fen()))
+            for depth in best_depths:
+                session.add(AnalysisResult(
+                    position_id=1, depth=depth, eval_mate=-2,
+                    best_move_uci=best.uci(), best_move_san=board.san(best), multipv_rank=1,
+                ))
+            session.add(AnalysisResult(
+                position_id=1, depth=alternative_depth,
+                eval_cp=-500 if alternative_mate is None else None, eval_mate=alternative_mate,
+                best_move_uci=alternative.uci(), best_move_san=board.san(alternative), multipv_rank=2,
+            ))
+            await session.commit()
+
+            result = await record_drill_attempt(session, DrillAttemptIn(
+                username="tester", position_id=1, expected_move_uci=best.uci(),
+                played_move_uci=alternative.uci(), pattern_key="calculation",
+            ))
+            assert result.correct is correct
+            assert result.follow_up_correct is None
+    finally:
+        await engine.dispose()
+
+
 def test_retention_distinguishes_new_learning_lapses_and_spaced_recall() -> None:
     result = _retention([
         DrillProgress(attempts=0, correct_attempts=0, streak=0),

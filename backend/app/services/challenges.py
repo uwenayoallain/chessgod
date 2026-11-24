@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.game import Game
@@ -28,7 +28,7 @@ MIN_CLOCK_PLIES = 60
 # Ending inside this share of the starting clock counts as using it: the time
 # spent, without the scramble. On the first player's 10-minute games, those
 # that reached move 30 scored 51% ending with 2-5 minutes left, 46% with more
-# and 42% with less — so the target rewards the middle, not the least left.
+# and 42% with less, so the target rewards the middle, not the least left.
 USED_CLOCK_SHARE = (0.1, 0.3)
 
 
@@ -67,21 +67,23 @@ async def _last_clocks(session: AsyncSession, games: list) -> dict[int, float]:
     """The player's clock after their last move, per game."""
     if not games:
         return {}
+    clock = (
+        select(GamePosition.clock_seconds_after)
+        .where(
+            GamePosition.game_id == Game.id,
+            GamePosition.clock_seconds_after.is_not(None),
+            GamePosition.ply % 2 == case((Game.user_color == "white", 1), else_=0),
+        )
+        .order_by(GamePosition.ply.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
     rows = (
         await session.execute(
-            select(GamePosition.game_id, GamePosition.ply, GamePosition.clock_seconds_after).where(
-                GamePosition.game_id.in_([game.id for game in games]),
-                GamePosition.clock_seconds_after.is_not(None),
-            )
+            select(Game.id, clock).where(Game.id.in_([game.id for game in games]))
         )
     ).all()
-    colors = {game.id: game.user_color for game in games}
-    last: dict[int, tuple[int, float]] = {}
-    for game_id, ply, clock in rows:
-        mine = (ply % 2 == 1) == (colors[game_id] == "white")
-        if mine and (game_id not in last or ply > last[game_id][0]):
-            last[game_id] = (ply, float(clock))
-    return {game_id: clock for game_id, (_, clock) in last.items()}
+    return {game_id: float(seconds) for game_id, seconds in rows if seconds is not None}
 
 
 async def challenge_board(
@@ -120,9 +122,11 @@ async def challenge_board(
         if game.time_class == "rapid" and used_clock(game.time_control, game.num_moves or 0, clocks.get(game.id))
     ]
     expected = training_games.expected_moves(repertoires)
-    plies = await training_games.opening_plies(session, [game.id for game in games])
+    book_colors = {move.color for move in expected.values()}
+    book_candidates = [game for game in games if game.user_color in book_colors]
+    plies = await training_games.opening_plies(session, [game.id for game in book_candidates])
     book_games = []
-    for game in games:
+    for game in book_candidates:
         met, departure = training_games.first_departure(plies.get(game.id, {}), expected, game.user_color)
         if met and departure is None:
             book_games.append(game)
@@ -170,6 +174,13 @@ async def settle_challenges(
 ) -> tuple[dict, int, list[str]]:
     """The board, the XP just paid, and the challenges that paid it."""
     board = await challenge_board(session, username, repertoires, tz=tz, now=now)
+    xp, paid = await award_completed_challenges(session, username, board)
+    return board, xp, paid
+
+
+async def award_completed_challenges(
+    session: AsyncSession, username: str, board: dict,
+) -> tuple[int, list[str]]:
     xp = 0
     paid: list[str] = []
     for item in board["items"]:
@@ -183,4 +194,4 @@ async def settle_challenges(
                 xp += gained
                 paid.append(item["key"])
                 item["claimed"] = True
-    return board, xp, paid
+    return xp, paid

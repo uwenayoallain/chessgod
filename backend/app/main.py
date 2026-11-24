@@ -16,7 +16,7 @@ from starlette.requests import Request
 
 from app.config import settings
 from app.database import async_session_factory, engine, pool_stats
-from app.routers import analysis, games, health, import_games, improvement, sparring, theory, training, tree
+from app.routers import analysis, games, health, import_games, improvement, sparring, study, theory, training, tree
 from app.routers.theory import family_summaries_bulk
 from app.services import auto_sync
 from app.services.cache import get_shared_cache
@@ -455,3 +455,4 @@ app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(improvement.router, prefix="/api/improvement", tags=["improvement"])
 app.include_router(sparring.router, prefix="/api/sparring", tags=["sparring"])
 app.include_router(training.router, prefix="/api/training", tags=["training"])
+app.include_router(study.router, prefix="/api/study", tags=["study"])

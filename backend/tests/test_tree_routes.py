@@ -63,6 +63,28 @@ async def _database():
 
 
 @pytest.mark.asyncio
+async def test_filtered_totals_include_games_that_ended_at_the_position() -> None:
+    engine, session_factory = await _database()
+    async with session_factory() as session:
+        session.add(Position(id=1, fen="terminal", total_games=2))
+        session.add_all([
+            build_game(1, result="1/2-1/2"),
+            build_game(2, time_class="bullet"),
+        ])
+        await session.flush()
+        session.add_all([
+            GamePosition(game_id=1, position_id=1, ply=40),
+            GamePosition(game_id=2, position_id=1, ply=30),
+        ])
+        await session.commit()
+
+        node = await get_position_tree(fen="terminal", color="white", time_class="blitz", session=session)
+        assert (node.total_games, node.white_wins, node.draws, node.black_wins) == (1, 0, 1, 0)
+        assert node.moves == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_move_is_counted_wherever_in_the_game_the_position_arose() -> None:
     # Two games reach the same position by different move orders, at ply 2 and
     # at ply 4, and play the same move from it. position_moves stores one ply

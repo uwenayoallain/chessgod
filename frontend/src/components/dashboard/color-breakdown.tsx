@@ -22,9 +22,9 @@ export function ColorBreakdown({ stats }: { stats: GameStats }) {
             </div>
             <ResultBar draws={white.draws} losses={white.losses} wins={white.wins} />
             <div className="stats-result-row">
-              <span style={{ color: 'var(--success)' }}>{white.wins.toLocaleString()}W</span>
+              <span style={{ color: 'var(--accent-text)' }}>{white.wins.toLocaleString()}W</span>
               <span style={{ color: 'var(--draw)' }}>{white.draws.toLocaleString()}D</span>
-              <span style={{ color: 'var(--danger)' }}>{white.losses.toLocaleString()}L</span>
+              <span style={{ color: 'var(--danger-text)' }}>{white.losses.toLocaleString()}L</span>
             </div>
           </div>
           <div className="stats-color-row">
@@ -34,9 +34,9 @@ export function ColorBreakdown({ stats }: { stats: GameStats }) {
             </div>
             <ResultBar draws={black.draws} losses={black.losses} wins={black.wins} />
             <div className="stats-result-row">
-              <span style={{ color: 'var(--success)' }}>{black.wins.toLocaleString()}W</span>
+              <span style={{ color: 'var(--accent-text)' }}>{black.wins.toLocaleString()}W</span>
               <span style={{ color: 'var(--draw)' }}>{black.draws.toLocaleString()}D</span>
-              <span style={{ color: 'var(--danger)' }}>{black.losses.toLocaleString()}L</span>
+              <span style={{ color: 'var(--danger-text)' }}>{black.losses.toLocaleString()}L</span>
             </div>
           </div>
         </div>

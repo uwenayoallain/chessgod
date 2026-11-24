@@ -331,12 +331,13 @@ async def test_child_fallback_uses_compatible_depths(compatible_score_exists) ->
 
 
 @pytest.mark.asyncio
-async def test_missing_fens_share_one_frontier_query() -> None:
+async def test_fens_are_loaded_once_per_frontier_and_only_when_visited() -> None:
     library = Library()
     replies = ["e4", "d4", "Nf3", "c4", "g3", "b3"]
     for san in replies:
         library.game([san])
         library.lines([san], ("e5", 0))
+    library.master(["e4"], "c5", 10)
 
     queries = []
     result = await library.build(queries=queries)
@@ -345,5 +346,9 @@ async def test_missing_fens_share_one_frontier_query() -> None:
         params for sql, params in queries
         if "WHERE positions.fen" in sql
     ]
-    assert len(fen_queries) == 1
-    assert set(fen_queries[0]) == {fen_after([san, "e5"]) for san in replies}
+    assert [set(params) for params in fen_queries] == [
+        {fen_after([])},
+        {fen_after([san]) for san in replies},
+        {fen_after([san, "e5"]) for san in replies},
+    ]
+    assert not any("WHERE positions.id IN" in sql for sql, _ in queries)

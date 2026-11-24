@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vite-plus/test'
 
 import {
   contiguousChunks,
+  createWarmPool,
   reviewPoolSize,
   runReviewPool,
   takeJob,
@@ -238,6 +239,259 @@ describe('runReviewPool', () => {
       onResult: () => {},
     })
     expect(remove).toHaveBeenCalledTimes(add.mock.calls.length)
+  })
+})
+
+describe('runReviewPool with a borrowed engine', () => {
+  function borrowed(threads: number, revoke?: AbortSignal) {
+    const { made, create } = fakeEngines()
+    const engine = create()
+    made.length = 0
+    const release = vi.fn()
+    return {
+      engine,
+      made,
+      create,
+      lend: { engine, threads, release, ...(revoke ? { revoke } : {}) },
+    }
+  }
+
+  it('counts its threads against the pool and hands it back, never destroyed', async () => {
+    const { engine, made, create, lend } = borrowed(2)
+    const results: string[] = []
+    await runReviewPool({
+      jobs: Array.from({ length: 6 }, (_, i) => ({ fen: `fen-${i}`, depth: 18 })),
+      size: 3,
+      create,
+      borrow: lend,
+      hash: 32,
+      signal: new AbortController().signal,
+      onResult: (job) => results.push(job.fen),
+    })
+    expect(results).toHaveLength(6)
+    // Two threads stand in for two of the three engines: one is created.
+    expect(made).toHaveLength(1)
+    expect(engine.searched.length).toBeGreaterThan(0)
+    expect(engine.init).not.toHaveBeenCalled()
+    expect(engine.destroy).not.toHaveBeenCalled()
+    expect(lend.release).toHaveBeenCalledExactlyOnceWith(true)
+  })
+
+  it('creates nothing when the borrowed engine fills the budget', async () => {
+    const { engine, made, create, lend } = borrowed(2)
+    await runReviewPool({
+      jobs: Array.from({ length: 3 }, (_, i) => ({ fen: `fen-${i}`, depth: 18 })),
+      size: 1,
+      create,
+      borrow: lend,
+      hash: 32,
+      signal: new AbortController().signal,
+      onResult: () => {},
+    })
+    expect(made).toHaveLength(0)
+    expect(engine.searched).toHaveLength(3)
+  })
+
+  it('hands it back when its search had to be abandoned', async () => {
+    const lend = {
+      engine: {
+        init: vi.fn(),
+        stop: vi.fn(),
+        destroy: vi.fn(),
+        play: vi.fn(() => new Promise<UCIInfo[] | null>(() => {})),
+      },
+      threads: 1,
+      release: vi.fn(),
+    }
+    await runReviewPool({
+      jobs: [{ fen: 'stuck', depth: 18 }],
+      size: 1,
+      create: () => {
+        throw new Error('no engine should be created')
+      },
+      borrow: lend,
+      hash: 32,
+      timeoutMs: 5,
+      signal: new AbortController().signal,
+      onResult: () => {},
+    })
+    expect(lend.release).toHaveBeenCalledExactlyOnceWith(false)
+    expect(lend.engine.destroy).not.toHaveBeenCalled()
+  })
+
+  it('gives it back mid-search when revoked, and finishes on engines of its own', async () => {
+    const revoke = new AbortController()
+    let settleLent: ((lines: UCIInfo[] | null) => void) | undefined
+    const lentEngine: PoolEngine = {
+      init: vi.fn(),
+      destroy: vi.fn(),
+      // A stopped search settles empty, as the real engine's does.
+      stop: vi.fn(() => settleLent?.(null)),
+      play: vi.fn(() => new Promise<UCIInfo[] | null>((resolve) => (settleLent = resolve))),
+    }
+    const release = vi.fn()
+    const { made, create } = fakeEngines(() => 5)
+    const results: string[] = []
+    const run = runReviewPool({
+      jobs: Array.from({ length: 4 }, (_, i) => ({ fen: `fen-${i}`, depth: 18 })),
+      size: 3,
+      create,
+      borrow: { engine: lentEngine, threads: 2, revoke: revoke.signal, release },
+      hash: 32,
+      signal: new AbortController().signal,
+      onResult: (job) => results.push(job.fen),
+    })
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    const cut = (lentEngine.play as ReturnType<typeof vi.fn>).mock.calls[0][0] as string
+    revoke.abort()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Handed back at once, before the review is over.
+    expect(release).toHaveBeenCalledExactlyOnceWith(true)
+    await run
+    expect(lentEngine.play).toHaveBeenCalledOnce()
+    expect(results.sort()).toEqual(['fen-0', 'fen-1', 'fen-2', 'fen-3'])
+    // The position cut short was searched by another engine, and its two
+    // threads came back as two engines of the pool's own.
+    expect(made.flatMap((engine) => engine.searched)).toContain(cut)
+    expect(made.length).toBeGreaterThanOrEqual(2)
+    expect(made.length).toBeLessThanOrEqual(3)
+    expect(lentEngine.destroy).not.toHaveBeenCalled()
+  })
+
+  it('returns an engine asked back before the run starts without using it', async () => {
+    const revoke = new AbortController()
+    revoke.abort()
+    const { engine, made, create, lend } = borrowed(2, revoke.signal)
+    await runReviewPool({
+      jobs: Array.from({ length: 4 }, (_, i) => ({ fen: `fen-${i}`, depth: 18 })),
+      size: 3,
+      create,
+      borrow: lend,
+      hash: 32,
+      signal: new AbortController().signal,
+      onResult: () => {},
+    })
+    expect(engine.play).not.toHaveBeenCalled()
+    expect(lend.release).toHaveBeenCalledExactlyOnceWith(true)
+    expect(made).toHaveLength(3)
+  })
+
+  it('stops a borrowed engine on abort and still hands it back, not destroyed', async () => {
+    const { engine, create, lend } = borrowed(1)
+    const controller = new AbortController()
+    const run = runReviewPool({
+      jobs: Array.from({ length: 4 }, (_, i) => ({ fen: `fen-${i}`, depth: 18 })),
+      size: 2,
+      create,
+      borrow: lend,
+      hash: 32,
+      signal: controller.signal,
+      onResult: () => {},
+    })
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    controller.abort()
+    await run
+    expect(engine.stop).toHaveBeenCalled()
+    expect(engine.destroy).not.toHaveBeenCalled()
+    expect(lend.release).toHaveBeenCalledOnce()
+  })
+
+  it('tells `retire` which engines are still sound', async () => {
+    const { create } = fakeEngines((fen) => (fen === 'stuck' ? 1_000 : 1))
+    const retire = vi.fn()
+    await runReviewPool({
+      jobs: [
+        { fen: 'stuck', depth: 18 },
+        { fen: 'fine', depth: 18 },
+      ],
+      size: 2,
+      create,
+      retire,
+      hash: 32,
+      timeoutMs: 20,
+      signal: new AbortController().signal,
+      onResult: () => {},
+    })
+    const health = retire.mock.calls.map(([, healthy]) => healthy)
+    expect(health).toHaveLength(2)
+    expect(health).toContain(true)
+    expect(health).toContain(false)
+  })
+})
+
+describe('createWarmPool', () => {
+  function engines() {
+    const made: Array<PoolEngine & { destroy: ReturnType<typeof vi.fn> }> = []
+    const create = () => {
+      const engine = { init: vi.fn(), play: vi.fn(), stop: vi.fn(), destroy: vi.fn() }
+      made.push(engine)
+      return engine
+    }
+    return { made, create }
+  }
+
+  it('reuses an engine handed back, and lets it go after the idle time', () => {
+    vi.useFakeTimers()
+    try {
+      const { made, create } = engines()
+      const pool = createWarmPool({ create, idleMs: 50_000 })
+      const first = pool.acquire()
+      pool.release(first, true)
+      expect(pool.acquire()).toBe(first)
+      pool.release(first, true)
+      vi.advanceTimersByTime(49_000)
+      expect(first.destroy).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(2_000)
+      expect(first.destroy).toHaveBeenCalledOnce()
+      expect(pool.idleCount).toBe(0)
+      expect(pool.acquire()).not.toBe(first)
+      expect(made).toHaveLength(2)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never keeps an engine that is not sound', () => {
+    vi.useFakeTimers()
+    try {
+      const { create } = engines()
+      const pool = createWarmPool({ create, idleMs: 50_000 })
+      const engine = pool.acquire()
+      pool.release(engine, false)
+      expect(engine.destroy).toHaveBeenCalledOnce()
+      expect(pool.idleCount).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops idle engines now, and after a reset destroys those still out on return', () => {
+    vi.useFakeTimers()
+    try {
+      const { create } = engines()
+      const pool = createWarmPool({ create, idleMs: 50_000 })
+      const idle = pool.acquire()
+      const out = pool.acquire()
+      pool.release(idle, true)
+      pool.dropIdle()
+      expect(idle.destroy).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+
+      const kept = pool.acquire()
+      pool.reset()
+      // Handed out before the reset: a pool still settling must not bring
+      // its engines back warm after the engine was switched off.
+      pool.release(out, true)
+      pool.release(kept, true)
+      expect(out.destroy).toHaveBeenCalledOnce()
+      expect(kept.destroy).toHaveBeenCalledOnce()
+      expect(pool.idleCount).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

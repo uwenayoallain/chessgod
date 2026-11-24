@@ -201,7 +201,7 @@ export function ProgressCard({ username }: { username: string }) {
               digits: 0,
             })}
             label="Rating over these games"
-            value={recent.rating_to?.toLocaleString() ?? '—'}
+            value={recent.rating_to?.toLocaleString() ?? '-'}
           />
         </div>
       ) : null}

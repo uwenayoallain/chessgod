@@ -1,14 +1,10 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { type ComponentProps, lazy, memo, Suspense, useEffect, useRef, useState } from 'react'
 
-import { GameReviewPanel } from '@/components/analysis/game-review-panel'
 import { reviewCoverage } from '@/lib/analysis/game-review'
 import { QUICK_REVIEW_DEPTH } from '@/lib/analysis/review-depth'
-import { EngineLines } from '@/components/analysis/engine-lines'
-import { SparringPanel } from '@/components/sparring/sparring-panel'
-import { MoveTreePanel } from '@/components/tree/move-tree-panel'
-import { TheoryComparison } from '@/components/theory/theory-comparison'
 import { OPEN_SECTION_EVENT } from '@/components/ui/collapsible-section'
-import { GameListPanel } from '@/components/workspace/game-list-panel'
+import { PageBoundary } from '@/components/ui/page-boundary'
+import { PanelSkeleton } from '@/components/ui/panel-skeleton'
 import { OpeningGroupsPanel } from '@/components/workspace/opening-groups-panel'
 import type { OpeningSelection } from '@/hooks/use-board-workspace'
 import { useGameReview } from '@/hooks/use-game-line'
@@ -17,6 +13,62 @@ import type { WorkspaceGame } from '@/hooks/use-workspace-data'
 import { safeGetItem, safeSetItem } from '@/lib/storage'
 import { useAppStore } from '@/store/app-store'
 import { useIsSparring, useSparStore } from '@/store/spar-store'
+
+// The Library's opening list is what Explore opens on, so it ships with the
+// app. Every other page loads the first time it is opened (they were about a
+// tenth of the main bundle) and is fetched in the background once the first
+// paint is done, see `warmExplorePages`.
+const loadGameReviewPanel = () => import('@/components/analysis/game-review-panel')
+const loadEngineLines = () => import('@/components/analysis/engine-lines')
+const loadSparringPanel = () => import('@/components/sparring/sparring-panel')
+const loadMoveTreePanel = () => import('@/components/tree/move-tree-panel')
+const loadTheoryComparison = () => import('@/components/theory/theory-comparison')
+const loadGameListPanel = () => import('@/components/workspace/game-list-panel')
+
+const GameReviewPanel = lazy(() =>
+  loadGameReviewPanel().then((m) => ({ default: m.GameReviewPanel })),
+)
+const EngineLines = lazy(() => loadEngineLines().then((m) => ({ default: m.EngineLines })))
+const SparringPanel = lazy(() => loadSparringPanel().then((m) => ({ default: m.SparringPanel })))
+const MoveTreePanel = lazy(() => loadMoveTreePanel().then((m) => ({ default: m.MoveTreePanel })))
+const TheoryComparison = lazy(() =>
+  loadTheoryComparison().then((m) => ({ default: m.TheoryComparison })),
+)
+const GameListPanel = lazy(() => loadGameListPanel().then((m) => ({ default: m.GameListPanel })))
+
+let warmed = false
+/** How long after the page loads the build it holds is surely the one served. */
+const WARM_WINDOW_MS = 30_000
+
+/**
+ * Fetch the other pages' code while the browser is idle, so opening one shows
+ * the page and not its skeleton. Once, and only just after the page loads: the
+ * panel mounts again on every switch of tab, and in a tab older than the last
+ * deploy a fetch of a chunk that is gone reloads the tab (`lib/stale-build`).
+ * That reload belongs to opening a page, never to coming back to Explore.
+ */
+function warmExplorePages(): () => void {
+  if (warmed || performance.now() > WARM_WINDOW_MS) return () => {}
+  const warm = () => {
+    warmed = true
+    for (const load of [
+      loadGameReviewPanel,
+      loadEngineLines,
+      loadSparringPanel,
+      loadMoveTreePanel,
+      loadTheoryComparison,
+      loadGameListPanel,
+    ]) {
+      load().catch(() => {})
+    }
+  }
+  if (typeof window.requestIdleCallback === 'function') {
+    const handle = window.requestIdleCallback(warm, { timeout: 4000 })
+    return () => window.cancelIdleCallback(handle)
+  }
+  const timer = window.setTimeout(warm, 1500)
+  return () => window.clearTimeout(timer)
+}
 
 function TheoryAtPosition() {
   const currentFen = useAppStore((state) => state.currentFen)
@@ -128,13 +180,13 @@ function GameReviewPage({ activeGame }: { activeGame: WorkspaceGame | null }) {
  * the position itself. Passed down from the workspace root, the position made
  * the root, and everything under it, re-render on every step through a game.
  */
-function GamesAtPosition(props: Omit<Parameters<typeof GameListPanel>[0], 'currentFen'>) {
+function GamesAtPosition(props: Omit<ComponentProps<typeof GameListPanel>, 'currentFen'>) {
   const currentFen = useAppStore((state) => state.currentFen)
   return <GameListPanel {...props} currentFen={currentFen} />
 }
 
 /**
- * "Explore" tab: everything anchored to the board, one page at a time —
+ * "Explore" tab: everything anchored to the board, one page at a time:
  * review the loaded game, read the engine, play it, load something from the
  * Library, or see what you and the masters played from here. Five stacked
  * sections (three open) read as clutter beside the board, the same complaint
@@ -183,8 +235,8 @@ export const ExplorePanel = memo(function ExplorePanel({
     safeSetItem(PAGE_STORAGE, next)
   }
 
-  // The engine searches on every page that reads the board — trying "what if
-  // I had played this?" off a reviewed game is the review's main use — and
+  // The engine searches on every page that reads the board (trying "what if
+  // I had played this?" off a reviewed game is the review's main use) and
   // stops while browsing the Library, where every click loads a new position
   // and nothing is being read. Play disables it on its own (the evaluation is
   // the answer). It also stops when the panel unmounts: a collapsed sidebar
@@ -193,6 +245,8 @@ export const ExplorePanel = memo(function ExplorePanel({
     onEngineOpenChange(ENGINE_PAGES.has(page))
     return () => onEngineOpenChange(false)
   }, [onEngineOpenChange, page])
+
+  useEffect(() => warmExplorePages(), [])
 
   // Links into a page ("Go" on a quest, "Review it" on the latest game) land
   // here and switch to it.
@@ -205,7 +259,7 @@ export const ExplorePanel = memo(function ExplorePanel({
     return () => window.removeEventListener(OPEN_SECTION_EVENT, onReveal)
   }, [])
 
-  // A game in progress takes the Play page — including a panel mounting into
+  // A game in progress takes the Play page, including a panel mounting into
   // a game already running ("Play it out" switches tab and starts the game in
   // one handler), hence the ref starting at idle. Only a game that actually
   // *ends* moves on to its review: a game closed because a drill, an opening
@@ -248,68 +302,79 @@ export const ExplorePanel = memo(function ExplorePanel({
       </span>
 
       <div className="theory-stack" data-section-id={page} id={page}>
-        {page === 'explore-game-review' ? (
-          sparring ? (
-            <p className="muted sparring__note">The review opens when the game ends.</p>
-          ) : (
-            <GameReviewPage activeGame={activeGame} />
-          )
-        ) : page === 'explore-engine' ? (
-          <EngineLines
-            hidden={sparring || drillSolving}
-            hiddenReason={sparring ? undefined : 'Hidden until you answer.'}
-          />
-        ) : page === 'explore-sparring' ? (
-          <SparringPanel onBeforeNewGame={onClearContext} username={username} />
-        ) : page === 'explore-library' ? (
-          <>
-            <div aria-label="Library view" className="workspace-tabs__list" role="group">
-              {(['openings', 'games'] as const).map((view) => (
-                <button
-                  aria-pressed={libraryView === view}
-                  className={`workspace-tabs__button${libraryView === view ? ' workspace-tabs__button--active' : ''}`}
-                  key={view}
-                  onClick={() => setLibraryView(view)}
-                  type="button"
-                >
-                  {view === 'openings' ? 'Openings' : 'Games'}
-                </button>
-              ))}
-            </div>
-            {libraryView === 'openings' ? (
-              <OpeningGroupsPanel
-                color={color}
-                isLoadingPreview={previewLoading}
-                onSelectOpening={onLoadOpening}
-                previewError={previewError}
-                selectedOpening={selectedOpening}
-                timeClass={timeClass}
-                username={username}
+        {/* A page opened before its code has arrived shows a skeleton in its
+            space; the boundary keeps a page that cannot load (a tab older than
+            the last deploy) to that space, keyed so the next page starts clean. */}
+        <PageBoundary key={page} name={page}>
+          <Suspense fallback={<PanelSkeleton label="Opening the page" rows={4} rowHeight={48} />}>
+            {page === 'explore-game-review' ? (
+              sparring ? (
+                <p className="muted sparring__note">The review opens when the game ends.</p>
+              ) : (
+                <GameReviewPage activeGame={activeGame} />
+              )
+            ) : page === 'explore-engine' ? (
+              <EngineLines
+                hidden={sparring || drillSolving}
+                hiddenReason={sparring ? undefined : 'Hidden until you answer.'}
               />
+            ) : page === 'explore-sparring' ? (
+              <SparringPanel onBeforeNewGame={onClearContext} username={username} />
+            ) : page === 'explore-library' ? (
+              <>
+                <div aria-label="Library view" className="workspace-tabs__list" role="group">
+                  {(['openings', 'games'] as const).map((view) => (
+                    <button
+                      aria-pressed={libraryView === view}
+                      className={`workspace-tabs__button${libraryView === view ? ' workspace-tabs__button--active' : ''}`}
+                      key={view}
+                      onClick={() => setLibraryView(view)}
+                      type="button"
+                    >
+                      {view === 'openings' ? 'Openings' : 'Games'}
+                    </button>
+                  ))}
+                </div>
+                {libraryView === 'openings' ? (
+                  <OpeningGroupsPanel
+                    color={color}
+                    isLoadingPreview={previewLoading}
+                    onSelectOpening={onLoadOpening}
+                    previewError={previewError}
+                    selectedOpening={selectedOpening}
+                    timeClass={timeClass}
+                    username={username}
+                  />
+                ) : (
+                  // Its own fallback, so the Openings / Games switch above
+                  // stays put while the list's code arrives.
+                  <Suspense fallback={<PanelSkeleton label="Loading your games" rows={6} />}>
+                    <GamesAtPosition
+                      color={color}
+                      eco={null}
+                      onSelectGame={(game) => {
+                        // A loaded game's payoff is its review, so that is where
+                        // it lands, if there was a game to load.
+                        if (!game.pgn) return
+                        onLoadGame(game)
+                        choosePage('explore-game-review')
+                      }}
+                      openingName={null}
+                      selectedGameId={selectedGameId}
+                      timeClass={timeClass}
+                      username={username}
+                    />
+                  </Suspense>
+                )}
+              </>
             ) : (
-              <GamesAtPosition
-                color={color}
-                eco={null}
-                onSelectGame={(game) => {
-                  // A loaded game's payoff is its review, so that is where it
-                  // lands, if there was a game to load.
-                  if (!game.pgn) return
-                  onLoadGame(game)
-                  choosePage('explore-game-review')
-                }}
-                openingName={null}
-                selectedGameId={selectedGameId}
-                timeClass={timeClass}
-                username={username}
-              />
+              <>
+                <MoveTreePanel />
+                <TheoryAtPosition />
+              </>
             )}
-          </>
-        ) : (
-          <>
-            <MoveTreePanel />
-            <TheoryAtPosition />
-          </>
-        )}
+          </Suspense>
+        </PageBoundary>
       </div>
     </div>
   )

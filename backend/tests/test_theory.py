@@ -56,6 +56,9 @@ async def test_representative_games_fetch_only_latest_rows_without_pgn() -> None
         await session.commit()
 
         class BoundedSession:
+            def get_bind(self):
+                return session.get_bind()
+
             async def execute(self, statement):
                 result = (await session.execute(statement)).freeze()
                 assert len(result().all()) == 2, "only one row per target should leave the database"
@@ -64,13 +67,17 @@ async def test_representative_games_fetch_only_latest_rows_without_pgn() -> None
 
         d4 = PositionMove(to_position_id=1, move_number=1, move_uci="d2d4", move_san="d4")
         e4 = PositionMove(to_position_id=2, move_number=1, move_uci="e2e4", move_san="e4")
+        wrong_ply = PositionMove(to_position_id=2, move_number=2, move_uci="e2e4", move_san="e4")
+        wrong_uci = PositionMove(to_position_id=2, move_number=1, move_uci="d2d4", move_san="d4")
         rows = await find_representative_deviation_games(BoundedSession(), [
             ([d4], {"uci": "d2d4"}),
             ([e4], {"uci": "e2e4"}),
             ([d4], {"uci": "d2d4"}),
+            ([wrong_ply], {"uci": "e2e4"}),
+            ([wrong_uci], {"uci": "d2d4"}),
             ([], {"uci": "a2a3"}),
         ])
-        assert [row.get("representative_game_id") for row in rows] == [20, 30, 20, None]
+        assert [row.get("representative_game_id") for row in rows] == [20, 30, 20, None, None, None]
         assert rows[0]["representative_post_fen"] == "after-d4"
         assert rows[0]["representative_played_at"] == datetime(2024, 1, 1, tzinfo=UTC)
     await engine.dispose()

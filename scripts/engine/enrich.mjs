@@ -115,3 +115,32 @@ export async function enrichTrainerPositions({
   if (items.length) await upload(items)
   return { searched, uploaded: items.length }
 }
+
+/**
+ * How often the main queue is asked again while trainer alternatives drain.
+ *
+ * Once the library is analysed the main queue answers empty, and the crawler
+ * asked it again before every MultiPV round: 1,658 requests in 18 hours, each
+ * a 24s average on the backend (p95 36.5s) with Postgres at 82-100% CPU, all
+ * to learn that nothing had changed. While enrichment still finds positions,
+ * the empty answer is trusted for `recheckMs`; the main queue is asked again
+ * once that passes, and at once when enrichment runs dry (`clear`), so new
+ * games are never more than one interval behind.
+ */
+export function createMainQueueRecheck({ recheckMs, now = Date.now }) {
+  let emptyAt = null
+  return {
+    /** Whether the next round should ask the main queue rather than skip it. */
+    shouldPoll() {
+      return emptyAt === null || now() - emptyAt >= recheckMs
+    },
+    /** A real poll came back empty and enrichment found work behind it. */
+    markEmpty() {
+      emptyAt = now()
+    },
+    /** Enrichment ran dry, or the main queue had work: ask it next round. */
+    clear() {
+      emptyAt = null
+    },
+  }
+}

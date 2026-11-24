@@ -1476,3 +1476,161 @@ async def test_chess960_games_are_left_out_of_the_queue_and_its_counts() -> None
         assert payload["fens"] == ["rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"]
         assert payload["candidate_count"] == 1
     await engine.dispose()
+
+
+def _fallback_reads(engine) -> list[str]:
+    """Every read of `positions.fen` either fallback of the queue makes."""
+
+    statements: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def record(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT positions.fen"):
+            statements.append(statement)
+
+    return statements
+
+
+def _drives_from_global_positions(statement: str) -> bool:
+    return " ".join(statement.split()).startswith("SELECT positions.fen FROM positions")
+
+
+@pytest.mark.asyncio
+async def test_a_finished_library_is_not_read_again_on_every_request(monkeypatch) -> None:
+    # With every storable position analysed, each crawler request still ran
+    # both fallbacks to the end: the recurrence one walked all 2.62M positions
+    # (2.1M of them another player's) for 24-38s, 1,658 times in 18 hours, to
+    # return nothing. The recent read already proved the scope empty.
+    from app.services.improvement import invalidate_improvement_caches
+
+    get_shared_cache()._local.clear()
+    monkeypatch.setattr(games_router, "_is_storable_fen", lambda fen: not fen.startswith("960"))
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    reads = _fallback_reads(engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        session.add(build_game(1, "https://chess.com/game/1", "Italian Game", datetime(2024, 1, 1, tzinfo=UTC)))
+        other = build_game(2, "https://chess.com/game/2", "Italian Game", datetime(2024, 1, 2, tzinfo=UTC))
+        other.username = other.white_username = "someone-else"
+        session.add(other)
+        session.add_all([
+            Position(id=1, fen="done", total_games=1),
+            # Unstorable leftovers keep the coverage count short of complete.
+            Position(id=2, fen="960-a", total_games=3),
+            Position(id=3, fen="960-b", total_games=3),
+            # Another player's unanalysed position, more frequent than any of ours.
+            Position(id=4, fen="theirs", total_games=100),
+        ])
+        session.add_all([
+            GamePosition(game_id=1, position_id=1, ply=0),
+            GamePosition(game_id=1, position_id=2, ply=1),
+            GamePosition(game_id=1, position_id=3, ply=2),
+            GamePosition(game_id=2, position_id=4, ply=0),
+        ])
+        session.add(AnalysisResult(
+            position_id=1, depth=20, eval_cp=20, best_move_uci="e2e4", best_move_san="e4", multipv_rank=1,
+        ))
+        await session.commit()
+
+        async def ask() -> dict:
+            return await unanalyzed_fens(
+                username="tester", color="both", time_class="rapid_blitz",
+                min_depth=20, limit=12, session=session,
+            )
+
+        first = await ask()
+        assert first["fens"] == []
+        assert (first["candidate_count"], first["analyzed_count"], first["missing_count"]) == (3, 1, 2)
+        # The recent read ran out, so the recurrence read was never made.
+        assert len(reads) == 1
+        assert not any(_drives_from_global_positions(statement) for statement in reads)
+
+        # The next request answers from what the first one found.
+        second = await ask()
+        assert len(reads) == 1, "an empty scope was read again inside its rest"
+        assert {key: second[key] for key in ("fens", "candidate_count", "analyzed_count", "missing_count",
+                                              "review_depth", "selected_decision_pairs_by_phase")} == {
+            key: first[key] for key in ("fens", "candidate_count", "analyzed_count", "missing_count",
+                                        "review_depth", "selected_decision_pairs_by_phase")
+        }
+
+        # An import drops the marker with the pool, so a new game is served at once.
+        session.add(build_game(3, "https://chess.com/game/3", "Italian Game", datetime(2024, 1, 3, tzinfo=UTC)))
+        session.add(Position(id=5, fen="new-work", total_games=1))
+        session.add(GamePosition(game_id=3, position_id=5, ply=0))
+        await session.commit()
+        await invalidate_improvement_caches("tester")
+        third = await ask()
+        assert third["fens"] == ["new-work"]
+        assert third["candidate_count"] == 4
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_fully_analysed_scope_skips_both_fallback_reads() -> None:
+    # The coverage counts are the fallbacks' own predicate over the same games:
+    # when they show nothing missing, reading the library to confirm it cost
+    # ~1.1s a request on the live corpus.
+    get_shared_cache()._local.clear()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    reads = _fallback_reads(engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        session.add(build_game(1, "https://chess.com/game/1", "Italian Game", datetime(2024, 1, 1, tzinfo=UTC)))
+        session.add(Position(id=1, fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -", total_games=1))
+        session.add(GamePosition(game_id=1, position_id=1, ply=0))
+        session.add(AnalysisResult(
+            position_id=1, depth=20, eval_cp=20, best_move_uci="e7e5", best_move_san="e5", multipv_rank=1,
+        ))
+        await session.commit()
+        payload = await unanalyzed_fens(
+            username="tester", color="both", time_class="rapid_blitz",
+            min_depth=20, limit=12, session=session,
+        )
+        assert payload["fens"] == []
+        assert (payload["candidate_count"], payload["analyzed_count"], payload["missing_count"]) == (1, 1, 0)
+        assert reads == []
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_recurrence_fallback_reads_only_the_players_own_games(monkeypatch) -> None:
+    # When the recent read stops at its cap without running out, the
+    # recurrence read still runs, but from the player's games: it used to
+    # start from the global positions table and check each row for a game.
+    get_shared_cache()._local.clear()
+    monkeypatch.setattr(games_router, "_is_storable_fen", lambda fen: not fen.startswith("960"))
+    monkeypatch.setattr(games_router, "_FALLBACK_READS", 1)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    reads = _fallback_reads(engine)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        session.add_all([
+            build_game(1, "https://chess.com/game/1", "Italian Game", datetime(2024, 1, 1, tzinfo=UTC)),
+            build_game(2, "https://chess.com/game/2", "Italian Game", datetime(2024, 2, 1, tzinfo=UTC)),
+        ])
+        other = build_game(3, "https://chess.com/game/3", "Italian Game", datetime(2024, 3, 1, tzinfo=UTC))
+        other.username = other.white_username = "someone-else"
+        session.add(other)
+        session.add(Position(id=1, fen="recurrent-work", total_games=50))
+        session.add(Position(id=99, fen="theirs", total_games=500))
+        session.add_all([Position(id=index, fen=f"960-{index}", total_games=5) for index in range(2, 32)])
+        # Played twice by the player: grouped, it is offered once.
+        session.add(GamePosition(game_id=1, position_id=1, ply=0))
+        session.add(GamePosition(game_id=2, position_id=1, ply=40))
+        session.add_all([GamePosition(game_id=2, position_id=index, ply=index) for index in range(2, 32)])
+        session.add(GamePosition(game_id=3, position_id=99, ply=0))
+        await session.commit()
+
+        payload = await unanalyzed_fens(
+            username="tester", color="both", time_class="rapid_blitz",
+            min_depth=20, limit=2, session=session,
+        )
+        assert payload["fens"] == ["recurrent-work"]
+        assert len(reads) == 2
+        assert not any(_drives_from_global_positions(statement) for statement in reads)
+        assert "FROM games JOIN game_positions" in " ".join(reads[1].split())
+    await engine.dispose()

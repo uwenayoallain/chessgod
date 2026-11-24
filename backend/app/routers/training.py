@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -8,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import _async_engine_for, get_db
 from app.models.game import Game
 from app.models.sparring import SparringGame
 from app.models.training import TrainingEvent
@@ -41,8 +42,9 @@ def _repertoire_keys(username: str, color: str, time_class: str, floor: int) -> 
 
 
 async def _repertoire(session: AsyncSession, username: str, color: str, time_class: str,
-                      *, fresh: bool = False) -> dict:
-    floor = await player_rating_floor(session, username)
+                      *, fresh: bool = False, floor: int | None = None) -> dict:
+    if floor is None:
+        floor = await player_rating_floor(session, username)
     fresh_base, last_key = _repertoire_keys(username, color, time_class, floor)
 
     async def compute(db: AsyncSession) -> dict:
@@ -119,8 +121,8 @@ async def reviewed_game_request_id(session: AsyncSession, username: str, detail:
     """The one request id a finished review may pay under: the game's own.
 
     The page used to key the reward on a hash of the moves on the board, so
-    every move played off a reviewed game — already analysed, so "reviewed" at
-    once — was a new game worth 15 XP: 39 of them in two minutes, measured.
+    every move played off an already analysed game counted as a new
+    review worth 15 XP: 39 of them in two minutes, measured.
     A review is paid once per game the player owns, imported or played
     against the engine, and nothing else counts as a game.
     """
@@ -187,10 +189,18 @@ def _progress_delta(before: dict, after: dict) -> dict:
 
 
 async def _both_repertoires(session: AsyncSession, username: str) -> list[dict]:
-    return [
-        await _repertoire(session, username, color, DEFAULT_TIME_CLASS)
-        for color in ("black", "white")
-    ]
+    floor = await player_rating_floor(session, username)
+    colors = ("black", "white")
+    # The cache starts each rebuild in its own session when bound to an engine.
+    # A session bound to a single connection must keep its reads sequential.
+    if _async_engine_for(session) is None:
+        return [
+            await _repertoire(session, username, color, DEFAULT_TIME_CLASS, floor=floor)
+            for color in colors
+        ]
+    return await asyncio.gather(*(
+        _repertoire(session, username, color, DEFAULT_TIME_CLASS, floor=floor) for color in colors
+    ))
 
 
 # Three minutes, like Puzzle Rush: long enough to warm up, short enough to replay.
@@ -505,10 +515,13 @@ class ChallengeCheckIn(BaseModel):
 async def check_challenges(payload: ChallengeCheckIn, session: AsyncSession = Depends(get_db)) -> dict:
     """This week's real-game challenges, paying any the imported games have finished."""
     repertoires = await _both_repertoires(session, payload.username)
-    before = await training.profile(session, payload.username, tz=payload.tz, goal=payload.goal)
-    board, xp, paid = await challenges.settle_challenges(
+    board = await challenges.challenge_board(
         session, payload.username, repertoires, tz=payload.tz,
     )
+    if not any(item["done"] and not item["claimed"] for item in board["items"]):
+        return {**board, "xp_gained": 0, "paid": []}
+    before = await training.profile(session, payload.username, tz=payload.tz, goal=payload.goal)
+    xp, paid = await challenges.award_completed_challenges(session, payload.username, board)
     if not xp:
         return {**board, "xp_gained": 0, "paid": []}
     await training.settle_quests(session, payload.username, tz=payload.tz)

@@ -32,12 +32,12 @@ export function ResyncButton({ username }: { username: string }) {
         </Button>
       ) : null}
       {error ? (
-        <span className="muted" style={{ fontSize: 12, color: 'var(--danger)' }}>
+        <span className="muted" style={{ fontSize: 12, color: 'var(--danger-text)' }}>
           {error}
         </span>
       ) : null}
       {status === 'complete' ? (
-        <span className="muted" style={{ fontSize: 12, color: 'var(--success)' }}>
+        <span className="muted" style={{ fontSize: 12, color: 'var(--accent-text)' }}>
           Up to date
         </span>
       ) : null}

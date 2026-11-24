@@ -7,7 +7,8 @@ from typing import Annotated
 from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import BigInteger, Integer, Text, and_, bindparam, func, select, tuple_
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -50,6 +51,7 @@ from app.services.theory import (
     DEFAULT_CANDIDATE_POSITION_LIMIT,
     build_training_line_from_parsed_game,
     build_deviation,
+    build_local_master_data,
     build_seeded_deviation,
     get_local_master_data,
     load_candidate_positions,
@@ -217,14 +219,12 @@ async def find_representative_deviation_games(
             else None
         )
 
-    targets = [target for target in request_targets if target is not None]
+    targets = sorted({target for target in request_targets if target is not None})
 
     if not targets:
         return [{} for _ in request_targets]
 
-    # Rank narrow scalar rows in SQL. Loading ORM Game objects here transfers
-    # every matching game's PGN just to discard all but one example per target.
-    ranked = (
+    matches = (
         select(
             Game.id.label("game_id"),
             Game.played_at,
@@ -238,13 +238,31 @@ async def find_representative_deviation_games(
             ).label("rank"),
         )
         .join(GamePosition, GamePosition.game_id == Game.id)
-        .where(
+    )
+    if session.get_bind().dialect.name == "postgresql":
+        # A relation of targets lets Postgres probe the composite index without
+        # planning a separate bitmap scan for each tuple.
+        position_ids, plies, move_ucis = zip(*targets, strict=True)
+        wanted = func.unnest(
+            bindparam("position_ids", list(position_ids), type_=ARRAY(BigInteger())),
+            bindparam("plies", list(plies), type_=ARRAY(Integer())),
+            bindparam("move_ucis", list(move_ucis), type_=ARRAY(Text())),
+        ).table_valued("position_id", "ply", "move_uci").render_derived()
+        matches = matches.join(
+            wanted,
+            and_(
+                GamePosition.position_id == wanted.c.position_id,
+                GamePosition.ply == wanted.c.ply,
+                GamePosition.move_uci == wanted.c.move_uci,
+            ),
+        )
+    else:
+        matches = matches.where(
             tuple_(GamePosition.position_id, GamePosition.ply, GamePosition.move_uci).in_(
-                list(set(targets))
+                targets
             )
         )
-        .subquery()
-    )
+    ranked = matches.subquery()
     rows = await session.execute(
         select(ranked, Position.fen)
         .join(Position, Position.id == ranked.c.position_id)
@@ -413,8 +431,7 @@ async def theory_deviations(
     limit: Annotated[int, Query(ge=1, le=5_000)] = DEFAULT_CANDIDATE_POSITION_LIMIT,
     session: AsyncSession = Depends(get_db),
 ) -> list[DeviationOut]:
-    # ~0.2s warm and ~0.7s cold, and nothing it reads changes between imports
-    # except master data, so the last list is served while a new one builds.
+    # Serve the last list while refreshed game and master data are compared.
     suffix = f"{color}:{min_games}:{limit}"
 
     async def compute(db: AsyncSession) -> list[dict]:
@@ -447,8 +464,8 @@ async def _find_deviations(
         data_state = master_data_state(position, moves)
         if data_state == "missing":
             continue
-        user_moves = [serialize_user_move(move, color) for move in moves]
-        master_data = get_local_master_data(position, moves)
+        user_top = serialize_user_move(moves[0], color)
+        master_data = build_local_master_data(position, moves)
         master_moves = [
             serialize_master_move(move, color) for move in master_data.get("moves", [])
         ]
@@ -459,14 +476,14 @@ async def _find_deviations(
         )
         deviation = deviation_builder(
             fen=position.fen,
-            user_moves=user_moves,
+            user_moves=[user_top],
             master_moves=master_moves,
             eco=master_data.get("opening", {}).get("eco"),
             opening_name=master_data.get("opening", {}).get("name"),
         )
         if deviation is not None:
             deviations.append(DeviationOut.model_validate(deviation))
-            representative_requests.append((moves, user_moves[0]))
+            representative_requests.append((moves, user_top))
 
     representatives = await find_representative_deviation_games(
         session, representative_requests

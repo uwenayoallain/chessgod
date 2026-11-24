@@ -114,7 +114,7 @@ export function useBoardWorkspace({
           )
         if (result.hadErrors) {
           console.warn(
-            '[chessgod] Book moves partially loaded — theory API returned errors for some positions.',
+            '[chessgod] Book moves partially loaded: the theory API returned errors for some positions.',
           )
         }
       })

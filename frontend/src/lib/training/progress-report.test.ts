@@ -83,7 +83,7 @@ it('delta says which way is good', () => {
   })
   expect(delta(6.45, 5, { lowerIsBetter: true })).toEqual({ text: '↑ 1.5', good: false })
   expect(delta(5, 5, { lowerIsBetter: true })).toEqual({ text: 'same', good: null })
-  expect(delta(5, null, { lowerIsBetter: true })).toEqual({ text: '—', good: null })
+  expect(delta(5, null, { lowerIsBetter: true })).toEqual({ text: '-', good: null })
 })
 
 it('rollingBigErrors averages the last ten games, oldest first', () => {

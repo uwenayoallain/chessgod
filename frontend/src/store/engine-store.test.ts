@@ -6,9 +6,11 @@ import { useAppStore } from './app-store'
 import {
   getEngineThreadCount,
   MAX_ANALYSIS_CACHE_ENTRIES,
+  REVIEW_WARM_MS,
   trimAnalysisCache,
   useEngineStore,
 } from './engine-store'
+import { useSparStore } from './spar-store'
 
 const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -'
 
@@ -155,7 +157,7 @@ describe('engine store persisted analysis hydration', () => {
     useEngineStore.setState({ enabled: true, analysisByFen: {} })
     try {
       // The parent of this decision was studied at depth 30, so grading the
-      // move needs the child at 30 too — a depth-22 result could not be
+      // move needs the child at 30 too: a depth-22 result could not be
       // differenced against it.
       const queued = await useEngineStore
         .getState()
@@ -173,11 +175,21 @@ describe('engine store persisted analysis hydration', () => {
   it('reuses a running review asked for the same positions again', async () => {
     vi.stubGlobal('window', { setTimeout, clearTimeout })
     vi.spyOn(StockfishEngine.prototype, 'init').mockResolvedValue()
-    vi.spyOn(StockfishEngine.prototype, 'stop').mockImplementation(() => {})
+    // A stopped search settles empty, as the real engine's does.
+    const searches = new Map<StockfishEngine, (lines: UCIInfo[] | null) => void>()
+    vi.spyOn(StockfishEngine.prototype, 'stop').mockImplementation(
+      function (this: StockfishEngine) {
+        searches.get(this)?.(null)
+      },
+    )
     const destroy = vi.spyOn(StockfishEngine.prototype, 'destroy').mockImplementation(() => {})
+    const engines = new Set<StockfishEngine>()
     const play = vi
       .spyOn(StockfishEngine.prototype, 'play')
-      .mockImplementation(() => new Promise(() => {}))
+      .mockImplementation(function (this: StockfishEngine) {
+        engines.add(this)
+        return new Promise((resolve) => searches.set(this, resolve))
+      })
     const child = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -'
     useEngineStore.setState({ enabled: true, analysisByFen: {} })
     try {
@@ -194,11 +206,15 @@ describe('engine store persisted analysis hydration', () => {
       expect(play.mock.calls.length).toBe(searches)
       expect(destroy).not.toHaveBeenCalled()
       expect(useEngineStore.getState().replayQueueActive).toBe(true)
-      // A different game is a new review.
+      // A different game is a new review, on the engines the last one used:
+      // they are handed back warm, not destroyed and built again.
+      const before = engines.size
       const other = 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -'
       await useEngineStore.getState().queueReplayAnalysis([other], { depth: 20 })
       await new Promise((resolve) => setTimeout(resolve, 0))
-      expect(destroy).toHaveBeenCalled()
+      expect(play).toHaveBeenLastCalledWith(other, { depth: 20, multiPV: 1, movetime: 4_000 })
+      expect(engines.size).toBe(before)
+      expect(destroy).not.toHaveBeenCalled()
     } finally {
       useEngineStore.getState().stop()
       vi.restoreAllMocks()
@@ -729,6 +745,218 @@ describe('game review and the board', () => {
       expect(analyze).not.toHaveBeenCalled()
     } finally {
       teardown(previousFen)
+    }
+  })
+})
+
+describe('the main engine lent to a game review', () => {
+  const POSITIONS = [
+    'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -',
+    'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -',
+    'rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -',
+    'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -',
+  ]
+  const REPLY = ['e7e5', 'g1f3', 'b8c6', 'f1c4']
+
+  function info(depth: number, pv: string[]): UCIInfo {
+    return {
+      depth,
+      seldepth: null,
+      multipv: 1,
+      score: { type: 'cp', value: 20 },
+      nodes: null,
+      nps: null,
+      time: null,
+      pv,
+    }
+  }
+
+  type Search = { engine: StockfishEngine; fen: string; resolve: (lines: UCIInfo[] | null) => void }
+
+  async function setup() {
+    vi.useFakeTimers()
+    vi.stubGlobal('window', { setTimeout, clearTimeout })
+    vi.stubGlobal('navigator', { hardwareConcurrency: 8 })
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    const inits: StockfishEngine[] = []
+    vi.spyOn(StockfishEngine.prototype, 'init').mockImplementation(
+      async function (this: StockfishEngine) {
+        inits.push(this)
+      },
+    )
+    const pending: Search[] = []
+    const settle = (search: Search, lines: UCIInfo[] | null) => {
+      pending.splice(pending.indexOf(search), 1)
+      search.resolve(lines)
+    }
+    // A stopped search settles empty, as the real engine's does.
+    const stop = vi
+      .spyOn(StockfishEngine.prototype, 'stop')
+      .mockImplementation(function (this: StockfishEngine) {
+        for (const search of pending.filter((candidate) => candidate.engine === this)) {
+          settle(search, null)
+        }
+      })
+    const destroyed: StockfishEngine[] = []
+    vi.spyOn(StockfishEngine.prototype, 'destroy').mockImplementation(
+      function (this: StockfishEngine) {
+        destroyed.push(this)
+      },
+    )
+    const analyze = vi.spyOn(StockfishEngine.prototype, 'analyze').mockImplementation(() => {})
+    const play = vi.spyOn(StockfishEngine.prototype, 'play').mockImplementation(function (
+      this: StockfishEngine,
+      fen: string,
+    ) {
+      return new Promise((resolve) => pending.push({ engine: this, fen, resolve }))
+    })
+    useEngineStore.setState({ enabled: true, analysisByFen: {} })
+    await useEngineStore.getState().init()
+    const main = inits[0]
+    // The worker has loaded the network.
+    useEngineStore.setState({ isReady: true })
+    return { analyze, destroyed, main, pending, play, settle, stop }
+  }
+
+  async function finishAll(
+    pending: Search[],
+    settle: (search: Search, lines: UCIInfo[] | null) => void,
+  ) {
+    for (let round = 0; round < 20 && pending.length; round += 1) {
+      const search = pending.find((candidate) => POSITIONS.includes(candidate.fen))
+      if (!search) break
+      settle(search, [info(20, [REPLY[POSITIONS.indexOf(search.fen)]])])
+      await vi.advanceTimersByTimeAsync(10)
+    }
+  }
+
+  async function teardown() {
+    useSparStore.setState({ status: 'idle' })
+    // Switching off releases every worker and clears every timer.
+    if (useEngineStore.getState().enabled) await useEngineStore.getState().toggle()
+    useEngineStore.setState({ enabled: true, analysisByFen: {}, isReady: false })
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  }
+
+  it('reviews on the main engine, builds fewer workers and never destroys it', async () => {
+    const { destroyed, main, pending, settle } = await setup()
+    try {
+      await useEngineStore.getState().queueReplayAnalysis(POSITIONS, { depth: 20 })
+      await vi.advanceTimersByTimeAsync(10)
+      // Three single-threaded engines' worth of cores: the main engine's two
+      // threads and one worker of the pool's own, where there used to be three
+      // new workers beside an idle main engine.
+      const searching = new Set(pending.map((search) => search.engine))
+      expect(searching.size).toBe(2)
+      expect(searching.has(main)).toBe(true)
+
+      await finishAll(pending, settle)
+      const state = useEngineStore.getState()
+      expect(state.replayQueueActive).toBe(false)
+      expect(POSITIONS.every((fen) => state.analysisByFen[fen])).toBe(true)
+      expect(destroyed).not.toContain(main)
+      expect(useEngineStore.getState().isReady).toBe(true)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('keeps the pool worker warm for the next review, then lets it go', async () => {
+    const { destroyed, main, pending, settle } = await setup()
+    try {
+      await useEngineStore.getState().queueReplayAnalysis(POSITIONS.slice(0, 2), { depth: 20 })
+      await vi.advanceTimersByTimeAsync(10)
+      const worker = pending.find((search) => search.engine !== main)!.engine
+      await finishAll(pending, settle)
+      expect(destroyed).toEqual([])
+
+      // Another game straight after starts on the same two engines.
+      await useEngineStore.getState().queueReplayAnalysis(POSITIONS.slice(2), { depth: 20 })
+      await vi.advanceTimersByTimeAsync(10)
+      expect(new Set(pending.map((search) => search.engine))).toEqual(new Set([main, worker]))
+      await finishAll(pending, settle)
+
+      await vi.advanceTimersByTimeAsync(REVIEW_WARM_MS - 1_000)
+      expect(destroyed).toEqual([])
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(destroyed).toEqual([worker])
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('hands the main engine to the opponent mid-review and finishes on its own workers', async () => {
+    const { main, pending, play, settle } = await setup()
+    try {
+      await useEngineStore.getState().queueReplayAnalysis(POSITIONS, { depth: 20 })
+      await vi.advanceTimersByTimeAsync(10)
+      const workersBefore = new Set(pending.map((search) => search.engine))
+      const bot = useEngineStore.getState().playMove(POSITIONS[0], { depth: 2, multiPV: 8 })
+      await vi.advanceTimersByTimeAsync(10)
+      // The opponent's search is the only one on the main engine.
+      const onMain = pending.filter((search) => search.engine === main)
+      expect(onMain.map((search) => search.fen)).toEqual([POSITIONS[0]])
+      expect(play).toHaveBeenLastCalledWith(POSITIONS[0], { depth: 2, multiPV: 8 })
+      // Its two threads came back to the review as two workers of its own.
+      const workersAfter = new Set(pending.map((search) => search.engine))
+      workersAfter.delete(main)
+      expect(workersAfter.size).toBe(workersBefore.size - 1 + 2)
+
+      settle(onMain[0], [info(2, ['e7e5'])])
+      await expect(bot).resolves.toEqual([info(2, ['e7e5'])])
+      await finishAll(pending, settle)
+      const state = useEngineStore.getState()
+      // The position cut short on the main engine was searched again, not lost.
+      expect(POSITIONS.every((fen) => state.analysisByFen[fen])).toBe(true)
+      expect(state.replayQueueCompleted).toBe(POSITIONS.length)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('does not lend the main engine during a game against it', async () => {
+    const { main, pending } = await setup()
+    useSparStore.setState({ status: 'playing' })
+    try {
+      await useEngineStore.getState().queueReplayAnalysis(POSITIONS, { depth: 20 })
+      await vi.advanceTimersByTimeAsync(10)
+      expect(pending.some((search) => search.engine === main)).toBe(false)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('releases every worker and timer when switched off mid-review', async () => {
+    const { destroyed, main, pending } = await setup()
+    try {
+      await useEngineStore.getState().queueReplayAnalysis(POSITIONS, { depth: 20 })
+      await vi.advanceTimersByTimeAsync(10)
+      const engines = new Set(pending.map((search) => search.engine))
+      await useEngineStore.getState().toggle()
+      await vi.advanceTimersByTimeAsync(10)
+      expect(new Set(destroyed)).toEqual(engines)
+      expect(destroyed).toContain(main)
+      expect(pending).toEqual([])
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      await teardown()
+    }
+  })
+
+  it('drops idle review workers when the library crawl is stopped', async () => {
+    const { destroyed, main, pending, settle } = await setup()
+    try {
+      await useEngineStore.getState().queueReplayAnalysis(POSITIONS.slice(0, 2), { depth: 20 })
+      await vi.advanceTimersByTimeAsync(10)
+      const worker = pending.find((search) => search.engine !== main)!.engine
+      await finishAll(pending, settle)
+      useEngineStore.getState().stopLibraryCrawl()
+      expect(destroyed).toEqual([worker])
+    } finally {
+      await teardown()
     }
   })
 })

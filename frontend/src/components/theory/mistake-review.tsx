@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { PanelSkeleton } from '@/components/ui/panel-skeleton'
@@ -173,20 +174,27 @@ export function MistakeReview({
                 type="button"
               >
                 <div className="workspace-list__title">
-                  <strong title={group.name}>
-                    {isOpen ? '▾ ' : '▸ '}
-                    {group.name}
-                  </strong>
+                  {/* The chevron sits beside the name, not inside it: the name
+                      is a two-line clamp box, which would stack an icon above
+                      the text. */}
+                  <span className="mistake-review__group">
+                    {isOpen ? (
+                      <ChevronDown aria-hidden="true" size={14} />
+                    ) : (
+                      <ChevronRight aria-hidden="true" size={14} />
+                    )}
+                    <strong title={group.name}>{group.name}</strong>
+                  </span>
                   <span className="badge">{group.mistakes.length}</span>
                 </div>
                 <div className="workspace-list__meta">
                   {group.blunders > 0 ? (
-                    <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
+                    <span style={{ color: 'var(--danger-text)', fontWeight: 600 }}>
                       {group.blunders} {group.blunders === 1 ? 'blunder' : 'blunders'}
                     </span>
                   ) : null}
                   {group.mistakesCount > 0 ? (
-                    <span style={{ color: 'var(--warning)' }}>
+                    <span style={{ color: 'var(--warning-text)' }}>
                       {group.mistakesCount} {group.mistakesCount === 1 ? 'mistake' : 'mistakes'}
                     </span>
                   ) : null}

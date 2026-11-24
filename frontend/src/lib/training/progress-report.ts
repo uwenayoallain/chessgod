@@ -9,7 +9,7 @@ function fixed(value: number) {
 }
 
 /**
- * Whether the latest games are better than the ones before, said plainly —
+ * Whether the latest games are better than the ones before, said plainly,
  * including when results and mistakes point different ways, which is exactly
  * when a player should not be told what they want to hear.
  */
@@ -57,13 +57,13 @@ export function describeSinceTraining(progress: TrainingProgress): string | null
   return `Since training began (${since.games.toLocaleString()} games): ${fixed(since.big_errors)} big mistakes a game, ${fixed(before.big_errors)} before.`
 }
 
-/** "↓ 1.4" / "↑ 0.3" / "—": a change and which way is good. */
+/** "↓ 1.4" / "↑ 0.3" / "-": a change and which way is good. */
 export function delta(
   now: number | null | undefined,
   before: number | null | undefined,
   { lowerIsBetter, digits = 1 }: { lowerIsBetter: boolean; digits?: number },
 ): { text: string; good: boolean | null } {
-  if (now == null || before == null) return { text: '—', good: null }
+  if (now == null || before == null) return { text: '-', good: null }
   const diff = now - before
   if (Math.abs(diff) < 10 ** -digits / 2) return { text: 'same', good: null }
   return {
@@ -73,7 +73,7 @@ export function delta(
 }
 
 export function percent(share: number | undefined) {
-  return share == null ? '—' : `${Math.round(share * 100)}%`
+  return share == null ? '-' : `${Math.round(share * 100)}%`
 }
 
 /** The rolling mean of big mistakes a game, oldest first: the trend line's points. */

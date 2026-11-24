@@ -1,7 +1,10 @@
 import { lazy, memo, Suspense, useEffect, useState } from 'react'
 
 import { PageBoundary } from '@/components/ui/page-boundary'
-import { OpeningCourse } from '@/components/training/opening-course'
+// Blunder Check, Habits and the week's scoresheet stay ordinary imports: the
+// Today card reads from all three modules (the habits query, the last-week
+// teaser, the way into Blunder Check), so they are in the main chunk whatever
+// this file does, and a lazy() here would only add a skeleton frame.
 import { BlunderCheck } from '@/components/training/blunder-check'
 import { HabitsCard } from '@/components/training/habits-card'
 import { WeekScoresheet } from '@/components/training/week-scoresheet'
@@ -51,6 +54,12 @@ const WherePointsGo = lazy(() =>
 )
 const ClockCard = lazy(() =>
   import('@/components/training/clock-card').then((m) => ({ default: m.ClockCard })),
+)
+const OpeningCourse = lazy(() =>
+  import('@/components/training/opening-course').then((m) => ({ default: m.OpeningCourse })),
+)
+const StudyGuide = lazy(() =>
+  import('@/components/training/study-guide').then((m) => ({ default: m.StudyGuide })),
 )
 const OpeningRush = lazy(() =>
   import('@/components/training/opening-rush').then((m) => ({ default: m.OpeningRush })),
@@ -254,6 +263,12 @@ const PAGES: { id: string; view: ReviewView; label: string; description: string 
     description: 'Learn your repertoire, then drill it',
   },
   {
+    id: 'review-study',
+    view: 'train',
+    label: 'Playbooks',
+    description: 'Master plans, Chess.com courses, and books matched to your weaknesses',
+  },
+  {
     id: 'review-drills',
     view: 'train',
     label: 'Drills',
@@ -368,8 +383,8 @@ function readStoredPage(view: ReviewView): string {
 
 /**
  * "Review" tab: three views (Train / Progress / Reference), each a row of page
- * chips with exactly one page on screen. A stack of seventeen sections — even
- * grouped, even collapsed — read as a wall of sub-pages to open one by one;
+ * chips with exactly one page on screen. A stack of seventeen sections (even
+ * grouped, even collapsed) read as a wall of sub-pages to open one by one;
  * now you pick what you are looking at and see only that. Nothing was removed.
  * A page mounts (and therefore fetches) only while it is the one showing, and
  * a link to a page (`revealSection`) switches view and page first.
@@ -498,6 +513,13 @@ export const ReviewPanel = memo(function ReviewPanel({
                 {courseSession ? null : <RepertoireCheckCard username={username} />}
                 <OpeningCourse onBegin={onBeginDrill} onPlayOut={onPlayOut} username={username} />
               </>
+            ) : active.id === 'review-study' ? (
+              <StudyGuide
+                onOpenExplore={onOpenExplore}
+                onPlayOut={onPlayOut}
+                timeClass={timeClass}
+                username={username}
+              />
             ) : active.id === 'review-drills' ? (
               <ImprovementTrainer
                 color={color}

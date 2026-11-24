@@ -42,7 +42,7 @@ import { createOutage, formatDuration } from './outage.mjs'
 import { createIdleWait } from './idle.mjs'
 import { createSetAside } from './setaside.mjs'
 import { uploadEvaluations, uploadWithRetry } from './upload.mjs'
-import { enrichTrainerPositions, fetchTrainerFens, trainerFensUrl } from './enrich.mjs'
+import { createMainQueueRecheck, enrichTrainerPositions, fetchTrainerFens, trainerFensUrl } from './enrich.mjs'
 import {
   targetWorkers, createLoadHistory, nextWorkers, parseCpuPressure, pressureLimit,
 } from './pool.mjs'
@@ -57,7 +57,7 @@ const USERNAME = process.env.CRAWL_USERNAME
 const TIME_CLASS = process.env.CRAWL_TIME_CLASS ?? 'rapid_blitz'
 // Not a constant: the server owns the depth a crawl fills to and reports it as
 // `review_depth`. Picking a number here is how this crawler first filled 69
-// positions at depth 18 while the browser was filling at 22 — deep enough to be
+// positions at depth 18 while the browser was filling at 22: deep enough to be
 // stored, too shallow for the browser's coverage query to count, and four plies
 // from its partners, which is past MAX_PAIR_DEPTH_GAP, so none of it could
 // grade anything. CRAWL_MIN_DEPTH overrides only if you mean to.
@@ -231,6 +231,11 @@ const IDLE_MS = Number(process.env.CRAWL_IDLE_MS ?? 60_000)
 // The ceiling an unchanged empty queue's wait doubles up to (idle.mjs).
 const IDLE_MAX_MS = Number(process.env.CRAWL_IDLE_MAX_MS ?? 30 * 60_000)
 const BUSY_MS = Number(process.env.CRAWL_BUSY_MS ?? 30_000)
+// How long an empty main queue is trusted while trainer alternatives are still
+// being searched (enrich.mjs, `createMainQueueRecheck`). Each ask of a finished
+// library cost the backend seconds of Postgres; three minutes keeps new games
+// close behind without asking before every MultiPV round.
+const TRAINER_MAIN_RECHECK_MS = Number(process.env.CRAWL_TRAINER_MAIN_RECHECK_MS ?? 180_000)
 // How often a standing-down crawler re-checks whether it may start again.
 // This used to be BUSY_MS, which is a queue-outage backoff and far too coarse
 // for the thing it was actually gating: the package recovers in well under ten
@@ -536,7 +541,7 @@ const unfinished = createSetAside({
 // Evaluations the server refused to store. Like `unfinished`, these are
 // selection context rather than completed work: without saying so, the queue
 // re-offers a position until it is analysed, and one that can never validate
-// would otherwise be re-searched every batch forever — an engine search plus
+// would otherwise be re-searched every batch forever: an engine search plus
 // two uploads per batch, each batch. Seen in the wild: stale castling rights
 // the engine searches fine and the server's own validator rejects. The queue
 // no longer offers those, so this set is normally empty; it is the defence
@@ -570,6 +575,7 @@ async function probeBackend() {
 // and makes each line state the outage rather than repeat during it.
 const outage = createOutage({ baseMs: BUSY_MS, maxMs: QUEUE_RETRY_MAX_MS })
 const idleWait = createIdleWait({ baseMs: IDLE_MS, maxMs: IDLE_MAX_MS })
+const mainQueueRecheck = createMainQueueRecheck({ recheckMs: TRAINER_MAIN_RECHECK_MS })
 
 async function fetchBatch() {
   const url = new URL('/api/games/unanalyzed-fens', API)
@@ -789,7 +795,11 @@ while (!stopping) {
   }
 
   let batch
-  try {
+  // Trainer alternatives are draining behind an empty main queue: keep at
+  // them without asking the main queue again until its recheck is due.
+  const skipMain = !mainQueueRecheck.shouldPoll()
+  if (skipMain) batch = { fens: [] }
+  else try {
     batch = await fetchBatch()
     // Adopt the server's review depth the first time we see it, so the two
     // crawls cannot fill the library to different standards.
@@ -807,8 +817,10 @@ while (!stopping) {
     await sleep(Math.max(report.delayMs, error.retryAfterMs ?? 0))
     continue
   }
-  const recovered = outage.recover()
-  if (recovered) log(recovered.message)
+  if (!skipMain) {
+    const recovered = outage.recover()
+    if (recovered) log(recovered.message)
+  }
 
   if (batch.fens.length === 0) {
     // Idle engines first fill in the trainers' alternatives, if any want them.
@@ -821,6 +833,9 @@ while (!stopping) {
       quietStreak = 0
     }
     if (enrichment.searched > 0 || stoodDown) {
+      // Only an answer actually fetched starts the interval; a skipped round
+      // leaves it running from the poll that came back empty.
+      if (enrichment.searched > 0 && !skipMain) mainQueueRecheck.markEmpty()
       // Stood down with positions left: they are not marked done, so the next
       // round offers them again once `waitForCapacity` says the machine is
       // free. The short rest keeps a guard that flaps from spinning the loop.
@@ -828,6 +843,10 @@ while (!stopping) {
       idleWait.reset()
       continue
     }
+    // Enrichment ran dry: the main queue is asked again at once, and a round
+    // that skipped it goes back to ask before idling on counts it never read.
+    mainQueueRecheck.clear()
+    if (skipMain) continue
     // Say what is being held back: "nothing queued" while positions are set
     // aside is not the same as a finished library, and reading it as one is
     // how thirty idle hours went unnoticed.
@@ -839,6 +858,7 @@ while (!stopping) {
     continue
   }
   idleWait.reset()
+  mainQueueRecheck.clear()
 
   // One shared queue, every engine taking the next position as it frees up, so
   // a single slow search cannot hold up the others. Nothing here needs a lock:
@@ -904,7 +924,7 @@ while (!stopping) {
 
   // A failed upload is the backend being restarted or briefly unreachable, not
   // the crawl running out of work. Counting it as idle used to end the run for
-  // good after five tries — with exit code 0, so `restart: on-failure` would
+  // good after five tries, with exit code 0, so `restart: on-failure` would
   // not bring it back either. Keep retrying, with a backoff, so a deploy in the
   // middle of a multi-day crawl costs a few minutes instead of the rest of it.
   const stored = await uploadWithRetry(items, {

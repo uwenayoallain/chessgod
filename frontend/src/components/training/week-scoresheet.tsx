@@ -13,10 +13,15 @@ import { habitsLine, ratingLines, weekLabel, weekLine } from '@/lib/training/wee
 
 const DAY = new Intl.DateTimeFormat(undefined, { weekday: 'short' })
 
+const WEEK_OPTIONS = [
+  { back: 1, label: 'Last week' },
+  { back: 0, label: 'This week' },
+] as const
+
 /**
  * A week of real games written up the way a game is: a numbered sheet, one
  * line per game in the order played, the result from White's side, and the
- * training's marks beside it — the book when the game stayed in the
+ * training's marks beside it: the book when the game stayed in the
  * repertoire, the hourglass when the clock was used the way the challenge asks.
  */
 function useWeekSheet(username: string, weeksBack: number, enabled = true) {
@@ -71,11 +76,22 @@ export function WeekScoresheet({ username }: { username: string }) {
   const sheet = query.data
   if (!sheet) return <PanelSkeleton label="Loading your week" rows={6} rowHeight={28} />
   const habits = habitsLine(sheet)
+  // The previous week stays on screen while the chosen one is fetched, so the
+  // pressed toggle and the sheet under it disagree until it lands. Say so: the
+  // eyebrow names the week being loaded and the old sheet is dimmed.
+  const switching = query.isPlaceholderData
+  const chosen = WEEK_OPTIONS.find((option) => option.back === weeksBack) ?? WEEK_OPTIONS[0]
   return (
-    <div className="scoresheet train-card">
+    <div
+      aria-busy={switching || undefined}
+      className="scoresheet train-card"
+      data-switching={switching || undefined}
+    >
       <div className="scoresheet__head">
         <div>
-          <span className="scoresheet__eyebrow">Scoresheet · {weekLabel(sheet)}</span>
+          <span aria-live="polite" className="scoresheet__eyebrow">
+            Scoresheet · {switching ? `Loading ${chosen.label.toLowerCase()}…` : weekLabel(sheet)}
+          </span>
           <p className="train-card__headline">{weekLine(sheet)}</p>
           {ratingLines(sheet).map((line) => (
             <p className="train-card__detail" key={line}>
@@ -84,11 +100,9 @@ export function WeekScoresheet({ username }: { username: string }) {
           ))}
         </div>
         <div aria-label="Week" className="scoresheet__weeks" role="group">
-          {[
-            { back: 1, label: 'Last week' },
-            { back: 0, label: 'This week' },
-          ].map((option) => (
+          {WEEK_OPTIONS.map((option) => (
             <button
+              aria-busy={(switching && weeksBack === option.back) || undefined}
               aria-pressed={weeksBack === option.back}
               className="today-card__goal-option"
               key={option.back}
