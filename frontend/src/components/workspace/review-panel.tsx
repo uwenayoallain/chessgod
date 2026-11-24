@@ -515,6 +515,7 @@ export const ReviewPanel = memo(function ReviewPanel({
               </>
             ) : active.id === 'review-study' ? (
               <StudyGuide
+                onBeginDrill={onBeginDrill}
                 onOpenExplore={onOpenExplore}
                 onPlayOut={onPlayOut}
                 timeClass={timeClass}

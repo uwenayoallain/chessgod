@@ -8,17 +8,23 @@ free modern resources that address their biggest rating leaks.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Integer, Text, bindparam, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.database import _async_engine_for
 from app.models.identity import Username
+from app.schemas.improvement import PointsLostOut
+from app.services.cache import get_shared_cache
 from app.services.habits import build_habits
 from app.services.points_lost import build_points_lost
 from app.services.study_curriculum import PLAYBOOK_BY_ID, PLAYBOOKS, MasterPlaybook
+from app.services.swr import _publish
 
 OPENING_LOOKBACK_DAYS = 365
 MIN_OPENING_GAMES = 10
@@ -54,6 +60,39 @@ WHERE g.username = :username
 ORDER BY g.played_at DESC, g.id DESC
 LIMIT 1
 """
+
+
+# Match the TTLs the Where-your-points-go and Habits endpoints publish with.
+_POINTS_FRESH_SECONDS = 1_800.0
+_HABITS_FRESH_SECONDS = 1_800.0
+_LAST_KNOWN_SECONDS = 86_400.0
+
+
+async def _fresh_or_build(
+    fresh_base: str,
+    last_key: str,
+    compute: Callable[[], Awaitable[Any]],
+    fresh_ttl: float,
+) -> Any:
+    """Reuse a fresh shared-cache entry, else build it and publish it for its own page.
+
+    Only a fresh copy is reused, never the last-known one, so the guide is
+    built from the same evidence a cold build would read. Publication goes
+    through the same generation check as `stale_while_revalidate`, so an
+    upload that lands mid-build cannot be overwritten by an older answer.
+    """
+    cache = get_shared_cache()
+    last_key = last_key.lower()
+    fresh_key = await cache.versioned_key(fresh_base)
+    cached = await cache.get_json(fresh_key)
+    if cached is not None:
+        return cached
+    last_generation = await cache.versioned_key(last_key)
+    value = await compute()
+    await _publish(
+        cache, fresh_base, fresh_key, last_key, last_generation, value, fresh_ttl, _LAST_KNOWN_SECONDS,
+    )
+    return value
 
 
 def serialize_playbook(playbook: MasterPlaybook) -> dict[str, Any]:
@@ -123,37 +162,74 @@ async def build_study_guide(
         bindparam("time_class", type_=Text()),
     )
 
-    opening_rows = (
-        await session.execute(
-            opening_stmt,
-            {
-                "username": username,
-                "time_class": time_class,
-                "min_user_rating": min_user_rating,
-                "since": since,
-            },
-        )
-    ).mappings().all()
+    async def openings(db: AsyncSession) -> tuple[list[Any], Any]:
+        rows = (
+            await db.execute(
+                opening_stmt,
+                {
+                    "username": username,
+                    "time_class": time_class,
+                    "min_user_rating": min_user_rating,
+                    "since": since,
+                },
+            )
+        ).mappings().all()
+        latest = (
+            await db.execute(rating_stmt, {"username": username, "time_class": time_class})
+        ).mappings().first()
+        return list(rows), latest
 
-    latest_row = (
-        await session.execute(
-            rating_stmt,
-            {"username": username, "time_class": time_class},
+    async def points_payload(db: AsyncSession) -> dict:
+        result = await build_points_lost(
+            db,
+            username=username,
+            color="both",
+            time_class=time_class,
+            min_user_rating=min_user_rating,
         )
-    ).mappings().first()
+        return result.model_dump(mode="json")
 
-    points = await build_points_lost(
-        session,
-        username=username,
-        color="both",
-        time_class=time_class,
-        min_user_rating=min_user_rating,
-    )
-    habits_data = await build_habits(
-        session,
-        username=username,
-        min_user_rating=min_user_rating,
-    )
+    async def habits_payload(db: AsyncSession) -> dict:
+        return await build_habits(db, username=username, min_user_rating=min_user_rating)
+
+    # The same cache entries the Where-your-points-go and Habits pages fill, so
+    # whichever page is opened first pays for the build and the other reuses it.
+    points_suffix = f"{username}:v2:both:{time_class}:{min_user_rating}"
+    habits_suffix = f"{username}:{min_user_rating}"
+    points_base = f"improvement:losses:{points_suffix}"
+    points_last = f"improvement:losseslast:{points_suffix}"
+    habits_base = f"improvement:habits:{habits_suffix}"
+    habits_last = f"training:habitslast:{habits_suffix}"
+
+    engine = _async_engine_for(session)
+    if engine is not None and engine.dialect.name == "postgresql":
+        # Each build reads on its own pooled connection: the three are
+        # independent, and together they were ~2s run one after another.
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def on_own_session(build: Callable[[AsyncSession], Awaitable[Any]]) -> Any:
+            async with factory() as db:
+                return await build(db)
+
+        (opening_rows, latest_row), points_data, habits_data = await asyncio.gather(
+            on_own_session(openings),
+            _fresh_or_build(
+                points_base, points_last, lambda: on_own_session(points_payload), _POINTS_FRESH_SECONDS,
+            ),
+            _fresh_or_build(
+                habits_base, habits_last, lambda: on_own_session(habits_payload), _HABITS_FRESH_SECONDS,
+            ),
+        )
+    else:
+        # A session bound to one connection (SQLite in tests) keeps its reads sequential.
+        opening_rows, latest_row = await openings(session)
+        points_data = await _fresh_or_build(
+            points_base, points_last, lambda: points_payload(session), _POINTS_FRESH_SECONDS,
+        )
+        habits_data = await _fresh_or_build(
+            habits_base, habits_last, lambda: habits_payload(session), _HABITS_FRESH_SECONDS,
+        )
+    points = PointsLostOut.model_validate(points_data)
 
     phases_by_key = {p.phase: p for p in points.phases}
     kinds_by_key = {k.key: k for k in points.kinds}

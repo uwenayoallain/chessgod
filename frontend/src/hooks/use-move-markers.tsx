@@ -20,6 +20,60 @@ function uciToSquare(uci: string): string {
   return uci.slice(2, 4)
 }
 
+function sameBoard(a: string, b: string): boolean {
+  return a.split(' ', 4).join(' ') === b.split(' ', 4).join(' ')
+}
+
+/**
+ * A marked square: a ring inside the square's edge over a light tint of the
+ * same colour, both under the piece. The tint is a gradient on its own layer,
+ * so the square's own colour and any last-move highlight still show through.
+ */
+function highlightStyle(color: string): CSSProperties {
+  const tint = `color-mix(in srgb, ${color} 30%, transparent)`
+  return {
+    position: 'absolute',
+    inset: 0,
+    backgroundImage: `linear-gradient(${tint}, ${tint})`,
+    boxShadow: `inset 0 0 0 4px ${color}`,
+    pointerEvents: 'none',
+  }
+}
+
+/**
+ * What the voice is naming right now: a bright ring with a soft inner glow
+ * over a light tint, on its own layer above any trainer mark, so the author's
+ * squares still show through it and come back the moment she moves on.
+ */
+function speechStyle(color: string): CSSProperties {
+  const tint = `color-mix(in srgb, ${color} 26%, transparent)`
+  const glow = `color-mix(in srgb, ${color} 55%, transparent)`
+  return {
+    position: 'absolute',
+    inset: 0,
+    backgroundImage: `radial-gradient(circle, ${tint} 35%, transparent 100%), linear-gradient(${tint}, ${tint})`,
+    boxShadow: `inset 0 0 0 3px ${color}, inset 0 0 14px 4px ${glow}`,
+    pointerEvents: 'none',
+  }
+}
+
+/**
+ * Speech arrows first, then the rest, each from-to drawn once. What the voice
+ * is saying wins a square pair over any arrow already pointing the same way.
+ */
+export function mergeSpeechArrows(speech: BoardArrow[], others: BoardArrow[]): BoardArrow[] {
+  if (!speech.length) return others
+  const seen = new Set<string>()
+  const merged: BoardArrow[] = []
+  for (const arrow of [...speech, ...others]) {
+    const key = `${arrow.startSquare}-${arrow.endSquare}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(arrow)
+  }
+  return merged
+}
+
 /**
  * The grade of the move that produced the position on the board. It is read
  * off the grading of the line leading here, which the move list asks for too
@@ -118,13 +172,15 @@ export function useMoveMarkers(
   const isSolvingDrill = useAppStore((state) => state.drillSolving)
   const trainerArrows = useAppStore((state) => state.trainerArrows)
   const trainerArrowsFen = useAppStore((state) => state.trainerArrowsFen)
+  const trainerHighlights = useAppStore((state) => state.trainerHighlights)
+  const trainerHighlightsFen = useAppStore((state) => state.trainerHighlightsFen)
   const hintSquare = useAppStore((state) => state.hintSquare)
+  const speechHighlights = useAppStore((state) => state.speechHighlights)
+  const speechArrows = useAppStore((state) => state.speechArrows)
   const hintSquareFen = useAppStore((state) => state.hintSquareFen)
   // The hint's ring shows on the question's board alone.
   const hintOn =
-    hintSquare != null &&
-    (hintSquareFen == null ||
-      hintSquareFen.split(' ', 4).join(' ') === currentFen.split(' ', 4).join(' '))
+    hintSquare != null && (hintSquareFen == null || sameBoard(hintSquareFen, currentFen))
       ? hintSquare
       : null
   const sparring = useIsSparring()
@@ -153,6 +209,23 @@ export function useMoveMarkers(
     return buildBookMarkers({ masterMoves: theory?.master_moves, fen: currentFen })
   }, [theory, currentFen, isSolvingDrill, sparring, showAnnotations])
 
+  // A trainer's marked squares, on the board they were drawn for alone.
+  const highlightsBySquare = useMemo(() => {
+    const map = new Map<string, string>()
+    if (!trainerHighlights.length) return map
+    if (trainerHighlightsFen != null && !sameBoard(trainerHighlightsFen, currentFen)) return map
+    for (const mark of trainerHighlights) map.set(mark.square, mark.color)
+    return map
+  }, [currentFen, trainerHighlights, trainerHighlightsFen])
+
+  // What the voice names, lit whatever else is on: lessons are solved with
+  // `drillSolving` set, and the narration is the lesson, not a hint.
+  const spokenBySquare = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const mark of speechHighlights) map.set(mark.square, mark.color)
+    return map
+  }, [speechHighlights])
+
   const markersBySquare = useMemo(() => {
     const map = new Map<string, NonNullable<MoveLabel>>()
     if (showAnnotations && label && lastUci) {
@@ -161,13 +234,11 @@ export function useMoveMarkers(
     return map
   }, [label, lastUci, showAnnotations])
 
-  const customArrows: BoardArrow[] = useMemo(() => {
+  const baseArrows: BoardArrow[] = useMemo(() => {
     // A trainer's own arrows are the lesson; nothing else may compete with them.
     // Arrows scoped to a position apply there alone: the moment the board moves
     // on, they are gone rather than pointing at squares of another game.
-    const arrowsApply =
-      trainerArrowsFen == null ||
-      trainerArrowsFen.split(' ', 4).join(' ') === currentFen.split(' ', 4).join(' ')
+    const arrowsApply = trainerArrowsFen == null || sameBoard(trainerArrowsFen, currentFen)
     if (trainerArrows.length && arrowsApply) return trainerArrows
     // The engine's best move and the opponent's hanging-piece threat are both
     // answers to the question a drill is asking, so neither is drawn while
@@ -177,10 +248,18 @@ export function useMoveMarkers(
     return buildGuidanceArrows({ bestMove, fen: currentFen })
   }, [bestMove, currentFen, isSolvingDrill, sparring, trainerArrows, trainerArrowsFen])
 
+  // The voice's arrows join whatever is drawn, drill or not, as she says them.
+  const customArrows = useMemo(
+    () => mergeSpeechArrows(speechArrows, baseArrows),
+    [baseArrows, speechArrows],
+  )
+
   const squareRenderer = useCallback(
     ({ square, children }: { piece: unknown; square: string; children?: React.ReactNode }) => {
       const label = markersBySquare.get(square)
       const book = bookMarkers[square]
+      const marked = highlightsBySquare.get(square)
+      const spoken = spokenBySquare.get(square)
 
       return (
         <div
@@ -190,6 +269,12 @@ export function useMoveMarkers(
             // The whole square lit, under the piece: the mark chess sites use
             // for "look here". A ring was mostly hidden by the piece on it.
             <div aria-hidden="true" className="board-hint-square" />
+          ) : null}
+          {marked ? (
+            <div aria-hidden="true" data-marked={square} style={highlightStyle(marked)} />
+          ) : null}
+          {spoken ? (
+            <div aria-hidden="true" data-spoken={square} style={speechStyle(spoken)} />
           ) : null}
           {children}
           {label ? (
@@ -210,7 +295,7 @@ export function useMoveMarkers(
         </div>
       )
     },
-    [markersBySquare, bookMarkers, squareStyles, hintOn],
+    [markersBySquare, bookMarkers, squareStyles, hintOn, highlightsBySquare, spokenBySquare],
   )
 
   return {

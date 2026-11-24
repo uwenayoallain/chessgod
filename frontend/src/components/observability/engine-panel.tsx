@@ -40,11 +40,11 @@ export function EnginePanel({ metrics }: Props) {
           </div>
           <div className="stat-card">
             <div className="stat-card__label">Last depth</div>
-            <div className="stat-card__value">{metrics.last_depth ?? '—'}</div>
+            <div className="stat-card__value">{metrics.last_depth ?? '-'}</div>
           </div>
           <div className="stat-card">
             <div className="stat-card__label">MultiPV</div>
-            <div className="stat-card__value">{metrics.last_multi_pv ?? '—'}</div>
+            <div className="stat-card__value">{metrics.last_multi_pv ?? '-'}</div>
           </div>
           <div className="stat-card">
             <div className="stat-card__label">Queue depth (last)</div>

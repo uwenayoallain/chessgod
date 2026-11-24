@@ -90,6 +90,7 @@ services:
       # crawler as a person at the keyboard. Ten minutes matches the crawler's
       # CRAWL_IDLE_AFTER_MS so both agree on when nobody is here.
       CACHE_WARMUP_IDLE_AFTER_SECONDS: ${CACHE_WARMUP_IDLE_AFTER_SECONDS:-600}
+      TTS_CACHE_DIR: ${TTS_CACHE_DIR:-/var/cache/chessgod-tts}
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,6 +100,7 @@ services:
       - "${BACKEND_PORT:-18000}:8000"
     volumes:
       - ./backend:/app
+      - tts_cache:/var/cache/chessgod-tts
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     # The crawler waits on this, not merely on the container existing: its whole
     # job is `GET /api/games/unanalyzed-fens`, so a backend that is up but still
@@ -284,3 +286,4 @@ services:
 volumes:
   frontend_node_modules:
   pgdata:
+  tts_cache:

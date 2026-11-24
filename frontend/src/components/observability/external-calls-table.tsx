@@ -16,8 +16,7 @@ function CooldownBanner({ name, state }: { name: string; state: ExternalState })
       <strong>{name}</strong>
       {inCooldown ? (
         <>
-          {' '}
-          — cooldown until {state.cooldown_until} (status {state.last_status_code ?? '?'})
+          : cooldown until {state.cooldown_until} (status {state.last_status_code ?? '?'})
         </>
       ) : null}
       {state.last_error ? <div className="muted">{state.last_error}</div> : null}
@@ -61,7 +60,7 @@ export function ExternalCallsTable({ calls, state }: Props) {
                 <td>{row.avg_ms.toFixed(1)}ms</td>
                 <td>{row.p95_ms.toFixed(1)}ms</td>
                 <td>{row.max_ms.toFixed(1)}ms</td>
-                <td>{row.last_status_code ?? '—'}</td>
+                <td>{row.last_status_code ?? '-'}</td>
                 <td>{formatRelative(row.last_seen_at)}</td>
               </tr>
             ))}

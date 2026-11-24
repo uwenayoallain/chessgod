@@ -60,6 +60,7 @@ class MasterPlaybook:
     opening_keywords: tuple[str, ...] = ()
     books: tuple[BookReference, ...] = field(default_factory=tuple)
     courses: tuple[CourseResource, ...] = field(default_factory=tuple)
+    course_preset_id: str | None = None
 
 
 PLAYBOOKS: tuple[MasterPlaybook, ...] = (
@@ -68,6 +69,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     # ------------------------------------------------------------------
     MasterPlaybook(
         id="quiet_moves_planning",
+        course_preset_id="middlegame_mastery_white",
         category="middlegame",
         title="Middlegame Plans, Pawn Structures & Prophylaxis",
         subtitle="Turn quiet moves from guesswork into purposeful positional pressure",
@@ -176,6 +178,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="blunder_prevention",
+        course_preset_id="middlegame_mastery_white",
         category="tactics",
         title="Blunder-Check & Loose-Piece Discipline",
         subtitle="Eliminate one-move oversights and undefended-piece drops",
@@ -244,6 +247,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="tactical_punishment",
+        course_preset_id="middlegame_mastery_white",
         category="tactics",
         title="Forcing-Move Calculation & Punishing Mistakes",
         subtitle="Stop handing back winning advantages when your opponent slips",
@@ -312,6 +316,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="defensive_resilience",
+        course_preset_id="defense_endgame_mastery_white",
         category="defense",
         title="Active Defense & Breaking the Second-Mistake Spiral",
         subtitle="Stay composed under pressure and turn bad positions into saves",
@@ -381,6 +386,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="endgame_technique",
+        course_preset_id="defense_endgame_mastery_white",
         category="endgame",
         title="Practical 2000-Level Endgame Technique",
         subtitle="Convert small advantages and hold tough rook and minor-piece endings",
@@ -450,6 +456,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="session_discipline",
+        course_preset_id=None,
         category="habits",
         title="Peak-Form Session Discipline",
         subtitle="Protect your rating from late-session fatigue",
@@ -502,6 +509,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     # ------------------------------------------------------------------
     MasterPlaybook(
         id="italian_white",
+        course_preset_id="italian_giuoco_white",
         category="opening",
         title="Italian Game & Giuoco Pianissimo (White)",
         subtitle="Complete 1800-2000 plans: slow squeeze, knight tour, and timed central breaks",
@@ -597,6 +605,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="italian_black",
+        course_preset_id="scotch_kings_gambit_black",
         category="opening",
         title="Defending the Italian & Two Knights (Black)",
         subtitle="Stay active against Giuoco Piano, Albin/Greco lines, and the Knight Attack",
@@ -673,6 +682,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="scotch_black",
+        course_preset_id="scotch_kings_gambit_black",
         category="opening",
         title="Neutralizing the Scotch Game (Black)",
         subtitle="Fix the 5.Qxd4 trap and counterattack White's open center cleanly",
@@ -749,6 +759,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="kings_gambit_black",
+        course_preset_id="scotch_kings_gambit_black",
         category="opening",
         title="Dismantling the King's Gambit (Black)",
         subtitle="Counter-strike the center with ...d5 instead of defending passively",
@@ -823,6 +834,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="qgd_vs_d4_black",
+        course_preset_id="qgd_vs_d4_black",
         category="opening",
         title="Classical Queen's Gambit Declined vs 1.d4 & London (Black)",
         subtitle="Replace shaky ...Nc6 setups with the Carlsbad & classical 1...d5 2...e6 backbone",
@@ -915,6 +927,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="london_white",
+        course_preset_id="london_aggressive_white",
         category="opening",
         title="Modern Aggressive London System (White)",
         subtitle="Move past autopilot setups into Ne5 outposts, e4 breaks, and kingside attacks",
@@ -1010,6 +1023,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="sicilian_white",
+        course_preset_id="anti_sicilian_caro_white",
         category="opening",
         title="Anti-Sicilian Structures: Rossolimo & Closed Sicilian (White)",
         subtitle="Control 1.e4 c5 with clear structural plans instead of getting out-tacticked",
@@ -1093,6 +1107,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="caro_kann_white",
+        course_preset_id="anti_sicilian_caro_white",
         category="opening",
         title="Playing Against the Caro-Kann (White)",
         subtitle="Master the Exchange Carlsbad minority attack and Advance space plans",
@@ -1170,6 +1185,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="french_white",
+        course_preset_id="anti_sicilian_caro_white",
         category="opening",
         title="French Defense Structures & Pawn Chains (White)",
         subtitle="Exploit space and Black's bad c8 bishop without overextending d4",
@@ -1246,6 +1262,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="scandinavian_white",
+        course_preset_id="anti_sicilian_caro_white",
         category="opening",
         title="Punishing the Scandinavian Defense (White)",
         subtitle="Always take 2.exd5! and convert your free lead in development",
@@ -1311,6 +1328,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="pirc_modern_white",
+        course_preset_id="anti_sicilian_caro_white",
         category="opening",
         title="Crushing the Pirc & Modern Defense (White)",
         subtitle="Use the 150 Attack (Be3-Qd2-Bh6) to neutralize the g7 bishop and storm h4-h5",
@@ -1386,6 +1404,7 @@ PLAYBOOKS: tuple[MasterPlaybook, ...] = (
     ),
     MasterPlaybook(
         id="ruy_lopez_e4_e5",
+        course_preset_id="italian_giuoco_white",
         category="opening",
         title="Ruy Lopez & Classical 1.e4 e5 Mastery",
         subtitle="Master slow tension, the d4 break, and flank maneuvering",

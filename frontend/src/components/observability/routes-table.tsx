@@ -13,7 +13,7 @@ function StatusBucketBar({
   buckets: StatusBuckets | undefined
   total: number
 }) {
-  if (!buckets || total === 0) return <span className="muted">—</span>
+  if (!buckets || total === 0) return <span className="muted">-</span>
   const candidates: Array<{ key: keyof StatusBuckets; color: string; count: number }> = [
     { key: '2xx', color: 'var(--success, #10b981)', count: buckets['2xx'] ?? 0 },
     { key: '3xx', color: 'var(--accent, #3b82f6)', count: buckets['3xx'] ?? 0 },

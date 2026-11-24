@@ -58,6 +58,31 @@ describe('useMoveMarkers squareRenderer', () => {
     expect(square.style.position).toBe('relative')
   })
 
+  it("paints a trainer's marked square on its own board and nowhere else", () => {
+    const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+    act(() => {
+      useAppStore.getState().loadPosition(fen)
+      useAppStore
+        .getState()
+        .setTrainerHighlights([{ square: 'e4', color: 'rgb(214, 60, 45)' }], fen)
+    })
+    const { container, unmount } = render(withQueryClient(<Harness styles={{}} />))
+    const mark = container.querySelector<HTMLElement>('[data-marked="e4"]')
+    expect(mark?.style.boxShadow).toContain('rgb(214, 60, 45)')
+    expect(mark?.style.pointerEvents).toBe('none')
+    unmount()
+
+    // Another board: the mark does not follow the player there.
+    act(() => useAppStore.getState().pushPosition(`${fen.split(' ')[0]} b KQkq - 0 1`))
+    const moved = render(withQueryClient(<Harness styles={{}} />))
+    expect(moved.container.querySelector('[data-marked]')).toBeNull()
+    moved.unmount()
+
+    // A new tree clears them outright.
+    act(() => useAppStore.getState().loadPosition(fen))
+    expect(useAppStore.getState().trainerHighlights).toEqual([])
+  })
+
   it('leaves squares with no style of their own alone', () => {
     const { container } = render(withQueryClient(<Harness styles={{}} />))
 
@@ -206,6 +231,86 @@ describe('guidance arrows', () => {
     useSparStore.setState({ status: 'playing' })
     expect(arrowsDrawn()).toEqual([])
     useSparStore.setState({ status: 'idle' })
+  })
+
+  it('draws what the voice names during a lesson, ahead of the trainer arrows', () => {
+    const gold = 'rgba(245, 184, 46, 0.92)'
+    const blue = 'rgba(56, 152, 236, 0.88)'
+    act(() => {
+      useAppStore.getState().loadPosition(AFTER_E4)
+      useAppStore.getState().setDrillSolving(true)
+      useAppStore.getState().setTrainerArrows([
+        { startSquare: 'g8', endSquare: 'f6', color: 'green' },
+        { startSquare: 'd7', endSquare: 'd5', color: 'green' },
+      ])
+      useAppStore.getState().setSpeechOverlay(
+        [],
+        [
+          { startSquare: 'd7', endSquare: 'd5', color: blue },
+          { startSquare: 'e7', endSquare: 'e5', color: gold },
+        ],
+      )
+    })
+    expect(arrowsDrawn()).toEqual([
+      { startSquare: 'd7', endSquare: 'd5', color: blue },
+      { startSquare: 'e7', endSquare: 'e5', color: gold },
+      { startSquare: 'g8', endSquare: 'f6', color: 'green' },
+    ])
+
+    act(() => useAppStore.getState().setSpeechOverlay([], []))
+    expect(arrowsDrawn()).toEqual([
+      { startSquare: 'g8', endSquare: 'f6', color: 'green' },
+      { startSquare: 'd7', endSquare: 'd5', color: 'green' },
+    ])
+    act(() => {
+      useAppStore.getState().setTrainerArrows([])
+      useAppStore.getState().setDrillSolving(false)
+    })
+  })
+})
+
+describe('speech marks', () => {
+  it('lights the square the voice names over a trainer mark, and leaves with the board', () => {
+    const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+    act(() => {
+      useAppStore.getState().loadPosition(fen)
+      useAppStore.getState().setDrillSolving(true)
+      useAppStore
+        .getState()
+        .setTrainerHighlights([{ square: 'e4', color: 'rgb(21, 120, 60)' }], fen)
+      useAppStore
+        .getState()
+        .setSpeechOverlay([{ square: 'e4', color: 'rgba(245, 184, 46, 0.92)' }], [])
+    })
+    const { container, unmount } = render(withQueryClient(<Harness styles={{}} />))
+    // Both layers: the author's mark under, the voice's ring on top of it.
+    const marked = container.querySelector<HTMLElement>('[data-marked="e4"]')
+    const spoken = container.querySelector<HTMLElement>('[data-spoken="e4"]')
+    expect(marked?.style.boxShadow).toContain('rgb(21, 120, 60)')
+    expect(spoken?.style.boxShadow).toContain('rgba(245, 184, 46, 0.92)')
+    expect(spoken?.style.pointerEvents).toBe('none')
+    expect(marked?.compareDocumentPosition(spoken!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    unmount()
+
+    act(() => useAppStore.getState().loadPosition(fen))
+    expect(useAppStore.getState().speechHighlights).toEqual([])
+    act(() => useAppStore.getState().setDrillSolving(false))
+  })
+
+  it('is cleared by every board that replaces the tree', () => {
+    const mark = [{ square: 'd4', color: 'gold' }]
+    const arrow = [{ startSquare: 'd2', endSquare: 'd4', color: 'gold' }]
+    const actions = [
+      () => useAppStore.getState().loadReplay([]),
+      () => useAppStore.getState().clearLoadedLine(),
+      () => useAppStore.getState().resetToStart(),
+    ]
+    for (const replace of actions) {
+      act(() => useAppStore.getState().setSpeechOverlay(mark, arrow))
+      act(replace)
+      expect(useAppStore.getState().speechHighlights).toEqual([])
+      expect(useAppStore.getState().speechArrows).toEqual([])
+    }
   })
 })
 

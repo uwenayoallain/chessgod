@@ -32,7 +32,7 @@ export function SlowRequestsTable({ rows, onSelectRequestId }: Props) {
                 <td className="mono">
                   {row.method} {row.path}
                 </td>
-                <td>{row.status_code ?? '—'}</td>
+                <td>{row.status_code ?? '-'}</td>
                 <td>{row.duration_ms.toFixed(1)}ms</td>
                 <td>
                   {row.query_count ?? 0}
@@ -48,7 +48,7 @@ export function SlowRequestsTable({ rows, onSelectRequestId }: Props) {
                       {row.request_id.slice(0, 8)}…
                     </button>
                   ) : (
-                    '—'
+                    '-'
                   )}
                 </td>
               </tr>

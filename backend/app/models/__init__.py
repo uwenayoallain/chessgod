@@ -14,6 +14,7 @@ from app.models.position_outcome import PositionOutcome
 from app.models.position_move import PositionMove
 from app.models.repertoire_mark import RepertoireMark
 from app.models.sparring import SparringGame, SparringMistake
+from app.models.study_course import StudyChapter, StudyCourse
 from app.models.training import LineMoveProgress, TrainingEvent
 
 __all__ = [
@@ -34,5 +35,7 @@ __all__ = [
     "RepertoireMark",
     "SparringGame",
     "SparringMistake",
+    "StudyChapter",
+    "StudyCourse",
     "TrainingEvent",
 ]

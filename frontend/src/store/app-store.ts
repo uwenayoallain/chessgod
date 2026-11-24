@@ -64,7 +64,7 @@ function generateNodeId(): string {
 /**
  * `lastUci` records the move that produced this position without adding it to
  * the line. A drill jumps straight to a position, so there is no parent node to
- * highlight from — but the player still needs to see the move they are
+ * highlight from, but the player still needs to see the move they are
  * answering. `san` stays null so the root is never counted as a played move.
  */
 function createRootNode(fen = STARTING_FEN, lastUci: string | null = null): MoveNode {
@@ -79,10 +79,16 @@ function createRootNode(fen = STARTING_FEN, lastUci: string | null = null): Move
   }
 }
 
+/** A square a trainer marks on purpose, as a study author's `[%csl]` does. */
+export type BoardHighlight = { square: string; color: string }
+
 function clearScopedArrows(state: {
   trainerArrowsFen: string | null
   trainerArrows: BoardArrow[]
+  trainerHighlights: BoardHighlight[]
   hintSquare: string | null
+  speechHighlights: BoardHighlight[]
+  speechArrows: BoardArrow[]
 }) {
   // Browse arrows (scoped to a position) die with the tree they were drawn
   // for; a trainer's unscoped arrows are its own to manage. This is what stops
@@ -94,7 +100,19 @@ function clearScopedArrows(state: {
       ? { trainerArrows: [] as BoardArrow[], trainerArrowsFen: null }
       : {}),
     ...(state.hintSquare != null ? { hintSquare: null, hintSquareFen: null } : {}),
+    // Marked squares belong to the board they were drawn on, scoped or not.
+    ...(state.trainerHighlights.length
+      ? { trainerHighlights: [] as BoardHighlight[], trainerHighlightsFen: null }
+      : {}),
+    ...clearSpeech(state),
   }
+}
+
+/** What the voice is pointing at never follows the player onto another board. */
+function clearSpeech(state: { speechHighlights: BoardHighlight[]; speechArrows: BoardArrow[] }) {
+  return state.speechHighlights.length || state.speechArrows.length
+    ? { speechHighlights: [] as BoardHighlight[], speechArrows: [] as BoardArrow[] }
+    : {}
 }
 
 function pathToRoot(nodes: Record<string, MoveNode>, nodeId: string): MoveNode[] {
@@ -146,14 +164,24 @@ type AppState = {
   // browse surfaces (a mistake row, a deviation row) scope theirs so a stale
   // arrow can never follow the player onto another position.
   trainerArrowsFen: string | null
+  // Squares a trainer marks with a coloured ring (a study's `[%csl]`). Scoped
+  // to a position like the arrows, and cleared whenever the tree is replaced.
+  trainerHighlights: BoardHighlight[]
+  trainerHighlightsFen: string | null
   // A square a trainer's hint points at ("look at the knight on f3"), drawn as
   // a ring on the board. Scoped to its position like a browse arrow, so it is
   // gone the moment the board leaves the question it belongs to.
   hintSquare: string | null
   hintSquareFen: string | null
+  // What the narrating voice is talking about right now ("the knight to f5"),
+  // lit and drawn on the board while she says it. Written by `lib/speech.ts`
+  // only when the spoken cue changes. Not hidden while a drill or lesson is
+  // being solved: it is the lesson. Cleared with the tree.
+  speechHighlights: BoardHighlight[]
+  speechArrows: BoardArrow[]
   // Bumped whenever the move tree is replaced wholesale (a game, a drill, an
-  // opening or a cleared board). Anything that owns the current line — a
-  // sparring game — compares it to know its line is gone.
+  // opening or a cleared board). Anything that owns the current line (a
+  // sparring game) compares it to know its line is gone.
   treeEpoch: number
 
   setUsername: (username: string) => void
@@ -175,7 +203,9 @@ type AppState = {
   clearLoadedLine: () => void
   setDrillSolving: (value: boolean) => void
   setTrainerArrows: (arrows: BoardArrow[], forFen?: string | null) => void
+  setTrainerHighlights: (highlights: BoardHighlight[], forFen?: string | null) => void
   setHintSquare: (square: string | null, forFen?: string | null) => void
+  setSpeechOverlay: (highlights: BoardHighlight[], arrows: BoardArrow[]) => void
   /**
    * Show a position that may already be in the loaded line. Jumping to the
    * existing node keeps the game, its move list and its annotations; only a
@@ -263,8 +293,12 @@ export const useAppStore = create<AppState>((set, get) => {
     drillSolving: false,
     trainerArrows: [],
     trainerArrowsFen: null,
+    trainerHighlights: [],
+    trainerHighlightsFen: null,
     hintSquare: null,
     hintSquareFen: null,
+    speechHighlights: [],
+    speechArrows: [],
     treeEpoch: 0,
     ...initialCompat,
 
@@ -396,6 +430,24 @@ export const useAppStore = create<AppState>((set, get) => {
     setDrillSolving: (value) => set({ drillSolving: value }),
     setTrainerArrows: (arrows, forFen = null) =>
       set({ trainerArrows: arrows, trainerArrowsFen: forFen }),
+    setTrainerHighlights: (highlights, forFen = null) =>
+      set({
+        trainerHighlights: highlights,
+        trainerHighlightsFen: highlights.length ? forFen : null,
+      }),
+    setSpeechOverlay: (highlights, arrows) => {
+      const state = get()
+      // Clearing a board with nothing on it writes nothing.
+      if (
+        !highlights.length &&
+        !arrows.length &&
+        !state.speechHighlights.length &&
+        !state.speechArrows.length
+      ) {
+        return
+      }
+      set({ speechHighlights: highlights, speechArrows: arrows })
+    },
     setHintSquare: (square, forFen = null) =>
       set({ hintSquare: square, hintSquareFen: square ? forFen : null }),
 
@@ -526,12 +578,16 @@ export const useAppStore = create<AppState>((set, get) => {
     resetToStart: () => {
       const { nodes, mainLine } = get()
       const compat = deriveCompat(nodes, ROOT_ID, mainLine)
-      set({
+      set((state) => ({
         currentNodeId: ROOT_ID,
         currentFen: nodes[ROOT_ID]?.fen ?? STARTING_FEN,
         analysisRequested: false,
+        ...(state.trainerHighlights.length
+          ? { trainerHighlights: [] as BoardHighlight[], trainerHighlightsFen: null }
+          : {}),
+        ...clearSpeech(state),
         ...compat,
-      })
+      }))
     },
 
     flipBoard: () =>

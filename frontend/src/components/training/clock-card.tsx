@@ -76,7 +76,7 @@ export function ClockCard({ username }: { username: string }) {
             <StatTile
               label="Clock left when you lose"
               note={`of ${formatClock(report.initial_seconds!)}${report.losses ? ` · median of ${report.losses.toLocaleString()} losses` : ''}`}
-              value={report.left_in_losses != null ? formatClock(report.left_in_losses) : '—'}
+              value={report.left_in_losses != null ? formatClock(report.left_in_losses) : '-'}
             />
             <StatTile
               label="A big mistake takes"
@@ -85,7 +85,7 @@ export function ClockCard({ username }: { username: string }) {
                   ? `with\u00a0${formatClock(report.mistake_left)}\u00a0left`
                   : undefined
               }
-              value={report.mistake_think != null ? `${Math.round(report.mistake_think)}s` : '—'}
+              value={report.mistake_think != null ? `${Math.round(report.mistake_think)}s` : '-'}
             />
             <StatTile
               label="Mistakes with half the clock left"

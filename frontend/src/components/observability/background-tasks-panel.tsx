@@ -38,17 +38,17 @@ export function BackgroundTasksPanel({ tasks }: Props) {
                     task.last_status === 'error' ? 'admin-observability__danger-text' : undefined
                   }
                 >
-                  {task.last_status ?? '—'}
+                  {task.last_status ?? '-'}
                 </td>
                 <td>
-                  {task.last_duration_ms != null ? `${task.last_duration_ms.toFixed(0)}ms` : '—'}
+                  {task.last_duration_ms != null ? `${task.last_duration_ms.toFixed(0)}ms` : '-'}
                 </td>
                 <td>{formatRelative(task.last_finished_at)}</td>
                 <td
                   className="muted admin-observability__truncate-cell"
                   title={task.last_error ?? undefined}
                 >
-                  {task.last_error ?? '—'}
+                  {task.last_error ?? '-'}
                 </td>
               </tr>
             ))}

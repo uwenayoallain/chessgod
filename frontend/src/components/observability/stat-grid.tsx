@@ -60,13 +60,13 @@ export function StatGrid({ snapshot }: Props) {
       />
       <StatCard
         label="Event-loop lag"
-        value={lag == null ? '—' : `${lag.toFixed(2)}ms`}
+        value={lag == null ? '-' : `${lag.toFixed(2)}ms`}
         tone={lagTone}
         sub={`Last sample ${formatRelative(runtime.system.event_loop_lag_sampled_at)}`}
       />
       <StatCard
         label="Process RSS / CPU"
-        value={rss == null ? '—' : `${rss.toFixed(0)} MB`}
+        value={rss == null ? '-' : `${rss.toFixed(0)} MB`}
         sub={[
           ...(cpu == null ? [] : [`CPU ${cpu.toFixed(1)}%`]),
           `Sampled ${formatRelative(runtime.system.process.sampled_at)}`,

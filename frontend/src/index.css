@@ -10438,6 +10438,16 @@ button.sparring__game:disabled {
   line-height: 1.5;
 }
 
+.study-playbook__lead {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.study-playbook__lead > .study-playbook__summary {
+  flex: 1 1 auto;
+}
+
 .study-playbook__tabiya {
   margin: 0;
   font-size: 0.8rem;
@@ -10578,4 +10588,386 @@ button.sparring__game:disabled {
 .study-books p {
   margin: 2px 0 0;
   font-size: 0.8rem;
+}
+
+/* A playbook's course: progress, chapters and lines, trained on the board. */
+.study-chapters {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.study-course__meta {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.study-trainer__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.study-block__toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.study-block__toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.study-course-due {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning-text);
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.study-course-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.study-course-meter__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.study-trainer__error {
+  margin: 0;
+  color: var(--danger-text);
+  font-size: 0.82rem;
+}
+
+.study-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.study-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.study-line__text {
+  display: flex;
+  flex: 1 1 10rem;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.study-line__title {
+  font-size: 0.84rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.study-line__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.study-line__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.study-line-status {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.study-line-status[data-status='learning'] {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.study-line-status[data-status='due'] {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning-text);
+}
+
+.study-line-status[data-status='mastered'] {
+  background: color-mix(in srgb, var(--reward) 22%, transparent);
+  color: var(--text);
+}
+
+.study-trainer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.study-trainer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.study-trainer__mode {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--surface);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.study-trainer[data-mode='learn'] .study-trainer__mode {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.study-trainer__title {
+  font-size: 0.9rem;
+}
+
+.study-trainer__course {
+  margin-top: -0.4rem;
+  font-size: 0.76rem;
+}
+
+.study-trainer__prompt,
+.study-trainer__finish {
+  display: flex;
+  min-height: 5.5rem;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.study-trainer__finish .result-rank {
+  grid-template-columns: repeat(8, minmax(0, 1.7rem));
+  max-width: none;
+}
+
+.study-trainer__note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding: 0.4rem 0.55rem;
+  border-left: 3px solid var(--accent-edge);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
+.study-trainer__note > svg {
+  flex: 0 0 auto;
+  margin-top: 0.15rem;
+}
+
+.study-trainer__note p,
+.study-trainer__why,
+.study-trainer__score {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.study-trainer__note strong {
+  color: var(--text);
+}
+
+.study-trainer__note > p {
+  flex: 1 1 auto;
+}
+
+.study-trainer__why {
+  color: var(--text);
+}
+
+.study-trainer__score {
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.study-trainer__review {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.study-trainer__steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.study-trainer__step {
+  padding: 0.1em 0.4em;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.study-trainer__step[data-side='opponent'] {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.study-trainer__step:hover,
+.study-trainer__step:focus-visible {
+  background: var(--surface-3, rgba(0, 0, 0, 0.05));
+}
+
+/* The move whose comment and marks are on the board. */
+.study-trainer__step[aria-current='step'] {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.study-trainer__stepper {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.study-trainer__xp {
+  margin-left: 0.5rem;
+  color: var(--reward);
+  font-weight: 700;
+}
+
+/* Play / Pause for one explanation, read aloud. */
+.speak-btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  min-width: 1.9rem;
+  height: 1.9rem;
+  padding: 0 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.speak-btn--compact {
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0 0.3rem;
+  vertical-align: middle;
+}
+
+/* Play / Pause, with Start over beside it while paused. */
+.speak-group {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.25rem;
+  vertical-align: middle;
+}
+
+.line-trainer__ask .speak-group {
+  margin-left: 0.4rem;
+}
+
+.speak-btn:hover:not(:disabled),
+.speak-btn[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.speak-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Lessons read each new explanation aloud while this is on. */
+.study-trainer__autoread {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.study-trainer__autoread[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .speak-btn,
+  .study-trainer__autoread {
+    transition: none;
+  }
 }
